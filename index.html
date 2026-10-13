@@ -79,6 +79,20 @@
             </label>
             <div id="traffic-legend"></div>
             <div id="traffic-status" class="traffic-status"></div>
+            <details class="relay" id="relay">
+              <summary>Flight relay on this computer</summary>
+              <p>
+                The free flight feeds refuse the Power Globe API's cloud servers, but answer a home connection. Run
+                <code>node relay/relay.mjs</code> in the Power Globe folder on this computer, then choose Use.
+              </p>
+              <form class="relay-form" id="relay-form">
+                <label class="visually-hidden" for="relay-url">Relay address</label>
+                <input id="relay-url" type="url" placeholder="http://localhost:8787" value="http://localhost:8787" />
+                <button type="submit">Use</button>
+                <button type="button" id="relay-off" hidden>Stop</button>
+              </form>
+              <p class="relay-status" id="relay-status" aria-live="polite"></p>
+            </details>
           </section>
         </div>
       </div>

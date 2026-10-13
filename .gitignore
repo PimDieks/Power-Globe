@@ -5,3 +5,5 @@ dist/
 .DS_Store
 public/data/satellites/
 public/data/api/
+relay/credentials.json
+credentials.json

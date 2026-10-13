@@ -9,7 +9,7 @@ import { AircraftStore, estimatePosition, fromAdsb, fromOpenSky } from './aircra
 import { aircraftLayer, orbitLine, satelliteLayer, selectionRing } from './trafficlayer.js';
 import { EARTH_RADIUS_KM, orbitClass, orbitPath, parseTle, periodMinutes, satellitePosition, toGeodetic, toSatrec, tleEpoch } from './orbits.js';
 import { aircraftDetailsHtml, aircraftName, satelliteDetailsHtml } from './trafficview.js';
-import { PROXY_URL, explain } from './api.js';
+import { PROXY_URL, explain, trafficServers } from './api.js';
 
 const OPENSKY_URL = 'https://opensky-network.org/api/states/all?extended=1';
 export const ADSB_PROVIDERS = [
@@ -96,6 +96,12 @@ function browserReason(err) {
   if (err.status) return `answered ${err.status}`;
   if (err.name === 'TimeoutError') return 'timed out';
   return /failed to fetch|networkerror|load failed/i.test(err.message) ? 'blocked' : err.message;
+}
+
+// Why the relay or the Power Globe API did not answer, as "<name>: <reason>".
+function serverReason(server, err) {
+  if (err.status || server.name !== 'your relay') return `${server.name}: ${err.message}`;
+  return `${server.name}: not reachable (is relay.mjs running?)`;
 }
 
 async function fetchJson(url) {
@@ -205,6 +211,8 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   let nextMilitary = 0;
   let nextArea = 0;
   let lastArea = null;
+  // Bumped by retry(), so loads already under way do not hold up or overwrite new ones.
+  let generation = 0;
   const inFlight = new Set();
   let shown = [];
   // Bumped when new aircraft data arrives or the toggles change, to rebuild the shown list.
@@ -221,15 +229,16 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
 
   // ADS-B Exchange style feeds: the one that worked last, else the next.
   async function fromProviders(urlFor, proxyPath) {
-    // The Power Globe API asks the feeds server-side; most feeds do not answer web pages.
-    let proxyError = null;
-    if (PROXY_URL) {
+    // The relay or the Power Globe API asks the feeds server-side; most feeds do not answer
+    // web pages.
+    const serverErrors = [];
+    for (const server of trafficServers()) {
       try {
-        const { source, data } = await fetchJson(`${PROXY_URL}${proxyPath}`);
-        return { data, name: source };
+        const { source, data } = await fetchJson(`${server.url}${proxyPath}`);
+        return { data, name: server.name === 'your relay' ? `${source} via your relay` : source };
       } catch (err) {
         console.error(err);
-        proxyError = err;
+        serverErrors.push(serverReason(server, err));
       }
     }
     const failures = [];
@@ -244,16 +253,20 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
       }
     }
     // What the API and this browser were each told, so it is clear which way is blocked.
-    throw new Error([proxyError && `Power Globe API: ${proxyError.message}`, `from this browser: ${failures.join(', ')}`].filter(Boolean).join('; '));
+    throw new Error([...serverErrors, `from this browser: ${failures.join(', ')}`].join('; '));
   }
 
+  // Runs `task` unless the same load is already running. A load started before retry() still
+  // finishes, but `fresh()` then says its result is out of date and it changes nothing.
   async function once(key, task) {
-    if (inFlight.has(key)) return;
-    inFlight.add(key);
+    const gen = generation;
+    const slot = `${key}:${gen}`;
+    if (inFlight.has(slot)) return;
+    inFlight.add(slot);
     try {
-      await task();
+      await task(() => gen === generation);
     } finally {
-      inFlight.delete(key);
+      inFlight.delete(slot);
       renderStatus();
     }
   }
@@ -269,38 +282,45 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   const timeText = () => new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 
   async function openSky() {
-    let proxyError = null;
-    if (PROXY_URL) {
+    const serverErrors = [];
+    let status;
+    for (const server of trafficServers()) {
       try {
-        return (await fetchJson(`${PROXY_URL}/flights/global`)).data;
+        const { data } = await fetchJson(`${server.url}/flights/global`);
+        return { data, via: server.name };
       } catch (err) {
         console.error(err);
-        proxyError = err;
+        serverErrors.push(serverReason(server, err));
+        status ??= err.status;
       }
     }
     try {
-      return await fetchJson(OPENSKY_URL);
+      return { data: await fetchJson(OPENSKY_URL), via: null };
     } catch (err) {
-      if (!proxyError) throw err;
-      const reported = new Error(`Power Globe API: ${proxyError.message}; from this browser: OpenSky ${browserReason(err)}`);
-      reported.status = err.status === 429 ? 429 : proxyError.status;
+      if (!serverErrors.length) throw err;
+      const reported = new Error(`${serverErrors.join('; ')}; from this browser: OpenSky ${browserReason(err)}`);
+      reported.status = err.status === 429 ? 429 : status;
       throw reported;
     }
   }
 
   function loadGlobal() {
-    return once('global', async () => {
+    return once('global', async (fresh) => {
       try {
-        const list = fromOpenSky(await openSky());
-        addAircraft(list, 'OpenSky Network');
+        const { data, via } = await openSky();
+        if (!fresh()) return;
+        const list = fromOpenSky(data);
+        const name = via === 'your relay' ? 'OpenSky Network via your relay' : 'OpenSky Network';
+        addAircraft(list, name);
         nextGlobal = Date.now() + GLOBAL_MS;
-        status.flights = `Worldwide from OpenSky Network, ${timeText()}`;
+        status.flights = `Worldwide from ${name}, ${timeText()}`;
         if (!announcedFlights) {
           announcedFlights = true;
           announce?.(`${list.length.toLocaleString()} flights shown.`);
         }
       } catch (err) {
         console.error(err);
+        if (!fresh()) return;
         const limited = err.status === 429;
         nextGlobal = Date.now() + (limited ? GLOBAL_LIMIT_PAUSE_MS : GLOBAL_RETRY_MS);
         status.flights = limited
@@ -313,15 +333,17 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   function loadArea(pov) {
     const center = { lat: +pov.lat.toFixed(2), lng: +pov.lng.toFixed(2) };
     const nm = areaRadiusNm(pov.altitude);
-    return once('area', async () => {
+    return once('area', async (fresh) => {
       try {
         const { data, name } = await fromProviders((p) => p.area(center.lat, center.lng, nm), `/flights/area?lat=${center.lat}&lon=${center.lng}&nm=${nm}`);
+        if (!fresh()) return;
         addAircraft(fromAdsb(data), name);
         lastArea = { ...center, nm };
         status.area = `In view from ${name}, ${timeText()}`;
         nextArea = Date.now() + AREA_MS;
       } catch (err) {
         console.error(err);
+        if (!fresh()) return;
         status.area = `Flights in view unavailable (${explain(err)})`;
         nextArea = Date.now() + FEED_RETRY_MS;
       }
@@ -329,14 +351,16 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   }
 
   function loadMilitary() {
-    return once('military', async () => {
+    return once('military', async (fresh) => {
       try {
         const { data, name } = await fromProviders((p) => p.military, '/flights/military');
+        if (!fresh()) return;
         addAircraft(fromAdsb(data, { military: true }), name);
         status.military = `Worldwide from ${name}, ${timeText()}`;
         nextMilitary = Date.now() + MILITARY_MS;
       } catch (err) {
         console.error(err);
+        if (!fresh()) return;
         status.military = `Worldwide military flights unavailable (${explain(err)}); showing those around the middle of the view.`;
         nextMilitary = Date.now() + FEED_RETRY_MS;
       }
@@ -693,7 +717,16 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
 
   applySettings();
 
-  return { frame, pick, select, deselect, detailsHtml, title, get selected() { return selected; } };
+  // Ask every feed again now, e.g. once a relay is set up.
+  function retry() {
+    generation++;
+    nextGlobal = nextMilitary = nextArea = 0;
+    lastArea = null;
+    status.flights = status.military = status.area = '';
+    renderStatus();
+  }
+
+  return { frame, pick, select, deselect, detailsHtml, title, retry, get selected() { return selected; } };
 }
 
 // Normalised device coordinates of a point, or null if it is behind the camera.
