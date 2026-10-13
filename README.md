@@ -1,6 +1,9 @@
 # Power Globe
 
-An open-source, interactive 3D globe that visualizes temperature and other weather conditions around the world.
+An open-source, interactive 3D globe that visualizes temperature and other weather conditions around the world, with a runway wind check for airports.
+
+- **Airport conditions:** search any of about 5,000 airports by name, city or ICAO/IATA code (`EHAM`, `JFK`) to fly down to its runways and see the ground conditions at the time on the timeline: temperature, dew point (with the spread, and a fog hint when it is small), wind speed, direction and gusts in knots. Every runway end gets its headwind or tailwind and crosswind, gusts included, with crosswind and tailwind checked against your limits (headwind is shown but not limited), plus an outlook for the next 24 hours.
+- **Wind check:** a list of the major airports (about 1,150 large airports with scheduled flights) where wind and gusts put every runway marginal or over the crosswind and tailwind limits, worst first, and marked on the globe. Pick limits for light aircraft, regional or airliner operations or set your own; they are remembered. The list follows the timeline. All airports take a few minutes to load on the free weather API, so choose which come first: those **nearest to the view** (the airports around where you are looking come in at once, and moving the globe while it loads moves the check along) or the **most connected** (airports with routes to the most other airports, where most flights go).
 
 - **Wind as living brushstrokes:** thousands of glowing particles drift along the forecast wind, leaving fading trails, in the spirit of [earth.nullschool.net](https://earth.nullschool.net).
 - **Smooth colour fields:** temperature, wind speed, precipitation, cloud cover and humidity are painted as soft, bicubic-interpolated colour maps in muted palettes. Clear skies and dry areas fade to transparent so the Earth shows through.
@@ -22,6 +25,7 @@ npm run dev      # start the dev server at http://localhost:5173
 npm test         # run unit tests
 npm run build    # production build in dist/
 npm run preview  # serve the production build locally
+npm run airports # rebuild public/data/airports.json from the latest OurAirports data
 ```
 
 ## Deployment
@@ -41,6 +45,12 @@ Every push to `main` builds the site and deploys it to GitHub Pages via
 | `src/flow.js` | The wind particles: advected through the interpolated wind field and drawn with fading trails onto a glowing sphere. |
 | `src/detail.js` | Works out the area in view when zoomed in and the finer grid to fetch for it (at most 150 locations per request, snapped so nearby views share data, and held back when the free API allowance runs low). |
 | `src/map.js` | Satellite tiles over a whole-Earth backdrop, lighting that brightens as you zoom in, and on-demand country borders and city labels. |
+| `src/search.js` | The search box, as an accessible combobox. |
+| `src/airports.js` | The airport list, airport search, and hourly ground conditions at airports (cached for an hour). |
+| `src/runways.js` | Headwind, tailwind and crosswind on each runway end, and the limit presets. Limits are checked against the stronger of the mean wind and the gusts. |
+| `src/airportview.js` | The airport details panel and the wind check list. |
+| `src/windcheck.js` | The wind check: limits, nearest-first loading paced to the free API, and the list. |
+| `scripts/build-airports.mjs` | Builds `public/data/airports.json`: medium and large airports with their open runways and true headings from OurAirports, and how many airports each has routes to, from OpenFlights. |
 | `src/cities.js` | Cities to label, in three tiers that appear as you zoom in. |
 | `src/patterns.js` | Severe-weather classification for the storm markers. |
 | `src/layers.js` | Layer definitions (Open-Meteo variable, unit, palette, opacity) and WMO weather-code descriptions. |
@@ -54,11 +64,15 @@ and the UI pick it up automatically.
 
 ## Data and attribution
 
+**The airport tools are an aid to planning, not for operational decisions.** Conditions are model forecasts for the airport's position and elevation, not observations: check the official METAR and TAF, and the limits for your aircraft and operator. Runway headings are true headings from OurAirports; wind directions are true as well.
+
 Precipitation is shown as a rate, mm per hour averaged over the 3 hours up to the time shown, on the map, in the storm markers and in the details panel alike.
 
 - Weather data: [Open-Meteo.com](https://open-meteo.com/), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The free API is for non-commercial use, with a fair-use limit of about 10,000 calls per day.
 - Satellite tiles: [Esri World Imagery](https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9) (Esri, Maxar, Earthstar Geographics and the GIS User Community), used under [Esri's terms of use](https://www.esri.com/en-us/legal/terms/full-master-agreement).
 - Backdrop image: NASA Blue Marble (public domain), via the [three-globe](https://github.com/vasturiano/three-globe) examples (MIT).
+- Airports and runways: [OurAirports](https://ourairports.com/data/) (public domain).
+- Route counts: [OpenFlights](https://openflights.org/data.php) route database, under the [Open Database License](https://opendatacommons.org/licenses/odbl/1-0/). Its routes were last updated in 2014, so the counts are a rough measure of how connected an airport is.
 - Country borders: [Natural Earth](https://www.naturalearthdata.com/) (public domain), via [world-atlas](https://github.com/topojson/world-atlas).
 
 ## License

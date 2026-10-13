@@ -73,8 +73,39 @@ function labelElement(city) {
   return el;
 }
 
-// Country borders and city names that appear as the view zooms in. Returns an update
-// function to call with the camera altitude.
+// A pin for the place whose forecast is open, labelled with its name if it has one.
+function markerElement(name) {
+  const el = document.createElement('div');
+  el.className = 'place-marker';
+  if (name) {
+    const label = document.createElement('span');
+    label.textContent = name;
+    el.append(label);
+  }
+  return el;
+}
+
+// A marker for an airport where wind puts the runways near or over the limits. The list in the
+// wind check panel is the accessible way to the same airports, so markers are hidden from
+// screen readers and keyboard focus.
+function airportElement(airport, status, onClick) {
+  const el = document.createElement('div');
+  el.className = `airport-marker status-${status}`;
+  el.setAttribute('aria-hidden', 'true');
+  el.title = airport.name;
+  const label = document.createElement('span');
+  label.textContent = airport.iata || airport.ident;
+  el.append(label);
+  el.addEventListener('click', (event) => {
+    event.stopPropagation();
+    onClick(airport);
+  });
+  return el;
+}
+
+// Country borders and city names that appear as the view zooms in, airports with wind trouble
+// and a pin for the selected place. Returns `update(altitude)` to call as the camera moves,
+// `setMarker(place)` and `setAirports(problems, onClick)`.
 export function setupMapFeatures(globe) {
   const elements = new Map(CITIES.map((city) => [city, labelElement(city)]));
   globe
@@ -82,7 +113,7 @@ export function setupMapFeatures(globe) {
     .htmlLng('lng')
     .htmlAltitude(0.0006)
     .htmlTransitionDuration(0)
-    .htmlElement((city) => elements.get(city))
+    .htmlElement((d) => d.el ?? elements.get(d))
     .pathPoints((line) => line)
     .pathPointLat((p) => p[1])
     .pathPointLng((p) => p[0])
@@ -93,8 +124,19 @@ export function setupMapFeatures(globe) {
     .pathTransitionDuration(0);
 
   let tier = -1;
+  let marker = null;
+  let airports = [];
+  // Airport markers by airport and status, reused while the status stays the same (the globe
+  // keeps an object on screen as long as the same datum is passed in).
+  let airportMarkers = new Map();
   let borders = null;
   let bordersShown = false;
+
+  function refreshLabels() {
+    const cities = CITIES.filter((city) => city.tier <= tier && !(marker && city.name === marker.name));
+    const shown = marker ? airports.filter((a) => a.lat !== marker.lat || a.lng !== marker.lng) : airports;
+    globe.htmlElementsData([...cities, ...shown, ...(marker ? [marker] : [])]);
+  }
 
   async function loadBorders() {
     // Loaded on demand: the border data is only needed once someone zooms in.
@@ -105,11 +147,32 @@ export function setupMapFeatures(globe) {
     return mesh(world, world.objects.countries, (a, b) => a !== b).coordinates;
   }
 
-  return (altitude) => {
+  function setMarker(place) {
+    marker = place ? { lat: place.lat, lng: place.lng, name: place.name, el: markerElement(place.name) } : null;
+    refreshLabels();
+  }
+
+  // `problems`: [{ airport, status }], or [] to remove the markers.
+  function setAirports(problems, onClick) {
+    if (!problems.length && !airports.length) return;
+    const next = new Map();
+    airports = problems.map(({ airport, status }) => {
+      const key = `${airport.ident}:${status}`;
+      const datum = airportMarkers.get(key) ?? { lat: airport.lat, lng: airport.lng, el: airportElement(airport, status, onClick) };
+      next.set(key, datum);
+      return datum;
+    });
+    airportMarkers = next;
+    refreshLabels();
+  }
+
+  function update(altitude) {
+    // Airport codes would pile up on top of each other on the whole globe; dots are enough there.
+    document.body.classList.toggle('globe-far', altitude >= MAP_ALTITUDE);
     const nextTier = labelTier(altitude);
     if (nextTier !== tier) {
       tier = nextTier;
-      globe.htmlElementsData(CITIES.filter((city) => city.tier <= tier));
+      refreshLabels();
     }
     const showBorders = altitude < MAP_ALTITUDE;
     if (showBorders === bordersShown) return;
@@ -126,5 +189,7 @@ export function setupMapFeatures(globe) {
     borders.then((lines) => {
       if (bordersShown) globe.pathsData(lines);
     });
-  };
+  }
+
+  return { update, setMarker, setAirports };
 }

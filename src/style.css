@@ -1,11 +1,15 @@
 :root {
   /* Panels are nearly opaque so text keeps its contrast over any part of the map. */
-  --panel-bg: rgba(10, 14, 24, 0.86);
+  --panel-bg: rgba(10, 14, 24, 0.92);
   --panel-border: rgba(255, 255, 255, 0.12);
   --text: #f2f5fa;
   /* Secondary text: about 10:1 contrast on the panel background. */
   --muted: #c0c9d8;
   --accent: #9bd1ff;
+  /* Runway status colours, each paired with an icon so colour is never the only cue. */
+  --ok: #7ee2a8;
+  --caution: #ffc857;
+  --nogo: #ff8a80;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
   --gap: 20px;
   /* Distance from the bottom of the screen to the top of the timeline; kept up to date by main.js. */
@@ -123,8 +127,20 @@ body.idle #timeline {
   transform: translate(-50%, 12px);
 }
 
-body.idle #details {
+body.idle .side-panel {
   transform: translateX(12px);
+}
+
+/* Airport panels are for reading, so they keep everything on screen. */
+body.idle:has(.keep-awake:not(.hidden)) .panel,
+body.idle:has(.keep-awake:not(.hidden)) .attribution {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+body.idle:has(.keep-awake:not(.hidden)) #timeline {
+  transform: translateX(-50%);
 }
 
 @media (prefers-contrast: more) {
@@ -136,7 +152,7 @@ body.idle #details {
   }
 
   body.idle #controls,
-  body.idle #details {
+  body.idle .side-panel {
     transform: none;
   }
 
@@ -155,47 +171,135 @@ body.idle #details {
   overscroll-behavior: contain;
 }
 
-#controls summary {
-  list-style: none;
-  cursor: pointer;
-  min-height: var(--touch);
+#controls .panel-head {
   display: flex;
   align-items: center;
-  margin: -6px 0;
-  border-radius: 8px;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -6px -6px 10px 0;
 }
 
-#controls summary:focus-visible {
+#controls-toggle {
+  border-color: transparent;
+  background: transparent;
+}
+
+#controls h1 {
+  margin-right: auto;
+  white-space: nowrap;
+  letter-spacing: 0.24em;
+}
+
+#windcheck-open {
+  white-space: nowrap;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+#windcheck-open[aria-expanded='true'] {
+  background: rgba(155, 209, 255, 0.24);
+  border-color: var(--accent);
+}
+
+.chevron {
+  width: 9px;
+  height: 9px;
+  border-right: 2px solid var(--text);
+  border-bottom: 2px solid var(--text);
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 0.4s var(--ease);
+}
+
+#controls.collapsed .chevron {
+  transform: rotate(-45deg);
+}
+
+#controls-body {
+  margin-top: 14px;
+}
+
+/* Search */
+
+.search {
+  position: relative;
+}
+
+#search-input {
+  width: 100%;
+  min-height: var(--touch);
+  padding: 8px 14px 8px 38px;
+  font: inherit;
+  font-size: 0.95rem;
+  color: var(--text);
+  background:
+    no-repeat 13px 50% / 15px
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23c0c9d8' stroke-width='2.5' stroke-linecap='round'%3E%3Ccircle cx='10.5' cy='10.5' r='6.5'/%3E%3Cpath d='m15.5 15.5 5 5'/%3E%3C/svg%3E"),
+    rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+}
+
+#search-input::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+#search-input:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
-#controls summary::-webkit-details-marker {
+#search-results {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 4px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+#search-results li {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: var(--touch);
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+#search-results li:hover,
+#search-results li[aria-selected='true'] {
+  background: rgba(155, 209, 255, 0.2);
+}
+
+#search-results li[aria-selected='true'] {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.search-name {
+  font-size: 0.95rem;
+}
+
+.search-detail {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.search-status {
+  margin: 6px 4px 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.search-status:empty {
   display: none;
 }
 
-#controls summary::after {
-  content: '';
-  margin-left: auto;
-  margin-right: 4px;
-  width: 8px;
-  height: 8px;
-  border-right: 2px solid var(--text);
-  border-bottom: 2px solid var(--text);
-  transform: rotate(45deg) translate(-2px, -2px);
-  transition: transform 0.4s var(--ease);
-}
-
-#controls:not([open]) summary::after {
-  transform: rotate(-45deg);
-}
-
-#controls[open] summary {
-  margin-bottom: 8px;
-}
-
 h1 {
-  margin: 0;
+  margin: 0 0 0 2px;
   font-size: 0.85rem;
   font-weight: 600;
   letter-spacing: 0.3em;
@@ -336,9 +440,9 @@ input:disabled {
   color: var(--muted);
 }
 
-/* Details */
+/* Details and wind check, which share the right-hand side */
 
-#details {
+.side-panel {
   top: var(--gap);
   right: var(--gap);
   width: min(300px, calc(100vw - 2 * var(--gap)));
@@ -357,7 +461,7 @@ input:disabled {
   margin: -4px -6px 6px 0;
 }
 
-#details h2 {
+.side-panel h2 {
   margin: 8px 0 0;
   font-size: 1rem;
   font-weight: 600;
@@ -366,24 +470,24 @@ input:disabled {
   color: var(--text);
 }
 
-#details p {
+.side-panel p {
   margin: 0 0 12px;
   color: var(--muted);
   font-size: 0.85rem;
 }
 
-#details dl {
+.side-panel dl {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 6px 12px;
   margin: 0;
 }
 
-#details dt {
+.side-panel dt {
   color: var(--muted);
 }
 
-#details dd {
+.side-panel dd {
   margin: 0;
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -406,6 +510,371 @@ input:disabled {
 .sparkline line {
   stroke: rgba(255, 255, 255, 0.75);
   stroke-dasharray: 2 3;
+}
+
+#details {
+  width: min(340px, calc(100vw - 2 * var(--gap)));
+}
+
+#windcheck {
+  width: min(360px, calc(100vw - 2 * var(--gap)));
+}
+
+.side-panel h2:focus {
+  outline: none;
+}
+
+.side-panel h3 {
+  margin: 16px 0 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.back-button {
+  margin: -4px 0 6px -6px;
+  padding: 4px 12px 4px 8px;
+  font-size: 0.8rem;
+}
+
+.status-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 1.4em;
+  height: 1.4em;
+  border-radius: 50%;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1;
+  color: #0a0e18;
+  background: var(--status, var(--muted));
+}
+
+.status-ok {
+  --status: var(--ok);
+}
+
+.status-caution {
+  --status: var(--caution);
+}
+
+.status-nogo {
+  --status: var(--nogo);
+}
+
+.verdict {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--status, var(--panel-border));
+  background: color-mix(in srgb, var(--status, #fff) 14%, transparent);
+  line-height: 1.4;
+}
+
+.verdict .status-icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+.verdict b {
+  color: var(--status, var(--text));
+}
+
+.side-panel p.spread {
+  margin: 6px 0 0;
+  text-align: right;
+  font-size: 0.8rem;
+}
+
+.runways {
+  width: 100%;
+  margin-top: 14px;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.runways th,
+.runways td {
+  padding: 5px 4px;
+  text-align: left;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.runways thead th {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.runways tbody th {
+  font-weight: 700;
+}
+
+.runways td {
+  white-space: nowrap;
+}
+
+.side-panel p.table-note,
+.side-panel p.limits-note {
+  margin: 6px 0 0;
+  font-size: 0.75rem;
+}
+
+.outlook {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.outlook li {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding: 5px 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--status, #fff) 16%, transparent);
+}
+
+.outlook-hour {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.check-order {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.check-order select {
+  min-height: var(--touch);
+  padding: 4px 8px;
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+}
+
+.check-order select option {
+  color: #000;
+}
+
+.check-order select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.limits-box {
+  margin: 0 0 4px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+}
+
+.limits-box summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--touch);
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.limits-box summary::-webkit-details-marker {
+  display: none;
+}
+
+/* A chevron that turns when the box opens, like the controls toggle. */
+.limits-box summary::after {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-right: 2px solid var(--text);
+  border-bottom: 2px solid var(--text);
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 0.3s var(--ease);
+}
+
+.limits-box[open] summary::after {
+  transform: translateY(1px) rotate(-135deg);
+}
+
+.limits-box summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+.limits-box .toggle {
+  padding: 0 12px 6px;
+}
+
+.limits {
+  margin: 0 12px 6px;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+}
+
+.limits legend {
+  padding: 0 4px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.limits label {
+  display: grid;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.limit-preset {
+  margin-bottom: 8px;
+}
+
+.limit-inputs {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.limits select,
+.limits input {
+  width: 100%;
+  min-height: var(--touch);
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+}
+
+.limits select option {
+  color: #000;
+}
+
+.limits select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.problems {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.problems li + li {
+  margin-top: 6px;
+}
+
+.problems li.empty {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.problem {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  border-radius: 10px;
+  border-color: color-mix(in srgb, var(--status) 55%, transparent);
+  background: color-mix(in srgb, var(--status) 9%, transparent);
+}
+
+.problem .status-icon {
+  flex: none;
+  margin-top: 2px;
+}
+
+.problem-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.problem-name {
+  font-size: 0.875rem;
+}
+
+.problem-detail {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+/* Airports with wind trouble on the map. A zero-size anchor like the city labels. */
+
+.airport-marker {
+  position: relative;
+  width: 0;
+  height: 0;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.airport-marker::before {
+  content: '';
+  position: absolute;
+  left: -7px;
+  top: -7px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--status);
+  box-shadow:
+    0 0 0 2px rgba(0, 0, 0, 0.75),
+    0 0 12px var(--status);
+}
+
+.airport-marker.status-nogo::before {
+  border-radius: 3px;
+  transform: rotate(45deg);
+}
+
+.airport-marker span {
+  position: absolute;
+  left: 11px;
+  top: -9px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  color: #0a0e18;
+  background: var(--status);
+}
+
+.globe-far .airport-marker span {
+  display: none;
+}
+
+.globe-far .airport-marker::before {
+  left: -5px;
+  top: -5px;
+  width: 10px;
+  height: 10px;
 }
 
 /* Timeline */
@@ -482,6 +951,44 @@ body:not(.idle) #caption {
   color: inherit;
 }
 
+/* Pin for the place whose forecast is open. A zero-size anchor like the city labels. */
+
+.place-marker {
+  position: relative;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.place-marker::before {
+  content: '';
+  position: absolute;
+  left: -9px;
+  top: -9px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 3px solid var(--accent);
+  background: rgba(10, 14, 24, 0.55);
+  box-shadow:
+    0 0 0 2px rgba(0, 0, 0, 0.7),
+    0 0 14px rgba(155, 209, 255, 0.7);
+}
+
+.place-marker span {
+  position: absolute;
+  left: 16px;
+  top: -12px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(10, 14, 24, 0.86);
+  border: 1px solid rgba(155, 209, 255, 0.6);
+}
+
 /* City names on the map. The element itself is a zero-size anchor at the city's position. */
 
 .city-label {
@@ -533,17 +1040,19 @@ body:not(.idle) #caption {
   }
 
   #controls,
-  #details {
+  #details,
+  #windcheck {
     left: var(--gap);
     right: var(--gap);
     width: auto;
   }
 
-  #details {
+  .side-panel {
     top: auto;
     bottom: calc(var(--timeline-top) + 8px);
-    max-height: calc(100vh - var(--timeline-top) - 3 * var(--gap));
-    max-height: calc(100dvh - var(--timeline-top) - 3 * var(--gap));
+    /* Between the timeline and the header with the search box; main.js measures both. */
+    max-height: calc(100vh - var(--timeline-top) - var(--controls-bottom, 140px) - 2 * var(--gap));
+    max-height: calc(100dvh - var(--timeline-top) - var(--controls-bottom, 140px) - 2 * var(--gap));
   }
 
   #timeline {

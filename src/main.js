@@ -19,6 +19,11 @@ import { ScreenFlow } from './screenflow.js';
 import { HAZARDS, hazardRings } from './patterns.js';
 import { DETAIL_ALTITUDE, needsNewRegion, regionFor, viewBounds } from './detail.js';
 import { setupBasemap, setupMapFeatures } from './map.js';
+import { setupSearch } from './search.js';
+import { airportWeather, conditionsAt, loadAirports, searchAirports } from './airports.js';
+import { airportDetailsHtml, airportPlace, verdictText } from './airportview.js';
+import { setupWindCheck } from './windcheck.js';
+import { STATUS, assessAirport } from './runways.js';
 
 // Timeline playback speed, in forecast steps (3 hours each) per second.
 const STEPS_PER_SECOND = 1;
@@ -75,6 +80,27 @@ const els = {
   now: document.getElementById('now'),
   caption: document.getElementById('caption'),
   controls: document.getElementById('controls'),
+  controlsToggle: document.getElementById('controls-toggle'),
+  controlsBody: document.getElementById('controls-body'),
+  searchInput: document.getElementById('search-input'),
+  searchResults: document.getElementById('search-results'),
+  searchStatus: document.getElementById('search-status'),
+  detailsBack: document.getElementById('details-back'),
+  windCheckOpen: document.getElementById('windcheck-open'),
+  windCheckClose: document.getElementById('windcheck-close'),
+  windCheck: {
+    panel: document.getElementById('windcheck'),
+    preset: document.getElementById('limits-preset'),
+    crosswind: document.getElementById('limit-crosswind'),
+    tailwind: document.getElementById('limit-tailwind'),
+    marginal: document.getElementById('windcheck-marginal'),
+    limitsSummary: document.getElementById('limits-summary'),
+    order: document.getElementById('windcheck-order'),
+    status: document.getElementById('windcheck-status'),
+    retry: document.getElementById('windcheck-retry'),
+    summary: document.getElementById('windcheck-summary'),
+    list: document.getElementById('windcheck-list'),
+  },
 };
 
 const state = {
@@ -90,7 +116,10 @@ const state = {
   dirty: true,
   // 0..1 progress of the colour field fading in after a layer change.
   fieldFade: 0,
+  // Open details: a spot { lat, lng, data } or an airport { airport, hourly, fromList }.
   detail: null,
+  // Whether the wind check is in use: its panel is open, or one of its airports is.
+  windCheck: false,
   // Zoomed-in area with finer data: { shape, bounds, data, winds, times, fade }, or null.
   region: null,
   autoRotate: !reducedMotion,
@@ -98,7 +127,7 @@ const state = {
 
 if (reducedMotion) els.wind.checked = false;
 // On phones the controls start folded so the globe gets the screen.
-if (narrowScreen) els.controls.open = false;
+if (narrowScreen) setControlsOpen(false);
 
 const fmt = (value, unit) => (value == null ? '–' : `${Math.round(value * 10) / 10} ${unit}`);
 
@@ -141,7 +170,18 @@ const globe = new Globe(els.globe, { animateIn: !reducedMotion })
   .onGlobeClick(({ lat, lng }) => showDetails(lat, lng));
 
 const setMapBrightness = setupBasemap(globe, `${IMAGE_BASE}/earth-blue-marble.jpg`);
-const updateMapFeatures = setupMapFeatures(globe);
+const mapFeatures = setupMapFeatures(globe);
+const windCheck = setupWindCheck({
+  els: els.windCheck,
+  getTime: () => currentTime(),
+  // Airports near the middle of the view are checked first.
+  getCenter: () => globe.pointOfView(),
+  formatTime: (time) => formatTime(time),
+  onSelect: (airport) => goToAirport(airport, { fromList: true }),
+  // Airports with wind trouble are marked on the map while the wind check is in use.
+  onProblems: (problems) => mapFeatures.setAirports(state.windCheck ? problems : [], (airport) => goToAirport(airport, { fromList: state.windCheck })),
+  onLimitsChange: () => renderDetails(),
+});
 globe.pointOfView({ lat: 22, lng: -25, altitude: narrowScreen ? 3.6 : 2.4 });
 const controls = globe.controls();
 controls.autoRotate = !reducedMotion;
@@ -256,6 +296,7 @@ function drawStep(step) {
   els.timeLabel.textContent = formatTime(times[step]);
   renderCaption();
   renderDetails();
+  windCheck.update();
   state.drawnStep = step;
 }
 
@@ -470,7 +511,7 @@ async function fetchRegion(region) {
 let regionTimer;
 function onView(pov) {
   setMapBrightness(pov.altitude);
-  updateMapFeatures(pov.altitude);
+  mapFeatures.update(pov.altitude);
   const zoomedIn = pov.altitude < DETAIL_ALTITUDE;
   controls.autoRotate = state.autoRotate && !zoomedIn;
   if (!zoomedIn) {
@@ -503,14 +544,39 @@ function announce(message) {
   });
 }
 
-async function showDetails(lat, lng) {
+// The layers and display options fold away; the title and search box stay visible.
+function setControlsOpen(open) {
+  els.controlsBody.hidden = !open;
+  els.controlsToggle.setAttribute('aria-expanded', String(open));
+  els.controls.classList.toggle('collapsed', !open);
+  if (open && phoneLayout.matches) {
+    closeDetails();
+    windCheck.close();
+    syncWindCheckButton();
+  }
+}
+
+// The details panel and the wind check share one place on screen, so opening one closes the
+// other. On phones they also share it with the controls.
+function openSidePanel() {
   state.autoRotate = false;
   controls.autoRotate = false;
+  if (phoneLayout.matches) setControlsOpen(false);
+}
+
+// `name` titles the panel, e.g. a searched place (tapped spots show coordinates); `pinLabel`
+// is the shorter name shown on the map pin.
+async function showDetails(lat, lng, name, pinLabel = name) {
+  openSidePanel();
+  windCheck.close();
+  syncWindCheckButton();
   const detail = { lat, lng, data: null };
   state.detail = detail;
-  if (phoneLayout.matches) els.controls.open = false;
-  els.details.classList.remove('hidden');
-  els.detailsTitle.textContent = coords(lat, lng);
+  const title = name ?? coords(lat, lng);
+  mapFeatures.setMarker({ lat, lng, name: pinLabel });
+  els.details.classList.remove('hidden', 'keep-awake');
+  els.detailsBack.hidden = true;
+  els.detailsTitle.textContent = title;
   els.detailsBody.innerHTML = '<p>Loading…</p>';
   try {
     const data = await loadPointForecast(lat, lng);
@@ -520,7 +586,7 @@ async function showDetails(lat, lng) {
       renderDetails();
       const index = detailIndex(data);
       announce(
-        `Weather at ${coords(lat, lng)}: ${describeWeatherCode(data.weather_code?.[index])}, ` +
+        `Weather at ${title}: ${describeWeatherCode(data.weather_code?.[index])}, ` +
           `${fmt(data.temperature_2m?.[index], '°C')}.`,
       );
     }
@@ -528,7 +594,42 @@ async function showDetails(lat, lng) {
     console.error(err);
     if (state.detail === detail) {
       els.detailsBody.innerHTML = `<p>Could not load weather here. ${err.message ?? ''}</p>`;
-      announce(`Could not load weather at ${coords(lat, lng)}.`);
+      announce(`Could not load weather at ${title}.`);
+    }
+  }
+}
+
+// An airport's ground conditions and runway winds. `fromList`: opened from the wind check, which
+// the back button returns to.
+async function showAirport(airport, { fromList = false } = {}) {
+  stopAutoplay();
+  openSidePanel();
+  windCheck.close();
+  syncWindCheckButton();
+  const detail = { airport, hourly: null, fromList };
+  state.detail = detail;
+  mapFeatures.setMarker({ lat: airport.lat, lng: airport.lng, name: airport.iata || airport.ident });
+  els.details.classList.remove('hidden');
+  // A tool to read, so it stays on screen rather than fading with the other controls.
+  els.details.classList.add('keep-awake');
+  els.detailsBack.hidden = !fromList;
+  els.detailsTitle.textContent = airport.name;
+  els.detailsBody.innerHTML = `<p>${airportPlace(airport)}</p><p>Loading conditions…</p>`;
+  try {
+    const weather = await airportWeather([airport]);
+    if (state.detail !== detail) return;
+    detail.hourly = weather.get(airport.ident);
+    renderDetails();
+    const conditions = conditionsAt(detail.hourly, currentTime());
+    if (conditions) {
+      const result = assessAirport(airport, conditions, windCheck.limits());
+      announce(`${airport.name}: ${STATUS[result.status].label}. ${verdictText(result)}.`);
+    }
+  } catch (err) {
+    console.error(err);
+    if (state.detail === detail) {
+      els.detailsBody.innerHTML = `<p>Could not load conditions at this airport. ${err.message ?? ''}</p>`;
+      announce(`Could not load conditions at ${airport.name}.`);
     }
   }
 }
@@ -536,7 +637,72 @@ async function showDetails(lat, lng) {
 function closeDetails() {
   state.detail = null;
   els.details.classList.add('hidden');
+  els.details.classList.remove('keep-awake');
+  mapFeatures.setMarker(null);
 }
+
+// Airport tools show the present rather than wherever the autoplay happened to be.
+function stopAutoplay() {
+  if (!state.playing || !state.forecast) return;
+  setPlaying(false);
+  seek(startIndex(state.forecast.times));
+}
+
+function openWindCheck() {
+  stopAutoplay();
+  openSidePanel();
+  closeDetails();
+  state.windCheck = true;
+  windCheck.open();
+  syncWindCheckButton();
+}
+
+// Closing the wind check also takes its markers off the map.
+function closeWindCheck() {
+  state.windCheck = false;
+  windCheck.close();
+  mapFeatures.setAirports([]);
+  syncWindCheckButton();
+}
+
+function syncWindCheckButton() {
+  els.windCheckOpen.setAttribute('aria-expanded', String(!els.windCheck.panel.classList.contains('hidden')));
+}
+
+// Back from an airport to the wind check list, with focus on the airport just shown.
+function backToWindCheck() {
+  const ident = state.detail?.airport?.ident;
+  openWindCheck();
+  const row = ident && els.windCheck.list.querySelector(`[data-ident="${CSS.escape(ident)}"]`);
+  (row || els.windCheck.panel.querySelector('h2')).focus?.();
+}
+
+// Altitude to show a searched airport from: low enough to make out its runways.
+const AIRPORT_ALTITUDE = 0.012;
+// Degrees of latitude the view spans per globe radius of camera altitude (see detail.js).
+const LAT_SPAN_PER_ALTITUDE = 53;
+
+// Glide to an airport and open its conditions. On phones the details panel covers the lower
+// half of the screen, so aim the camera a little south to put the airport in the open space
+// between the search box and the panel.
+function goToAirport(airport, options) {
+  let lat = airport.lat;
+  if (phoneLayout.matches) {
+    const top = els.controls.offsetTop + els.controls.offsetHeight;
+    const bottom = Math.max(top + 80, window.innerHeight * 0.45);
+    const shift = (window.innerHeight / 2 - (top + bottom) / 2) / window.innerHeight;
+    lat = Math.max(-85, Math.min(85, lat - shift * LAT_SPAN_PER_ALTITUDE * AIRPORT_ALTITUDE));
+  }
+  globe.pointOfView({ lat, lng: airport.lng, altitude: AIRPORT_ALTITUDE }, reducedMotion ? 0 : 2200);
+  showAirport(airport, options);
+}
+
+// The timeline's time, or the current hour before the forecast has loaded.
+function currentTime() {
+  return state.forecast?.times[Math.round(state.t)] ?? new Date().toISOString().slice(0, 13) + ':00';
+}
+
+const formatHour = (time) => new Date(parseTime(time)).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 
 // Temperature sparkline for the clicked spot, with a marker at the timeline position.
 function sparkline(series, index) {
@@ -567,6 +733,19 @@ function detailIndex(data) {
 // Updates only the panel's body, so the heading and close button keep their focus.
 function renderDetails() {
   const detail = state.detail;
+  if (detail?.airport) {
+    if (!detail.hourly) return;
+    els.detailsBody.innerHTML = airportDetailsHtml({
+      airport: detail.airport,
+      hourly: detail.hourly,
+      time: currentTime(),
+      limits: windCheck.limits(),
+      limitsLabel: windCheck.label(),
+      formatTime,
+      formatHour,
+    });
+    return;
+  }
   if (!detail?.data || !state.forecast) return;
   const { data } = detail;
   const index = detailIndex(data);
@@ -586,7 +765,8 @@ function wake() {
   document.body.classList.remove('idle');
   clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
-    if (document.querySelector('.panel:focus-within')) wake();
+    // Airport panels are for reading, so they keep everything on screen.
+    if (document.querySelector('.panel:focus-within, .panel.keep-awake:not(.hidden)')) wake();
     else document.body.classList.add('idle');
   }, IDLE_MS);
 }
@@ -606,12 +786,40 @@ els.now.addEventListener('click', () => {
 });
 els.wind.addEventListener('change', invalidate);
 els.detailsClose.addEventListener('click', closeDetails);
+els.detailsBack.addEventListener('click', backToWindCheck);
+els.windCheckOpen.addEventListener('click', () => {
+  if (els.windCheck.panel.classList.contains('hidden')) openWindCheck();
+  else closeWindCheck();
+});
+els.windCheckClose.addEventListener('click', () => {
+  closeWindCheck();
+  els.windCheckOpen.focus();
+});
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && state.detail) closeDetails();
+  if (event.key !== 'Escape') return;
+  if (state.detail?.fromList) backToWindCheck();
+  else if (state.detail) closeDetails();
+  else if (!els.windCheck.panel.classList.contains('hidden')) {
+    closeWindCheck();
+    els.windCheckOpen.focus();
+  }
 });
-els.controls.addEventListener('toggle', () => {
-  if (els.controls.open && phoneLayout.matches) closeDetails();
+els.controlsToggle.addEventListener('click', () => setControlsOpen(els.controlsBody.hidden));
+setupSearch({
+  input: els.searchInput,
+  list: els.searchResults,
+  status: els.searchStatus,
+  search: async (query) =>
+    searchAirports(await loadAirports(), query).map((airport) => ({
+      airport,
+      name: airport.name,
+      detail: airportPlace(airport),
+    })),
+  describe: (n) => `${n} airport${n === 1 ? '' : 's'} found`,
+  onSelect: ({ airport }) => goToAirport(airport),
 });
+// Start loading the airport list as soon as someone heads for the search box.
+els.searchInput.addEventListener('focus', () => loadAirports().catch(() => {}), { once: true });
 els.hazards.addEventListener('change', invalidate);
 
 // Panels stop above the timeline, and on phones the timeline above the credits; their heights
@@ -619,11 +827,13 @@ els.hazards.addEventListener('change', invalidate);
 function updateLayout() {
   const root = document.documentElement.style;
   root.setProperty('--credits-height', `${els.credits.offsetHeight}px`);
+  root.setProperty('--controls-bottom', `${els.controls.offsetTop + els.controls.offsetHeight}px`);
   root.setProperty('--timeline-top', `${window.innerHeight - els.timeline.offsetTop}px`);
 }
 const layoutObserver = new ResizeObserver(updateLayout);
 layoutObserver.observe(els.timeline);
 layoutObserver.observe(els.credits);
+layoutObserver.observe(els.controls);
 window.addEventListener('resize', updateLayout);
 updateLayout();
 
