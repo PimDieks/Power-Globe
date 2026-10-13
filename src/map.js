@@ -33,18 +33,18 @@ export const BASEMAPS = {
   },
   // City lights seen from space at night (NASA Black Marble, public domain, via NASA GIBS). Its
   // pixels are about 500 m across, so closer in, where it would only blur, the view continues
-  // as CARTO's dark map of OpenStreetMap (sharp at any zoom).
+  // as Esri's dark grey map (sharp down to street level, no key needed).
   night: {
     label: 'Night lights',
     url: (x, y, level) =>
       level <= NIGHT_LIGHTS_MAX_LEVEL
         ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/${level}/${y}/${x}.png`
-        : `https://${'abcd'[(x + y) % 4]}.basemaps.cartocdn.com/dark_all/${level}/${x}/${y}@2x.png`,
-    maxLevel: 18,
+        : esri('Canvas/World_Dark_Gray_Base')(x, y, level),
+    maxLevel: 16,
     light: 1.6,
     dark: true,
     credit:
-      'Night lights <a href="https://earthobservatory.nasa.gov/features/NightLights" target="_blank" rel="noopener">NASA Black Marble</a> via GIBS; close up © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>',
+      'Night lights <a href="https://earthobservatory.nasa.gov/features/NightLights" target="_blank" rel="noopener">NASA Black Marble</a> via GIBS; close up <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, HERE, Garmin, OpenStreetMap contributors and the GIS User Community',
   },
 };
 // Below this altitude the view reads as a map: brighter imagery, borders and city names.
