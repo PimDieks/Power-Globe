@@ -47,6 +47,9 @@ export const BASEMAPS = {
         : esri('World_Imagery')(x, y, level),
     maxLevel: 17,
     light: 1,
+    // Where the satellite saw nothing that day the imagery is pure black: see through it to
+    // the whole-Earth image beneath instead.
+    noDataBlack: true,
     get credit() {
       return `Clouds on ${cloudsDay()} (UTC): <a href="https://www.earthdata.nasa.gov/data/instruments/viirs" target="_blank" rel="noopener">NASA VIIRS</a> via GIBS; close up imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics and the GIS User Community`;
     },
@@ -79,6 +82,7 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
   window.addEventListener('resize', () => {
     tilesTuned = matchTileDetailToScreen(globe, chart.engine);
   });
+  let engineHooked = false;
 
   const texture = new THREE.TextureLoader().load(backdropUrl);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -101,6 +105,15 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     altitude = value;
     // The tile engine joins the scene only once the globe has initialised, so keep trying.
     tilesTuned ||= matchTileDetailToScreen(globe, chart.engine);
+    if (!engineHooked) {
+      const engine = findTileEngine(globe, chart.engine);
+      if (engine) {
+        engineHooked = true;
+        seeThroughNoData(engine, () => style.noDataBlack);
+        // Tiles loaded before the hook was in place.
+        if (style.noDataBlack) globe.globeTileEngineClearCache();
+      }
+    }
     chart.update();
     const t = Math.min(1, Math.max(0, (altitude - 0.4) / (MAP_ALTITUDE + 0.6 - 0.4)));
     // Not full brightness even zoomed in, so white wind trails and labels keep their contrast.
@@ -123,6 +136,42 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
   chart.set(style.chart);
   onCredit?.(style.credit);
   return { setAltitude, setStyle };
+}
+
+// three-globe's tile engine, once the globe has initialised (else null).
+function findTileEngine(globe, exclude) {
+  let engine = null;
+  globe.scene().traverse((obj) => {
+    if (!engine && obj !== exclude && Array.isArray(obj.thresholds) && 'tileUrl' in obj) engine = obj;
+  });
+  return engine;
+}
+
+// Pixels this dark (linear colour, about 5/255 before decoding) are taken as no data. Real
+// imagery is never this dark in all three channels by day, not even deep ocean.
+const NO_DATA_LEVEL = 0.0015;
+
+// While `active()`, new tiles leave out pure black pixels, so the whole-Earth image beneath
+// shows through gaps in the imagery.
+function seeThroughNoData(engine, active) {
+  const add = engine.add.bind(engine);
+  engine.add = (...tiles) => {
+    if (active()) {
+      for (const tile of tiles) {
+        if (!tile.material?.map) continue;
+        tile.material.onBeforeCompile = (shader) => {
+          shader.fragmentShader = shader.fragmentShader.replace(
+            '#include <map_fragment>',
+            `#include <map_fragment>
+            if (max(max(diffuseColor.r, diffuseColor.g), diffuseColor.b) < ${NO_DATA_LEVEL}) discard;`,
+          );
+        };
+        tile.material.customProgramCacheKey = () => 'see-through-no-data';
+        tile.material.needsUpdate = true;
+      }
+    }
+    return add(...tiles);
+  };
 }
 
 // A layer of transparent map tiles over the globe's own (three-globe has room for one).
@@ -180,10 +229,7 @@ function setupChartLayer(globe) {
 // for how many device pixels the view spans, so close-up tiles come out about one texel per pixel.
 // Returns whether the tile engine was found.
 function matchTileDetailToScreen(globe, chart) {
-  let engine = null;
-  globe.scene().traverse((obj) => {
-    if (!engine && obj !== chart && Array.isArray(obj.thresholds) && 'tileUrl' in obj) engine = obj;
-  });
+  const engine = findTileEngine(globe, chart);
   if (!engine) return false;
   const pixels = window.innerHeight * window.devicePixelRatio;
   // Levels finer than the default that the screen can show: on a phone about 1.8, which comes
