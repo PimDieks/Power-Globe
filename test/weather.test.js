@@ -85,8 +85,45 @@ describe('fetchHourly', () => {
     expect(apiBudget(now + 61_000)).toBe(600);
   });
 
+  it('never has more than one request in flight', async () => {
+    let inFlight = 0;
+    let most = 0;
+    vi.stubGlobal('fetch', async () => {
+      most = Math.max(most, ++inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight--;
+      return { ok: true, json: async () => ({ hourly: fakeHourly(1) }) };
+    });
+    await Promise.all([
+      fetchHourly(buildGrid(10).slice(0, 250)),
+      fetchHourly([{ lat: 1, lng: 2 }]),
+      fetchHourly([{ lat: 3, lng: 4 }]),
+    ]);
+    expect(most).toBe(1);
+  });
+
+  it('retries when the API is busy with another request, without pausing', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    vi.stubGlobal('fetch', async () =>
+      ++calls === 1
+        ? { ok: false, status: 429, json: async () => ({ reason: 'Too many concurrent requests' }) }
+        : { ok: true, json: async () => ({ hourly: fakeHourly(1) }) },
+    );
+    const result = fetchHourly([{ lat: 0, lng: 0 }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(result).resolves.toHaveLength(1);
+    expect(calls).toBe(2);
+    expect(apiBudget()).toBeGreaterThan(0);
+    vi.useRealTimers();
+  });
+
   it('pauses after the API reports a rate limit', async () => {
-    vi.stubGlobal('fetch', async () => ({ ok: false, status: 429, json: async () => ({ reason: 'limit' }) }));
+    vi.stubGlobal('fetch', async () => ({
+      ok: false,
+      status: 429,
+      json: async () => ({ reason: 'Minutely API request limit exceeded' }),
+    }));
     await expect(fetchHourly([{ lat: 0, lng: 0 }])).rejects.toThrow('429');
     expect(apiBudget()).toBe(0);
     expect(apiBudget(Date.now() + 61_000)).toBeGreaterThan(0);

@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Power Globe</title>
     <link rel="stylesheet" href="/src/style.css" />
+    <!-- Open connections early: weather loads at once, imagery as soon as you zoom. -->
+    <link rel="preconnect" href="https://api.open-meteo.com" crossorigin />
+    <link rel="preconnect" href="https://server.arcgisonline.com" crossorigin />
   </head>
   <body>
     <div id="globe"></div>

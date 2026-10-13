@@ -3,7 +3,7 @@ import { WORLD, patchGeometry } from './field.js';
 
 const DEG = Math.PI / 180;
 // How far particles travel: degrees per second for each km/h of wind, at full-globe scale.
-const RATE = 0.22;
+export const RATE = 0.22;
 // Share of trail brightness lost per frame at 60 fps; lower means longer trails.
 const FADE = 0.035;
 // Faster wind draws brighter trails.
