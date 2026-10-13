@@ -1,5 +1,5 @@
 import Globe from 'globe.gl';
-import { LAYERS, getLayer, colorFor, normalize, describeWeatherCode } from './layers.js';
+import { LAYERS, getLayer, describeWeatherCode } from './layers.js';
 import {
   FORECAST_DAYS,
   GRID_STEP,
@@ -20,12 +20,12 @@ import { HAZARDS, hazardRings } from './patterns.js';
 import { DETAIL_ALTITUDE, needsNewRegion, regionFor, viewBounds } from './detail.js';
 import { BASEMAPS, setupBasemap, setupMapFeatures } from './map.js';
 import { setupSearch } from './search.js';
-import { airportWeather, conditionsAt, loadAirports, searchAirports } from './airports.js';
+import { airportPanelWeather, conditionsAt, loadAirports, searchAirports } from './airports.js';
 import { airportDetailsHtml, airportPlace, verdictText } from './airportview.js';
 import { setupWindCheck } from './windcheck.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
-import { setupAirportMap } from './airportmap.js';
+import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
 import { latestObservation } from './metar.js';
 import { explain } from './api.js';
 
@@ -43,16 +43,17 @@ const RETRY_MS = 20_000;
 const POINT_RESERVE = 20;
 // How long zoomed-in detail waits before retrying when the API budget is low.
 const REGION_RETRY_MS = 15_000;
+// How long the airport panel waits for its forecast before it falls back to the site's own copy
+// (the request carries on and still fills the panel in if it answers later). One request to
+// Open-Meteo gives up after 30 s and the Power Globe API gets its turn after that, but Open-Meteo
+// requests also queue one behind another, so the panel's can start late.
+const AIRPORT_WEATHER_TIMEOUT_MS = 45_000;
 // How often the zoomed-in detail follows a moving camera.
 const REGION_FOLLOW_MS = 400;
 // Seconds for zoomed-in detail to fade in once it arrives.
 const REGION_FADE = 0.8;
 const IMAGE_BASE = `${import.meta.env.BASE_URL}img`;
 const NO_OVERLAY = { key: 'none', label: 'None' };
-const MODES = [
-  { key: 'field', label: 'Smooth field' },
-  { key: 'bars', label: 'Bars' },
-];
 
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const largeScreen = window.innerWidth * window.devicePixelRatio >= 1400;
@@ -63,7 +64,6 @@ const phoneLayout = window.matchMedia('(max-width: 640px)');
 const els = {
   globe: document.getElementById('globe'),
   layerButtons: document.getElementById('layer-buttons'),
-  modeButtons: document.getElementById('mode-buttons'),
   basemapButtons: document.getElementById('basemap-buttons'),
   basemapCredit: document.getElementById('credit-basemap'),
   legend: document.getElementById('legend'),
@@ -126,15 +126,15 @@ const els = {
 
 const state = {
   layer: getLayer('temperature'),
-  // Whether the weather layer is drawn at all, or just the map.
-  overlay: true,
-  mode: 'field',
+  // Whether the weather layer is drawn at all, or just the map. It starts as just the map
+  // ("None"); picking a layer turns it on.
+  overlay: false,
   forecast: null,
   winds: null,
   // Fractional index into forecast.times; the field and wind blend between neighbouring steps.
   t: 0,
   playing: false,
-  // Step whose discrete layers (bars, rings) are currently drawn.
+  // Step whose discrete layers (the storm rings) are currently drawn.
   drawnStep: -1,
   dirty: true,
   // 0..1 progress of the colour field fading in after a layer change.
@@ -148,7 +148,6 @@ const state = {
   autoRotate: !reducedMotion,
 };
 
-if (reducedMotion) els.wind.checked = false;
 // On phones the controls start folded so the globe gets the screen.
 if (narrowScreen) setControlsOpen(false);
 
@@ -168,21 +167,6 @@ const globe = new Globe(els.globe, { animateIn: !reducedMotion })
   .backgroundColor('rgba(0, 0, 0, 0)')
   .atmosphereColor('#8ec5ff')
   .atmosphereAltitude(0.22)
-  // Bars
-  .pointLat('lat')
-  .pointLng('lng')
-  .pointRadius(GRID_STEP * 0.18)
-  .pointColor((d) => colorFor(state.layer.stops, d.value))
-  .pointAltitude((d) => 0.005 + normalize(state.layer.stops, d.value) * 0.2)
-  .pointsTransitionDuration(600)
-  .pointLabel(
-    (d) => `<div class="tooltip">
-      <b>${d.lat}°, ${d.lng}°</b><br/>
-      ${state.layer.label}: ${fmt(d.value, state.layer.unit)}<br/>
-      ${describeWeatherCode(d.code)}
-    </div>`,
-  )
-  .onPointClick((d) => !pickedTraffic() && showDetails(d.lat, d.lng))
   // Severe weather: slow, soft pulses
   .ringColor((d) => (t) => `rgba(${HAZARDS[d.kind].rgb}, ${0.7 * (1 - t) ** 2})`)
   .ringMaxRadius(4)
@@ -250,7 +234,7 @@ const airportMap = setupAirportMap({
   onSelect: (airport) => {
     // A tap on a label should not also open the weather where it landed.
     pickedAt = performance.now();
-    showAirport(airport);
+    goToAirport(airport, { stayClose: true });
   },
 });
 
@@ -307,7 +291,7 @@ function radioButtons(container, items, activeKey, onSelect) {
 }
 
 function renderControls() {
-  // "None" leaves just the map: no colour field or bars (wind and storms have their own toggles).
+  // "None" leaves just the map: no colour field (wind and storms have their own toggles).
   radioButtons(els.layerButtons, [...LAYERS, NO_OVERLAY], state.overlay ? state.layer.key : NO_OVERLAY.key, (key) => {
     if (key === NO_OVERLAY.key) {
       if (!state.overlay) return;
@@ -335,12 +319,6 @@ function renderControls() {
       renderControls();
     },
   );
-  radioButtons(els.modeButtons, MODES, state.mode, (key) => {
-    state.mode = key;
-    state.fieldFade = 0;
-    invalidate();
-  });
-  els.modeButtons.hidden = !state.overlay;
   els.legend.hidden = !state.overlay;
 
   const { stops, unit } = state.layer;
@@ -392,19 +370,14 @@ function invalidate() {
   state.dirty = true;
   flow.visible = els.wind.checked && !state.region;
   detailFlow.visible = els.wind.checked && !!state.region;
+  if (state.region) requestRegion(state.region);
   renderControls();
 }
 
 // Discrete layers only change when the timeline reaches a new step.
 function drawStep(step) {
   const { points, values, times } = state.forecast;
-  const layerValues = values[state.layer.variable][step];
 
-  globe.pointsData(
-    state.overlay && state.mode === 'bars'
-      ? points.map((p, i) => ({ ...p, value: layerValues[i], code: values.weather_code[step][i] }))
-      : [],
-  );
   globe.ringsData(
     els.hazards.checked ? hazardRings(points, values.weather_code[step], values.precipitation[step]) : [],
   );
@@ -436,7 +409,7 @@ function regionIndices(i0, i1) {
 }
 
 function drawField() {
-  const show = state.overlay && state.mode === 'field';
+  const show = state.overlay;
   field.visible = show;
   const [i0, i1, t] = blendIndices();
   const ri = show && regionIndices(i0, i1);
@@ -595,14 +568,14 @@ function aspect() {
 }
 
 function enterRegion(pov) {
-  const region = { ...regionFor(viewBounds(pov, aspect())), data: null, winds: null, times: null, fade: 0 };
+  const region = { ...regionFor(viewBounds(pov, aspect())), data: null, winds: null, times: null, fade: 0, requested: false };
   state.region = region;
   detailFlow.setBounds(region.bounds);
   flow.visible = false;
   detailFlow.visible = els.wind.checked;
   detailField.visible = false;
   state.dirty = true;
-  fetchRegion(region);
+  requestRegion(region);
 }
 
 function leaveRegion() {
@@ -614,8 +587,25 @@ function leaveRegion() {
   state.dirty = true;
 }
 
+// Only the colour field and the wind particles draw zoomed-in detail (the storm markers and the
+// airport tools use the global forecast and their own data), so without either on it is not
+// fetched: it would only spend the day's allowance.
+const regionWanted = (region) => state.region === region && (state.overlay || els.wind.checked);
+
+// Fetches the zoomed-in detail for `region` once, if something would draw it. Called again when a
+// weather layer or wind flow is switched on while zoomed in.
+function requestRegion(region) {
+  if (region.requested || !regionWanted(region)) return;
+  region.requested = true;
+  fetchRegion(region);
+}
+
 let lastRegionFetch = 0;
 async function fetchRegion(region) {
+  if (!regionWanted(region)) {
+    region.requested = false;
+    return;
+  }
   if (!isRegionCached(region.shape)) {
     // Zoomed-in detail is optional: wait rather than spend the API's free allowance down to zero.
     if (apiBudget() < region.shape.rows * region.shape.cols + POINT_RESERVE) {
@@ -624,8 +614,11 @@ async function fetchRegion(region) {
     }
     const wait = lastRegionFetch + REGION_FETCH_INTERVAL_MS - Date.now();
     if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-    // The view may have moved on while waiting.
-    if (state.region !== region) return;
+    // The view may have moved on while waiting, or the layers been switched off.
+    if (!regionWanted(region)) {
+      region.requested = false;
+      return;
+    }
     lastRegionFetch = Date.now();
   }
   try {
@@ -679,7 +672,7 @@ function announce(message) {
   });
 }
 
-// The layers and display options fold away; the title and search box stay visible.
+// The layers and display options fold away; the title, search box and wind check button stay visible.
 function setControlsOpen(open) {
   els.controlsBody.hidden = !open;
   els.controlsToggle.setAttribute('aria-expanded', String(open));
@@ -804,8 +797,9 @@ async function showAirport(airport, { fromList = false } = {}) {
   openSidePanel();
   windCheck.close();
   syncWindCheckButton();
-  // `observation`: undefined while the METAR loads, null if there is none.
-  const detail = { airport, hourly: null, fromList, observation: undefined };
+  // `observation`: undefined while the METAR loads, null if there is none. `error`: why there is
+  // no forecast, once it is known.
+  const detail = { airport, hourly: null, fromList, observation: undefined, error: null };
   state.detail = detail;
   mapFeatures.setMarker({ lat: airport.lat, lng: airport.lng, name: airport.iata || airport.ident });
   els.details.classList.remove('hidden');
@@ -823,21 +817,27 @@ async function showAirport(airport, { fromList = false } = {}) {
       detail.observation = { error: explain(err) };
     })
     .finally(() => state.detail === detail && renderDetails());
-  try {
-    // The freshest forecast for the one airport being looked at.
-    const weather = await airportWeather([airport], { preferLive: true });
+  // Shows a forecast, if the panel is still on this airport.
+  const showForecast = (hourly) => {
     if (state.detail !== detail) return;
-    detail.hourly = weather.get(airport.ident);
+    detail.hourly = hourly;
+    detail.error = null;
     renderDetails();
-    const conditions = conditionsAt(detail.hourly, currentTime());
+    const conditions = conditionsAt(hourly, currentTime());
     if (conditions) {
       const result = assessAirport(airport, conditions, windCheck.limits());
       announce(`${airport.name}: ${STATUS[result.status].label}. ${verdictText(result)}.`);
     }
+  };
+  try {
+    // The freshest forecast for the one airport being looked at. Whatever happens, the panel says
+    // something within AIRPORT_WEATHER_TIMEOUT_MS rather than staying on "Loading conditions…".
+    showForecast(await airportPanelWeather(airport, { timeoutMs: AIRPORT_WEATHER_TIMEOUT_MS, onLate: showForecast }));
   } catch (err) {
     console.error(err);
     if (state.detail === detail) {
-      els.detailsBody.innerHTML = `<p>Could not load conditions at this airport. ${err.message ?? ''}</p>`;
+      detail.error = explain(err);
+      renderDetails();
       announce(`Could not load conditions at ${airport.name}.`);
     }
   }
@@ -891,21 +891,24 @@ function backToWindCheck() {
 }
 
 
-// Altitude to show a searched airport from: low enough to make out its runways.
-const AIRPORT_ALTITUDE = 0.004;
 // Degrees of latitude the view spans per globe radius of camera altitude (see detail.js).
 const LAT_SPAN_PER_ALTITUDE = 53;
 
-// Glide to an airport and open its conditions. On phones the details panel covers the lower
-// half of the screen, so aim the camera a little south to put the airport in the open space
-// between the search box and the panel.
-function goToAirport(airport, options) {
+// Glide to an airport and open its conditions, from a height at which its runways show.
+// `stayClose` (a label on the map) never backs out from a closer view: it only centres on the
+// airport, and leaves the panel alone if that airport is already open. On phones the details panel
+// covers the lower half of the screen, so aim the camera a little south to put the airport in the
+// open space between the search box and the panel.
+function goToAirport(airport, { stayClose = false, ...options } = {}) {
+  const altitude = stayClose ? airportFlightAltitude(globe.pointOfView().altitude) : AIRPORT_ALTITUDE;
   let lat = airport.lat;
   if (phoneLayout.matches) {
+    // The controls fold when the panel opens: measure them folded.
+    setControlsOpen(false);
     const top = els.controls.offsetTop + els.controls.offsetHeight;
     const bottom = Math.max(top + 80, window.innerHeight * 0.45);
     const shift = (window.innerHeight / 2 - (top + bottom) / 2) / window.innerHeight;
-    lat = Math.max(-85, Math.min(85, lat - shift * LAT_SPAN_PER_ALTITUDE * AIRPORT_ALTITUDE));
+    lat = Math.max(-85, Math.min(85, lat - shift * LAT_SPAN_PER_ALTITUDE * altitude));
   }
   // Stop turning first: the camera controls keep the turn's momentum, which would otherwise carry
   // the view on past the airport after the flight.
@@ -913,8 +916,9 @@ function goToAirport(airport, options) {
   controls.autoRotate = false;
   stopCameraDrift();
   const duration = reducedMotion ? 0 : 2200;
-  globe.pointOfView({ lat, lng: airport.lng, altitude: AIRPORT_ALTITUDE }, duration);
+  globe.pointOfView({ lat, lng: airport.lng, altitude }, duration);
   setTimeout(stopCameraDrift, duration + 50);
+  if (stayClose && state.detail?.airport?.ident === airport.ident) return;
   showAirport(airport, options);
 }
 
@@ -966,7 +970,7 @@ function renderDetails() {
     return;
   }
   if (detail?.airport) {
-    if (!detail.hourly) return;
+    if (!detail.hourly && !detail.error) return;
     els.detailsBody.innerHTML = airportDetailsHtml({
       airport: detail.airport,
       hourly: detail.hourly,
@@ -976,6 +980,7 @@ function renderDetails() {
       formatTime,
       formatHour,
       observation: detail.observation,
+      error: detail.error,
     });
     return;
   }

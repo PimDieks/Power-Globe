@@ -12,7 +12,7 @@ import {
   startIndex,
   toForecast,
 } from '../src/weather.js';
-import { LAYERS, VARIABLES, buildLut, colorFor, normalize, describeWeatherCode } from '../src/layers.js';
+import { LAYERS, VARIABLES, buildLut, colorFor, describeWeatherCode } from '../src/layers.js';
 
 describe('buildGrid', () => {
   it('covers the globe at the given step', () => {
@@ -285,11 +285,6 @@ describe('colour scales', () => {
   it('fades the lookup table in across the fade range', () => {
     const alpha = [...buildLut({ stops, fade: [0, 10] }, 3)].filter((_, i) => i % 4 === 3);
     expect(alpha).toEqual([0, 128, 255]);
-  });
-
-  it('normalizes within range', () => {
-    expect(normalize(stops, 5)).toBe(0.5);
-    expect(normalize(stops, 20)).toBe(1);
   });
 
   it('describes WMO weather codes', () => {

@@ -113,14 +113,19 @@ function spend(locations, now = Date.now()) {
   }
 }
 
+// Locations that can still be requested now without exceeding the per-minute and per-hour limits.
+// These refill as time passes, unlike a pause or the day's share.
+function windowBudget(now = Date.now()) {
+  spent = spent.filter(([t]) => now - t < LIMITS.at(-1)[0]);
+  return Math.min(
+    ...LIMITS.map(([window, limit]) => limit - spent.reduce((sum, [t, n]) => (now - t < window ? sum + n : sum), 0)),
+  );
+}
+
 // Locations that can still be requested now without exceeding the free limits.
 export function apiBudget(now = Date.now()) {
   if (now < pausedUntil) return 0;
-  spent = spent.filter(([t]) => now - t < LIMITS.at(-1)[0]);
-  return Math.min(
-    DAILY_BUDGET - usedToday(now),
-    ...LIMITS.map(([window, limit]) => limit - spent.reduce((sum, [t, n]) => (now - t < window ? sum + n : sum), 0)),
-  );
+  return Math.min(DAILY_BUDGET - usedToday(now), windowBudget(now));
 }
 
 // For tests.
@@ -159,12 +164,17 @@ async function fetchViaProxy(url, cause) {
   return res.json();
 }
 
+// Why Open-Meteo is not asked: it has paused us, or this browser's share of the day or of the
+// minute or hour is spent.
+const limitReached = () => new ApiError('Open-Meteo usage limit reached for now', 429);
+
 // Ask Open-Meteo directly while this browser is within its allowance, else (or if Open-Meteo
-// refuses or cannot be reached) through the Power Globe API.
-async function fetchJsonNow(url) {
+// refuses or cannot be reached) through the Power Globe API. `skipped`: the caller has decided not
+// to ask Open-Meteo at all.
+async function fetchJsonNow(url, skipped = false) {
   // Requests are counted before they are sent, so this one is already included.
-  if (apiPaused() || usedToday() > DAILY_BUDGET) {
-    return fetchViaProxy(url, new ApiError('Open-Meteo usage limit reached for today', 429));
+  if (skipped || apiPaused() || usedToday() > DAILY_BUDGET) {
+    return fetchViaProxy(url, limitReached());
   }
   try {
     return await fetchDirect(url);
@@ -202,7 +212,9 @@ async function fetchDirect(url) {
 // Open-Meteo's free tier also limits how many requests may run at once, so every request
 // (the global forecast, zoomed-in detail and tapped spots) waits its turn in one queue.
 let queue = Promise.resolve();
-function fetchJson(url) {
+function fetchJson(url, { skipped = false } = {}) {
+  // A request that does not ask Open-Meteo has no need to wait for the ones that do.
+  if (skipped) return fetchJsonNow(url, true);
   const run = queue.then(() => fetchJsonNow(url));
   queue = run.catch(() => {});
   return run;
@@ -260,19 +272,37 @@ export const AIRPORT_RESERVE = 20;
 export const AIRPORT_SNAPSHOT_STEP = 3;
 const BUDGET_POLL_MS = 2000;
 
+// Whether Open-Meteo may be asked at all for the next part of `count` airports. It may not while it
+// has asked us to stop (a minute for the per-minute limit, an hour or until the next day for the
+// others) or while this browser's share of the day cannot cover the part: waiting does not help
+// then, and the Power Globe API answers instead. A list also leaves the reserve free for the
+// airport someone is looking at (`preferLive`, which may use it). The per-minute and per-hour
+// allowances are a separate matter: they refill, so a list waits for them.
+export function openMeteoOpen(count, { preferLive = false } = {}, now = Date.now()) {
+  const room = Math.min(count, CHUNK_SIZE) + (preferLive ? 0 : AIRPORT_RESERVE);
+  return now >= pausedUntil && DAILY_BUDGET - usedToday(now) >= room;
+}
+
 // Hourly airport conditions, 100 airports per request. Long lists are paced to the free API's
-// limits rather than running into them: each request waits until the allowance has room for it
-// (`onWait(true)` while waiting). `onBatch(airports, hourly)` hands over each part as it arrives.
-export async function fetchAirportHourly(airports, { onProgress, onBatch, onWait } = {}) {
+// limits rather than running into them: each request waits until the per-minute and per-hour
+// allowance has room for it (`onWait(true)` while waiting). `preferLive` is for the airport someone
+// is looking at: it may use the reserve, and does not wait but goes to the Power Globe API when the
+// allowance is short. Either way Open-Meteo is not asked at all while openMeteoOpen says it may
+// not be. `onBatch(airports, hourly)` hands over each part as it arrives.
+export async function fetchAirportHourly(airports, { onProgress, onBatch, onWait, preferLive = false } = {}) {
   const parts = chunk(airports, CHUNK_SIZE);
   for (const [i, part] of parts.entries()) {
-    if (apiBudget() < part.length + AIRPORT_RESERVE) {
+    const room = part.length + (preferLive ? 0 : AIRPORT_RESERVE);
+    const open = () => openMeteoOpen(part.length, { preferLive });
+    const short = () => windowBudget() < room;
+    if (!preferLive && open() && short()) {
       onWait?.(true);
-      while (apiBudget() < part.length + AIRPORT_RESERVE) await sleep(BUDGET_POLL_MS);
+      while (open() && short()) await sleep(BUDGET_POLL_MS);
       onWait?.(false);
     }
-    spend(part.length);
-    const data = await fetchJson(buildAirportUrl(part));
+    const ask = open() && !short();
+    if (ask) spend(part.length);
+    const data = await fetchJson(buildAirportUrl(part), { skipped: !ask });
     onBatch?.(part, (Array.isArray(data) ? data : [data]).map((item) => item.hourly));
     onProgress?.(i + 1, parts.length);
   }

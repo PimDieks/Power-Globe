@@ -1,7 +1,7 @@
 // Airports and their runways (from OurAirports, see scripts/build-airports.mjs), airport search,
 // and hourly ground conditions at airports from Open-Meteo.
-import { AIRPORT_VARIABLES, fetchAirportHourly, parseTime } from './weather.js';
-import { SNAPSHOT_FRESH_MS, fetchSnapshot } from './api.js';
+import { AIRPORT_VARIABLES, fetchAirportHourly, openMeteoOpen, parseTime } from './weather.js';
+import { SNAPSHOT_FRESH_MS, fetchSnapshot, withTimeout } from './api.js';
 
 // Case- and accent-insensitive form for matching, so "sao" finds "São Paulo".
 export const fold = (text) =>
@@ -133,12 +133,36 @@ export function snapshotSeries(snapshot) {
 }
 
 let snapshotPromise = null;
-const airportSnapshot = () => (snapshotPromise ??= fetchSnapshot('api/airport-weather.json').then(snapshotSeries));
+// Only a copy that was found is kept: a failed fetch is tried again the next time.
+function airportSnapshot() {
+  snapshotPromise ??= fetchSnapshot('api/airport-weather.json')
+    .then(snapshotSeries)
+    .then((snapshot) => {
+      if (!snapshot) snapshotPromise = null;
+      return snapshot;
+    });
+  return snapshotPromise;
+}
+
+// Fills `result` from the site's own data, if it is no older than `maxAge` and still reaches the
+// present; resolves to the airports in `list` it did not have.
+async function fromSnapshot(list, result, maxAge, now = Date.now()) {
+  const snapshot = await airportSnapshot();
+  if (!snapshot || now - snapshot.built > maxAge || snapshot.end < now) return list;
+  return list.filter((a) => {
+    const series = snapshot.get(a.ident);
+    if (series) result.set(a.ident, series);
+    return !series;
+  });
+}
 
 // Hourly ground conditions for `airports`, fetching only those not cached: from the site's own
-// data while it is recent, else Open-Meteo, else the site's data however old. `preferLive` asks
-// Open-Meteo first (for the one airport being looked at). `onData(map)` is called as each batch
-// arrives, so a long list can fill in progressively.
+// data while it is recent, else Open-Meteo (through the Power Globe API when Open-Meteo refuses),
+// else the site's data however old. When Open-Meteo cannot be asked at all, a list takes the
+// site's data however old first and sends only the airports it lacks to the Power Globe API.
+// `preferLive` asks Open-Meteo first, and does not wait for the pacing but goes to the Power Globe
+// API (for the one airport being looked at, see fetchAirportHourly). `onData(map)` is called as
+// each batch arrives, so a long list can fill in progressively.
 export async function airportWeather(airports, { onData, onProgress, onWait, preferLive = false } = {}) {
   const now = Date.now();
   const result = new Map();
@@ -148,23 +172,17 @@ export async function airportWeather(airports, { onData, onProgress, onWait, pre
     if (cached && now - cached.at < CACHE_MS) result.set(a.ident, cached.hourly);
     else missing.push(a);
   }
-  // Fill in what the site's own data has; resolves to the airports it did not have.
-  const fromSnapshot = async (list, maxAge) => {
-    const snapshot = await airportSnapshot();
-    if (!snapshot || now - snapshot.built > maxAge || snapshot.end < now) return list;
-    return list.filter((a) => {
-      const series = snapshot.get(a.ident);
-      if (series) result.set(a.ident, series);
-      return !series;
-    });
-  };
-  if (missing.length && !preferLive) missing = await fromSnapshot(missing, SNAPSHOT_FRESH_MS);
+  if (missing.length && !preferLive) {
+    missing = await fromSnapshot(missing, result, SNAPSHOT_FRESH_MS, now);
+    if (missing.length && !openMeteoOpen(missing.length)) missing = await fromSnapshot(missing, result, Infinity, now);
+  }
   if (result.size) onData?.(result);
   if (!missing.length) return result;
   try {
     await fetchAirportHourly(missing, {
       onProgress,
       onWait,
+      preferLive,
       onBatch: (batch, hourly) => {
         batch.forEach((a, i) => {
           weatherCache.set(a.ident, { at: Date.now(), hourly: hourly[i] });
@@ -175,9 +193,40 @@ export async function airportWeather(airports, { onData, onProgress, onWait, pre
     });
   } catch (err) {
     const before = result.size;
-    await fromSnapshot(missing.filter((a) => !result.has(a.ident)), Infinity);
+    await fromSnapshot(missing.filter((a) => !result.has(a.ident)), result, Infinity, now);
     if (result.size === before) throw err;
     onData?.(result);
   }
   return result;
+}
+
+// The forecast for the one airport someone is looking at, never leaving them waiting. Every
+// Open-Meteo request shares one queue, so this one can sit behind slower ones, and one request can
+// take a while to be refused and passed on. After `timeoutMs` the site's own data, however old,
+// answers instead (once), while the request carries on; its answer, if it comes in the end, goes
+// to `onLate(hourly)`. Throws with the reason when there is nothing to show.
+export async function airportPanelWeather(airport, { timeoutMs, onLate } = {}) {
+  const request = airportWeather([airport], { preferLive: true }).then((weather) => weather.get(airport.ident));
+  let hourly;
+  try {
+    hourly = await withTimeout(request, timeoutMs, 'no answer in time');
+  } catch (err) {
+    if (err.name !== 'TimeoutError') throw err;
+    let late;
+    let returned = false;
+    request.then(
+      (answer) => {
+        late = answer;
+        if (returned && answer) onLate?.(answer);
+      },
+      () => {},
+    );
+    const copy = new Map();
+    await fromSnapshot([airport], copy, Infinity);
+    returned = true;
+    hourly = late ?? copy.get(airport.ident);
+    if (!hourly) throw err;
+  }
+  if (!hourly) throw new Error('no forecast for this airport');
+  return hourly;
 }

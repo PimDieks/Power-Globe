@@ -190,12 +190,14 @@ body.idle:has(.keep-awake:not(.hidden)) #timeline {
 }
 
 #controls h1 {
-  margin-right: auto;
   white-space: nowrap;
   letter-spacing: 0.24em;
 }
 
+/* On its own row under the search box, with the same gap above it as the header has below it. */
 #windcheck-open {
+  display: block;
+  margin-top: 10px;
   white-space: nowrap;
   padding: 4px 12px;
   font-size: 0.8rem;
@@ -236,11 +238,6 @@ body.idle:has(.keep-awake:not(.hidden)) #timeline {
 
 .control-group h2 {
   margin-top: 14px;
-}
-
-.control-group > .button-row + .button-row,
-#legend + .button-row {
-  margin-top: 12px;
 }
 
 /* Search */
@@ -1262,11 +1259,6 @@ body:not(.idle) #caption {
   font-weight: 600;
 }
 
-.tooltip {
-  font-size: 0.85rem;
-  line-height: 1.4;
-}
-
 /* Phones: one column. The timeline sits at the bottom above the credits; the controls and the
    details panel use the space above it, one at a time, and scroll if they need more. */
 @media (max-width: 640px) {
@@ -1285,7 +1277,7 @@ body:not(.idle) #caption {
   .side-panel {
     top: auto;
     bottom: calc(var(--timeline-top) + 8px);
-    /* Between the timeline and the header with the search box; main.js measures both. */
+    /* Between the timeline and the header with the search box and wind check button; main.js measures both. */
     max-height: calc(100vh - var(--timeline-top) - var(--controls-bottom, 140px) - 2 * var(--gap));
     max-height: calc(100dvh - var(--timeline-top) - var(--controls-bottom, 140px) - 2 * var(--gap));
   }

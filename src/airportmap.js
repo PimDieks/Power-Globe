@@ -6,6 +6,13 @@ import { viewBounds } from './detail.js';
 import { CITIES, labelTier } from './cities.js';
 import { destination, localFrame, placeLabels, runwayEnds, runwayStatus, setupRunways } from './runwaymap.js';
 
+// Altitude to fly to an airport at: low enough to make out its runways.
+export const AIRPORT_ALTITUDE = 0.004;
+
+// The altitude to fly to an airport at when the camera is at `current`: the usual one, but never
+// back out from a closer view.
+export const airportFlightAltitude = (current) => Math.min(AIRPORT_ALTITUDE, current);
+
 // Runways show below this camera altitude (globe radii); a 3 km runway is then over 10 px long.
 export const RUNWAY_ALTITUDE = 0.035;
 // Runway end and wind labels show below this one.
@@ -14,6 +21,9 @@ const MAX_AIRPORTS = 60;
 // Airports whose weather is looked up at a time, nearest to the middle of the view first.
 const MAX_WEATHER = 25;
 const SETTLE_MS = 350;
+// After the weather could not be had for the airports in view, no new lookup for this long, so
+// that every view change does not send the same failing request again.
+export const WEATHER_RETRY_MS = 30_000;
 
 const DEG = Math.PI / 180;
 const wrapLng = (d) => ((((d + 180) % 360) + 360) % 360) - 180;
@@ -78,6 +88,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
   let timer = null;
   let request = 0;
   let active = false;
+  let retryAt = 0;
 
   function aspect() {
     return window.innerWidth / window.innerHeight;
@@ -113,7 +124,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     // Weather for the nearest airports with runways shown and not looked up yet: the site's
     // own data where it has them, else Open-Meteo.
     const missing = shown.filter((a) => !weather.has(a.ident)).slice(0, MAX_WEATHER);
-    if (!missing.length) return;
+    if (!missing.length || Date.now() < retryAt) return;
     const id = ++request;
     try {
       await airportWeather(missing, {
@@ -123,6 +134,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
         },
       });
     } catch (err) {
+      retryAt = Date.now() + WEATHER_RETRY_MS;
       console.error('Could not load weather for runways', err);
     }
   }

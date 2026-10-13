@@ -123,11 +123,14 @@ export function observationHtml(airport, observation, limits, now = Date.now()) 
 }
 
 // The airport details panel at `time`: the latest observation, then the forecast: conditions,
-// verdict, every runway end and the outlook.
-export function airportDetailsHtml({ airport, hourly, time, limits, limitsLabel, formatTime, formatHour, observation }) {
+// verdict, every runway end and the outlook. `error` says why there is no forecast, if so.
+export function airportDetailsHtml({ airport, hourly, time, limits, limitsLabel, formatTime, formatHour, observation, error }) {
   const now = conditionsAt(hourly, time);
   const routes = airport.routes ? ` · routes to ${airport.routes} airports` : '';
   const head = `<p class="airport-place">${escapeHtml(airportPlace(airport))} · ${Math.round(airport.elevationFt)} ft${routes}</p>${observationHtml(airport, observation, limits)}<h3>Forecast</h3>`;
+  if (!hourly && error) {
+    return `${head}<p>The forecast could not be loaded here (${escapeHtml(error)}).</p>`;
+  }
   if (!now) {
     return `${head}<p>No forecast for ${escapeHtml(formatTime(time))} here yet.</p>`;
   }

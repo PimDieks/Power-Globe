@@ -172,6 +172,23 @@ describe('airport panels', () => {
     expect(html).toContain('not an official observation');
   });
 
+  it('says why there is no forecast, and still shows the observation', () => {
+    const html = airportDetailsHtml({
+      airport: SINGLE,
+      hourly: null,
+      time,
+      limits: LIMITS,
+      limitsLabel: 'Regional',
+      formatTime: (t) => t,
+      formatHour: (t) => t.slice(11),
+      observation: { error: 'not reachable' },
+      error: 'Open-Meteo: <b>Daily</b> limit (429)',
+    });
+    expect(html).toContain('The forecast could not be loaded here (Open-Meteo: &lt;b&gt;Daily&lt;/b&gt; limit (429)).');
+    expect(html).toContain('(METAR) could not be loaded here (not reachable)');
+    expect(html).not.toContain('No forecast for');
+  });
+
   it('describes components with gusts in brackets', () => {
     const end = assessRunwayEnd(270, { direction: 300, speed: 20, gust: 30 }, LIMITS);
     expect(alongText(end)).toBe('H 17 (26)');
@@ -239,6 +256,289 @@ describe('airport weather requests', () => {
       [100, 100],
       [50, 50],
     ]);
+  });
+});
+
+describe('airport weather when Open-Meteo refuses', () => {
+  const DAILY_LIMIT = 'Daily API request limit exceeded. Please try again tomorrow.';
+  const OPEN_METEO = 'https://api.open-meteo.com/';
+  const field = (id) => toAirport([id, '', `Field ${id}`, 'Nowhere', 'GB', 51, 0, 10, 0, 1, [['09', 90, '27', 270, 6000, 'ASP']]]);
+  const hourlyFor = () => ({
+    time: ['2026-10-13T00:00'],
+    temperature_2m: [9],
+    dew_point_2m: [8],
+    wind_speed_10m: [5],
+    wind_direction_10m: [270],
+    wind_gusts_10m: [8],
+  });
+  const refused = { ok: false, status: 429, json: async () => ({ error: true, reason: DAILY_LIMIT }) };
+  const missing = { ok: false, status: 404, json: async () => ({}) };
+  // One answer per requested location, as Open-Meteo gives them (an object for a single one).
+  const answer = (url) => {
+    const n = new URL(url).searchParams.get('latitude').split(',').length;
+    const body = Array.from({ length: n }, () => ({ hourly: hourlyFor() }));
+    return { ok: true, json: async () => (n === 1 ? body[0] : body) };
+  };
+  // Open-Meteo refuses (unless `openMeteo`), the Power Globe API answers (unless `proxy` is false),
+  // and the site has no copy of the data (unless it is given as `snapshot`).
+  const services = ({ openMeteo = false, proxy = true, snapshot = null } = {}) =>
+    vi.fn(async (url) => {
+      url = String(url);
+      if (url.startsWith(OPEN_METEO)) return openMeteo ? answer(url) : refused;
+      if (url.includes('/forecast?')) return proxy ? answer(url) : { ok: false, status: 500, json: async () => ({}) };
+      if (url.includes('airport-weather.json')) return snapshot ? { ok: true, json: async () => snapshot } : missing;
+      throw new Error(`unexpected request ${url}`);
+    });
+  const askedOpenMeteo = (fetchMock) => fetchMock.mock.calls.filter(([url]) => String(url).startsWith(OPEN_METEO)).length;
+  // The locations asked of the Power Globe API, one number per request.
+  const askedProxy = (fetchMock) =>
+    fetchMock.mock.calls.filter(([url]) => !String(url).startsWith(OPEN_METEO) && String(url).includes('/forecast?')).map(([url]) => new URL(url).searchParams.get('latitude').split(',').length);
+  // This browser has used `used` of its share of the day; returns what gets written back.
+  const shareUsed = (used) => {
+    const day = new Date().toISOString().slice(0, 10);
+    const writes = [];
+    vi.stubGlobal('localStorage', { getItem: () => JSON.stringify({ day, used }), setItem: (_, value) => writes.push(value) });
+    return writes;
+  };
+  // A copy of the site's data made long ago that still reaches past now, holding the airports `idents` (wind 7 kt).
+  const oldSnapshot = (idents) => {
+    const end = new Date(Date.now() + 86_400_000).toISOString().slice(0, 16);
+    const rows = [[9], [8], [7], [270], [8]];
+    return { built: '2026-10-01T00:00Z', times: [end], airports: Object.fromEntries(idents.map((ident) => [ident, rows])) };
+  };
+  // The modules afresh, so that what one test learns (a pause, the site's copy) does not leak into the next.
+  const fresh = async () => {
+    vi.resetModules();
+    return { ...(await import('../src/airports.js')), ...(await import('../src/weather.js')) };
+  };
+  // Runs `request` for `ms` of fake time and says whether it had settled by then.
+  const settlesWithin = async (request, ms) => {
+    let settled = false;
+    request.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    await vi.advanceTimersByTimeAsync(ms);
+    return settled;
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('asks the Power Globe API for the next airport instead of waiting for the limit to reset', async () => {
+    vi.useFakeTimers();
+    const fetchMock = services();
+    vi.stubGlobal('fetch', fetchMock);
+    const { airportWeather } = await fresh();
+    // The first request finds out the limit is reached, and is answered by the Power Globe API.
+    expect((await airportWeather([field('XAA1')], { preferLive: true })).has('XAA1')).toBe(true);
+    const next = airportWeather([field('XAA2')], { preferLive: true });
+    expect(await settlesWithin(next, 30_000)).toBe(true);
+    expect((await next).get('XAA2').time).toHaveLength(1);
+    expect(askedOpenMeteo(fetchMock)).toBe(1);
+  });
+
+  it('does the same for long lists, without pacing them', async () => {
+    vi.useFakeTimers();
+    const fetchMock = services();
+    vi.stubGlobal('fetch', fetchMock);
+    const { airportWeather } = await fresh();
+    await airportWeather([field('XAB0')], { preferLive: true });
+    const list = Array.from({ length: 150 }, (_, i) => field(`XAB${i + 1}`));
+    const waits = [];
+    const request = airportWeather(list, { onWait: (waiting) => waits.push(waiting) });
+    expect(await settlesWithin(request, 30_000)).toBe(true);
+    expect((await request).size).toBe(150);
+    expect(waits).toEqual([]);
+  });
+
+  it('does not wait for the rest of the day once this browser has used its share', async () => {
+    vi.useFakeTimers();
+    const day = new Date().toISOString().slice(0, 10);
+    vi.stubGlobal('localStorage', { getItem: () => JSON.stringify({ day, used: 4_990 }), setItem: () => {} });
+    vi.stubGlobal('fetch', services({ openMeteo: true }));
+    const { airportWeather } = await fresh();
+    expect(await settlesWithin(airportWeather([field('XAC1')]), 30_000)).toBe(true);
+  });
+
+  it('still paces a list to the per-minute allowance, but not the airport being looked at', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', services({ openMeteo: true }));
+    const { airportWeather, fetchHourly, buildGrid } = await fresh();
+    // 590 of the 600 locations a minute are spent.
+    await fetchHourly(buildGrid(10).slice(0, 590));
+    const waits = [];
+    const list = airportWeather([field('XAD1')], { onWait: (waiting) => waits.push(waiting) });
+    expect(await settlesWithin(list, 30_000)).toBe(false);
+    expect(waits).toEqual([true]);
+    expect(await settlesWithin(list, 31_000)).toBe(true);
+    expect(waits).toEqual([true, false]);
+    // A new minute's worth of allowance is gone again.
+    await fetchHourly(buildGrid(10).slice(0, 590));
+    expect(await settlesWithin(airportWeather([field('XAD2')], { preferLive: true }), 1_000)).toBe(true);
+  });
+
+  it('says why when neither Open-Meteo nor the Power Globe API can be used', async () => {
+    vi.stubGlobal('fetch', services({ proxy: false }));
+    const { airportWeather } = await fresh();
+    await expect(airportWeather([field('XAE1')], { preferLive: true })).rejects.toThrow(`Open-Meteo: ${DAILY_LIMIT} (429)`);
+    // Already paused: the same answer at once, not a wait.
+    await expect(airportWeather([field('XAE2')], { preferLive: true })).rejects.toThrow('usage limit reached');
+  });
+
+  it("falls back to the site's own copy, however old, when both fail", async () => {
+    const end = new Date(Date.now() + 86_400_000).toISOString().slice(0, 16);
+    const rows = Object.values(hourlyFor()).slice(1).map((values) => [values[0]]);
+    const snapshot = { built: '2026-10-01T00:00Z', times: [end], airports: { XAF1: rows } };
+    vi.stubGlobal('fetch', services({ proxy: false, snapshot }));
+    const { airportWeather } = await fresh();
+    const weather = await airportWeather([field('XAF1')], { preferLive: true });
+    expect(weather.get('XAF1').wind_speed_10m).toEqual([5]);
+    expect(weather.get('XAF1').time).toEqual([end]);
+  });
+
+  it('sends the airport being looked at to the Power Globe API, not Open-Meteo, when the minute is used up', async () => {
+    vi.useFakeTimers();
+    const fetchMock = services({ openMeteo: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const { airportWeather, fetchHourly, buildGrid } = await fresh();
+    await fetchHourly(buildGrid(10).slice(0, 600));
+    const asked = askedOpenMeteo(fetchMock);
+    const request = airportWeather([field('XAG1')], { preferLive: true });
+    expect(await settlesWithin(request, 1_000)).toBe(true);
+    expect((await request).has('XAG1')).toBe(true);
+    expect(askedOpenMeteo(fetchMock)).toBe(asked);
+    expect(askedProxy(fetchMock)).toEqual([1]);
+  });
+
+  it('lets the airport being looked at use the locations a list leaves free', async () => {
+    vi.useFakeTimers();
+    const fetchMock = services({ openMeteo: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const { airportWeather, fetchHourly, buildGrid } = await fresh();
+    // 15 of the 600 locations a minute are left: not enough for a list, which keeps 20 free.
+    await fetchHourly(buildGrid(10).slice(0, 585));
+    const asked = askedOpenMeteo(fetchMock);
+    await airportWeather([field('XAH1')], { preferLive: true });
+    expect(askedOpenMeteo(fetchMock)).toBe(asked + 1);
+    expect(askedProxy(fetchMock)).toEqual([]);
+  });
+
+  it("does not ask Open-Meteo for a list the rest of the day's share cannot cover, nor pace it", async () => {
+    vi.useFakeTimers();
+    const writes = shareUsed(4_900);
+    const fetchMock = services({ openMeteo: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const { airportWeather } = await fresh();
+    const waits = [];
+    const request = airportWeather(Array.from({ length: 200 }, (_, i) => field(`XAI${i}`)), { onWait: (waiting) => waits.push(waiting) });
+    expect(await settlesWithin(request, 30_000)).toBe(true);
+    expect((await request).size).toBe(200);
+    expect(waits).toEqual([]);
+    // The 100 locations left of the day are still there, and the Power Globe API answered.
+    expect(askedOpenMeteo(fetchMock)).toBe(0);
+    expect(writes).toEqual([]);
+    expect(askedProxy(fetchMock)).toEqual([100, 100]);
+  });
+
+  it("keeps the day's last 20 locations for the airport being looked at", async () => {
+    vi.useFakeTimers();
+    shareUsed(4_985);
+    const fetchMock = services({ openMeteo: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const { airportWeather } = await fresh();
+    await airportWeather([field('XAJ1')]);
+    expect(askedOpenMeteo(fetchMock)).toBe(0);
+    expect(askedProxy(fetchMock)).toEqual([1]);
+    await airportWeather([field('XAJ2')], { preferLive: true });
+    expect(askedOpenMeteo(fetchMock)).toBe(1);
+  });
+
+  it("takes the site's copy however old before the Power Globe API, which only gets the airports it lacks", async () => {
+    vi.useFakeTimers();
+    const fetchMock = services({ snapshot: oldSnapshot(['XAK1', 'XAK2', 'XAK3']) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { airportWeather } = await fresh();
+    // The first request finds out the limit is reached.
+    await airportWeather([field('XAK0')], { preferLive: true });
+    expect(askedProxy(fetchMock)).toEqual([1]);
+    const weather = await airportWeather(['XAK1', 'XAK2', 'XAK3', 'XAK4', 'XAK5'].map(field));
+    expect(weather.size).toBe(5);
+    expect(weather.get('XAK1').wind_speed_10m).toEqual([7]);
+    expect(weather.get('XAK4').wind_speed_10m).toEqual([5]);
+    expect(askedProxy(fetchMock)).toEqual([1, 2]);
+    expect(askedOpenMeteo(fetchMock)).toBe(1);
+  });
+
+  it("asks for the site's copy again after it could not be had, instead of remembering the failure", async () => {
+    let snapshot = null;
+    const fetchMock = services({ proxy: false });
+    vi.stubGlobal('fetch', async (url) => (String(url).includes('airport-weather.json') && snapshot ? { ok: true, json: async () => snapshot } : fetchMock(url)));
+    const { airportWeather } = await fresh();
+    await expect(airportWeather([field('XAL1')], { preferLive: true })).rejects.toThrow();
+    snapshot = oldSnapshot(['XAL1']);
+    const weather = await airportWeather([field('XAL1')], { preferLive: true });
+    expect(weather.get('XAL1').wind_speed_10m).toEqual([7]);
+  });
+});
+
+describe('the airport panel never waits for ever', () => {
+  const OPEN_METEO = 'https://api.open-meteo.com/';
+  const field = (id) => toAirport([id, '', `Field ${id}`, 'Nowhere', 'GB', 51, 0, 10, 0, 1, [['09', 90, '27', 270, 6000, 'ASP']]]);
+  const live = { time: ['2026-10-13T00:00'], temperature_2m: [9], dew_point_2m: [8], wind_speed_10m: [5], wind_direction_10m: [270], wind_gusts_10m: [8] };
+  // Open-Meteo answers only when `release()` is called; the site's copy, if any, at once.
+  const setup = async (copy) => {
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url) => {
+        url = String(url);
+        if (url.startsWith(OPEN_METEO)) {
+          await held;
+          return { ok: true, json: async () => ({ hourly: live }) };
+        }
+        if (url.includes('airport-weather.json') && copy) return { ok: true, json: async () => copy };
+        return { ok: false, status: 404, json: async () => ({}) };
+      }),
+    );
+    vi.resetModules();
+    return { ...(await import('../src/airports.js')), release };
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the site's copy when the request does not answer in time, and the real answer if it comes later", async () => {
+    vi.useFakeTimers();
+    const end = new Date(Date.now() + 86_400_000).toISOString().slice(0, 16);
+    const { airportPanelWeather, release } = await setup({ built: '2026-10-01T00:00Z', times: [end], airports: { XPA1: [[9], [8], [7], [270], [8]] } });
+    const onLate = vi.fn();
+    const panel = airportPanelWeather(field('XPA1'), { timeoutMs: 45_000, onLate });
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect((await panel).wind_speed_10m).toEqual([7]);
+    expect(onLate).not.toHaveBeenCalled();
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onLate).toHaveBeenCalledTimes(1);
+    expect(onLate.mock.calls[0][0].wind_speed_10m).toEqual([5]);
+  });
+
+  it('says it had no answer when there is no copy either, but still hands over a late answer', async () => {
+    vi.useFakeTimers();
+    const { airportPanelWeather, release } = await setup(null);
+    const onLate = vi.fn();
+    const panel = airportPanelWeather(field('XPB1'), { timeoutMs: 45_000, onLate });
+    const failed = expect(panel).rejects.toThrow('no answer in time');
+    await vi.advanceTimersByTimeAsync(45_000);
+    await failed;
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onLate.mock.calls[0][0].wind_speed_10m).toEqual([5]);
   });
 });
 
