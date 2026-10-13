@@ -1,6 +1,7 @@
 // What the airport panels show: ground conditions, runway wind components and the wind check
 // list, as HTML. Pure functions of the data, so they can be tested without a browser.
 import { conditionsAt } from './airports.js';
+import { SNAPSHOT_FRESH_MS } from './api.js';
 import { STATUS, assessAirport, assessRunwayEnd, describeReasons, formatWind } from './runways.js';
 import { FLIGHT_CATEGORIES } from './metar.js';
 
@@ -76,6 +77,26 @@ export function assessVariable(airport, wind, limits) {
   return { status: worst.status, reasons: [...new Set([...cross.reasons, ...tail.reasons])] };
 }
 
+// Whether conditions come from the site's own copy of the data (see snapshotSeries) and it is
+// older than SNAPSHOT_FRESH_MS: the copy is only used that old when live data was not available.
+const isOldCopy = (hourly, now) => hourly?.builtAt != null && now - hourly.builtAt > SNAPSHOT_FRESH_MS;
+
+const builtText = (builtAt, formatTime) => formatTime(new Date(builtAt).toISOString().slice(0, 16));
+
+// A note on one airport's conditions saying when the site's copy they come from was built, or ''.
+export function copyNote(hourly, formatTime, now = Date.now()) {
+  if (!isOldCopy(hourly, now)) return '';
+  return `From the site's own copy, built ${builtText(hourly.builtAt, formatTime)}, as live data was not available.`;
+}
+
+// The same for a list of airports (the wind check): the oldest old copy among them, or ''.
+export function listCopyNote(series, formatTime, now = Date.now()) {
+  const old = [...series].filter((hourly) => isOldCopy(hourly, now));
+  if (!old.length) return '';
+  const built = Math.min(...old.map((hourly) => hourly.builtAt));
+  return `Some are from the site's own copy, built ${builtText(built, formatTime)}, as live data was not available.`;
+}
+
 const minutesAgo = (t, now) => Math.max(0, Math.round((now - t) / 60_000));
 
 // The latest METAR: what is observed now, and whether the runways can be used in that wind.
@@ -124,8 +145,9 @@ export function observationHtml(airport, observation, limits, now = Date.now()) 
 
 // The airport details panel at `time`: the latest observation, then the forecast: conditions,
 // verdict, every runway end and the outlook. `error` says why there is no forecast, if so.
-export function airportDetailsHtml({ airport, hourly, time, limits, limitsLabel, formatTime, formatHour, observation, error }) {
+export function airportDetailsHtml({ airport, hourly, time, limits, limitsLabel, formatTime, formatHour, observation, error, asOf = Date.now() }) {
   const now = conditionsAt(hourly, time);
+  const copy = copyNote(hourly, formatTime, asOf);
   const routes = airport.routes ? ` · routes to ${airport.routes} airports` : '';
   const head = `<p class="airport-place">${escapeHtml(airportPlace(airport))} · ${Math.round(airport.elevationFt)} ft${routes}</p>${observationHtml(airport, observation, limits)}<h3>Forecast</h3>`;
   if (!hourly && error) {
@@ -168,6 +190,7 @@ export function airportDetailsHtml({ airport, hourly, time, limits, limitsLabel,
 
   return `${head}
     <p>${escapeHtml(formatTime(time))} · model forecast, not an official observation (METAR)</p>
+    ${copy ? `<p>${escapeHtml(copy)}</p>` : ''}
     <div class="verdict status-${result.status}">
       <span class="status-icon" aria-hidden="true">${status.icon}</span>
       <span><b>${status.label}</b><br />${escapeHtml(verdictText(result))}</span>
@@ -210,6 +233,10 @@ export function windProblems(airports, weather, time, limits, { marginal = true 
   problems.sort((a, b) => STATUS[b.status].rank - STATUS[a.status].rank || b.best.load - a.best.load);
   return { problems, checked };
 }
+
+// Whether a tap on an airport's label leaves the panel alone: it is that airport's, unless it is
+// showing why there is no forecast, when the tap tries again.
+export const panelStays = (detail, airport) => detail?.airport?.ident === airport.ident && !detail.error;
 
 // One row of the wind check list, a button that opens the airport.
 export function problemRowHtml({ airport, conditions, status, best }) {

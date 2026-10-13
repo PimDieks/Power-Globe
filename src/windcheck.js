@@ -3,7 +3,7 @@
 import { DEFAULT_LIMITS, PRESETS } from './runways.js';
 import { airportWeather, loadAirports, majorAirports } from './airports.js';
 import { AIRPORT_RESERVE, apiBudget } from './weather.js';
-import { problemRowHtml, windProblems } from './airportview.js';
+import { listCopyNote, problemRowHtml, windProblems } from './airportview.js';
 
 const LIMITS_KEY = 'power-globe:limits';
 const ORDER_KEY = 'power-globe:check-order';
@@ -170,7 +170,8 @@ export function setupWindCheck({ els, getTime, getCenter, formatTime, onSelect, 
           });
         }
         loadedAt = Date.now();
-        setStatus(`${total} major airports checked`);
+        const note = listCopyNote(checked.values(), formatTime);
+        setStatus(note ? `${total} major airports checked. ${note}` : `${total} major airports checked`);
       } catch (err) {
         console.error(err);
         setStatus(`${err.message || 'Could not load airport weather'}.`);
