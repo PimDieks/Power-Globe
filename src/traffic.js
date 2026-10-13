@@ -44,7 +44,7 @@ export const SATELLITE_GROUPS = {
 // OpenSky's free anonymous allowance is about 100 worldwide requests a day, so ask rarely and
 // move the aircraft in between.
 const GLOBAL_MS = 5 * 60_000;
-const GLOBAL_RETRY_MS = 2 * 60_000;
+const GLOBAL_RETRY_MS = 5 * 60_000;
 const GLOBAL_LIMIT_PAUSE_MS = 30 * 60_000;
 const AREA_MS = 15_000;
 const MILITARY_MS = 60_000;
@@ -52,8 +52,9 @@ const MILITARY_MS = 60_000;
 const FEED_RETRY_MS = 60_000;
 // Aircraft not heard from for this long are dropped.
 const STALE_MS = GLOBAL_MS + 2 * 60_000;
-// Zoomed in closer than this (globe radii), the area in view gets its own fresher feed.
-const AREA_ALTITUDE = 0.8;
+// Flights within this many nautical miles of the middle of the view come from an ADS-B feed
+// every few seconds, at any zoom: it is fresher than the worldwide feed, includes military
+// aircraft, and works when the worldwide feed (OpenSky) cannot be reached.
 const MAX_AREA_NM = 250;
 // Moving the aircraft is smooth enough at 10 updates a second; with many aircraft, a share of
 // them moves each frame instead, so no single frame does all the work.
@@ -295,8 +296,8 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
         const limited = err.status === 429;
         nextGlobal = Date.now() + (limited ? GLOBAL_LIMIT_PAUSE_MS : GLOBAL_RETRY_MS);
         status.flights = limited
-          ? "OpenSky's free daily allowance is used up for now; zoom in to see flights near you."
-          : `Worldwide flights unavailable (${explain(err)}); zoom in to see flights near you.`;
+          ? "OpenSky's free daily allowance is used up for now; showing flights around the middle of the view."
+          : `Worldwide flights unavailable (${explain(err)}); showing flights around the middle of the view.`;
       }
     });
   }
@@ -328,7 +329,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
         nextMilitary = Date.now() + MILITARY_MS;
       } catch (err) {
         console.error(err);
-        status.military = `Military flights unavailable (${explain(err)})`;
+        status.military = `Worldwide military flights unavailable (${explain(err)}); showing those around the middle of the view.`;
         nextMilitary = Date.now() + FEED_RETRY_MS;
       }
     });
@@ -537,7 +538,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
       const wall = Date.now();
       if (settings.flights && wall >= nextGlobal) loadGlobal();
       if (settings.military && wall >= nextMilitary) loadMilitary();
-      if ((settings.flights || settings.military) && pov.altitude < AREA_ALTITUDE) {
+      if (settings.flights || settings.military) {
         const moved = lastArea && greatCircleNm(lastArea, pov) > lastArea.nm / 2;
         if (wall >= nextArea || moved) loadArea(pov);
       }

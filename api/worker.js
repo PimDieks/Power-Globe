@@ -3,7 +3,7 @@
 // at the edge (so many visitors share one upstream request) and adds CORS headers.
 //
 //   GET /                         what is here
-//   GET /flights/global           all aircraft (OpenSky Network), cached 60 s
+//   GET /flights/global           all aircraft (OpenSky Network), cached 2 min with an account, else 5 min
 //   GET /flights/area?lat&lon&nm  aircraft around a point, up to 250 NM (adsb.lol, airplanes.live, adsb.fi), cached 10 s
 //   GET /flights/military         military aircraft worldwide (same feeds), cached 30 s
 //   GET /metar?ids=EHAM,KJFK      latest METARs (NOAA Aviation Weather Center), cached 2 min
@@ -26,6 +26,10 @@ const FORECAST_PARAMS = new Set(['latitude', 'longitude', 'elevation', 'hourly',
 const MAX_FORECAST_PLACES = 100;
 // Answers kept to serve when a service fails or limits us.
 const BACKUP_SECONDS = 6 * 3600;
+// Give up on a service after this long, and remember a failure for a while so that neither the
+// service nor visitors are kept waiting on it again straight away.
+const UPSTREAM_TIMEOUT_MS = 10_000;
+const FAILURE_SECONDS = 120;
 // Requests a minute per visitor (counted per Worker instance, so roughly).
 export const RATE_LIMIT = 120;
 
@@ -45,7 +49,7 @@ class HttpError extends Error {
 async function upstream(fetchFn, url, init = {}) {
   let res;
   try {
-    res = await fetchFn(url, { ...init, headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/plain, */*', ...init.headers }, signal: AbortSignal.timeout(20_000) });
+    res = await fetchFn(url, { ...init, headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/plain, */*', ...init.headers }, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
   } catch (err) {
     throw new HttpError(502, `${new URL(url).host} unreachable (${err.message})`);
   }
@@ -68,20 +72,32 @@ async function fromFeeds(fetchFn, urlFor) {
 }
 
 let openskyToken = null;
-// An OpenSky OAuth2 token when an account is configured, else anonymous access.
+// An OpenSky OAuth2 token when an account is configured, else anonymous access (also when the
+// account's token cannot be had, so flights still load on the anonymous allowance).
 async function openskyHeaders(fetchFn, env) {
-  if (!env.OPENSKY_CLIENT_ID || !env.OPENSKY_CLIENT_SECRET) return {};
+  if (!openskyAccount(env)) return {};
   if (!openskyToken || openskyToken.expires < Date.now() + 30_000) {
-    const res = await upstream(fetchFn, 'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ grant_type: 'client_credentials', client_id: env.OPENSKY_CLIENT_ID, client_secret: env.OPENSKY_CLIENT_SECRET }),
-    });
-    const { access_token, expires_in } = await res.json();
-    openskyToken = { value: access_token, expires: Date.now() + expires_in * 1000 };
+    try {
+      const res = await upstream(fetchFn, 'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ grant_type: 'client_credentials', client_id: env.OPENSKY_CLIENT_ID, client_secret: env.OPENSKY_CLIENT_SECRET }),
+      });
+      const { access_token, expires_in } = await res.json();
+      openskyToken = { value: access_token, expires: Date.now() + expires_in * 1000 };
+    } catch (err) {
+      console.error('OpenSky sign-in failed; asking anonymously', err);
+      return {};
+    }
   }
   return { Authorization: `Bearer ${openskyToken.value}` };
 }
+
+const openskyAccount = (env) => Boolean(env.OPENSKY_CLIENT_ID && env.OPENSKY_CLIENT_SECRET);
+// How long a worldwide answer is shared. Each costs 4 OpenSky credits: an account has 4,000 a
+// day (one answer every 2 minutes uses under 3,000), anonymous use 400 (every 5 minutes, about
+// a third of a day).
+const openskySeconds = (env) => (openskyAccount(env) ? 120 : 300);
 
 const json = (body, maxAge) =>
   new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${maxAge}` } });
@@ -96,11 +112,18 @@ const number = (v, min, max) => {
 export async function route(url, env = {}, fetchFn = fetch) {
   const path = url.pathname.replace(/\/+$/, '') || '/';
   if (path === '/') {
-    return json({ name: 'Power Globe API', routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/metar?ids=', '/satellites/<group>'] }, 3600);
+    return json(
+      {
+        name: 'Power Globe API',
+        routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/metar?ids=', '/satellites/<group>', '/forecast?'],
+        opensky: openskyAccount(env) ? 'account' : 'anonymous',
+      },
+      300,
+    );
   }
   if (path === '/flights/global') {
     const res = await upstream(fetchFn, 'https://opensky-network.org/api/states/all?extended=1', { headers: await openskyHeaders(fetchFn, env) });
-    return json({ source: 'OpenSky Network', fetched: Date.now(), data: await res.json() }, 60);
+    return json({ source: 'OpenSky Network', fetched: Date.now(), data: await res.json() }, openskySeconds(env));
   }
   if (path === '/flights/area') {
     // Snapped so nearby views share cached answers.
@@ -192,7 +215,12 @@ export default {
           res.headers.set('X-Power-Globe-Backup', '1');
           res.headers.set('Cache-Control', 'public, max-age=60');
         } else {
-          res = new Response(JSON.stringify({ error: err.message }), { status: err.status ?? 502, headers: { 'Content-Type': 'application/json' } });
+          res = new Response(JSON.stringify({ error: err.message }), {
+            status: err.status ?? 502,
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${FAILURE_SECONDS}` },
+          });
+          // Bad requests are the visitor's; failures upstream are remembered briefly.
+          if (cache && (err.status ?? 502) >= 429) ctx?.waitUntil(cache.put(key, res.clone()));
         }
       }
     }
