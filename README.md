@@ -12,7 +12,7 @@ An open-source, interactive 3D globe that visualizes temperature and other weath
   - **Military flights:** the worldwide military feed from the same ADS-B networks, in their own colour. Only aircraft that broadcast ADS-B are included.
   - **Satellites:** all active satellites, or just space stations, Starlink, navigation, weather or military satellites, from [CelesTrak](https://celestrak.org/)'s orbital elements, computed live with SGP4 ([satellite.js](https://github.com/shashwatak/satellite-js)) in a background worker, at their real height: low orbits close in, the geostationary belt far out.
   - Tap an aircraft for its altitude, speed, track, climb or descent, squawk (emergencies stand out), registration, type and operator; tap a satellite for its altitude, speed, orbit, period and inclination, with its next orbit drawn.
-- **Four views of the Earth:** satellite imagery, streets, topographic, or night lights (NASA Black Marble). Choose **None** among the weather layers for just the map.
+- **Four views of the Earth:** satellite imagery, streets, topographic, or night lights (NASA Black Marble, continuing as CARTO's dark map once zoomed in past its 500 m resolution). Choose **None** among the weather layers for just the map.
 - **Wind as living brushstrokes:** thousands of glowing particles drift along the forecast wind, leaving fading trails, in the spirit of [earth.nullschool.net](https://earth.nullschool.net).
 - **Smooth colour fields:** temperature, wind speed, precipitation, cloud cover and humidity are painted as soft, bicubic-interpolated colour maps in muted palettes. Clear skies and dry areas fade to transparent so the Earth shows through.
 - **An animated 5-day forecast:** it plays on its own in 3-hour steps, blending smoothly between them. Pause, scrub or jump back to **Now** at any time.
@@ -54,7 +54,15 @@ The globe and the wind check use these while they are less than six and a half h
 
 ## Power Globe API (live data proxy)
 
-Live flights, METARs and (if needed) satellites come from services that do not accept requests from web pages (browsers block them, "Failed to fetch"). `api/worker.js` is a small proxy for them, run on Cloudflare Workers (free plan: 100,000 requests a day). It fetches the open feeds server-side, caches each answer at the edge (flights in an area 10 s, worldwide military 30 s, worldwide flights 60 s, METARs 2 min, satellites 2 h) so visitors share requests, and only answers this site. Routes: `/flights/global`, `/flights/area?lat=&lon=&nm=`, `/flights/military`, `/metar?ids=`, `/satellites/<group>`.
+Live flights, METARs and (if needed) satellites come from services that do not accept requests from web pages (browsers block them, "Failed to fetch"). `api/worker.js` is a small proxy for them, run on Cloudflare Workers (free plan: 100,000 requests a day). It fetches the open feeds server-side, caches each answer at the edge (flights in an area 10 s, worldwide military 30 s, worldwide flights 60 s, METARs 2 min, satellites 2 h) so visitors share requests, and only answers this site. Routes: `/flights/global`, `/flights/area?lat=&lon=&nm=`, `/flights/military`, `/metar?ids=`, `/satellites/<group>`, and `/forecast?<Open-Meteo query>` (cached 30 min), which the site uses when Open-Meteo refuses a visitor (for example after its daily limit).
+
+### Never overloading the services
+
+- **One shared answer instead of many:** the site's own data (above) and the API's edge cache mean visitors share downloads; the global forecast is the same for everyone.
+- **Backups instead of retries:** the API keeps every answer for 6 hours and serves that copy if a service fails or limits it, rather than asking again.
+- **Per-visitor limits:** the API answers each visitor at most 120 requests a minute.
+- **Browser budgets:** each browser keeps to half of Open-Meteo's free daily allowance (5,000 locations, remembered across page loads) and to its per-minute and per-hour limits, and after a limit is reported stops asking until it resets (the next day for the daily limit), using the site's copy or the API instead. Zoomed-in detail is skipped rather than sent through the API.
+- **Paced feeds:** flights are asked for at most every 15 seconds (area), 60 seconds (military) and 5 minutes (worldwide), METARs at most every 5 minutes per airport, satellites every 2 hours.
 
 To set it up once:
 
@@ -62,7 +70,7 @@ To set it up once:
 2. Under **My Profile → API Tokens**, create a token from the **Edit Cloudflare Workers** template.
 3. In this repository's **Settings → Secrets and variables → Actions**, add the secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
 4. Run the **Deploy the Power Globe API** workflow (Actions tab). Its log ends with the API's address, like `https://power-globe-api.<subdomain>.workers.dev`.
-5. Under **Settings → Secrets and variables → Actions → Variables**, add `API_URL` with that address, and run **Deploy to GitHub Pages**.
+5. This site's API (`https://power-globe-api.pimdieks.workers.dev`) is built in (`src/api.js`). A fork adds its own address as the variable `API_URL` under **Settings → Secrets and variables → Actions → Variables**, and runs **Deploy to GitHub Pages**.
 
 Optionally, with a free OpenSky Network account, add its API client as Worker secrets for a larger allowance: `npx wrangler secret put OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` in `api/`. Without the proxy everything else works; live flights and METARs then show why they are unavailable.
 
@@ -122,6 +130,7 @@ Precipitation is shown as a rate, mm per hour averaged over the 3 hours up to th
 - Live flights: [The OpenSky Network](https://opensky-network.org/) (free for non-commercial use), [adsb.lol](https://adsb.lol/) (Open Database License), [airplanes.live](https://airplanes.live/) and [adsb.fi](https://adsb.fi/) (free for non-commercial use).
 - Satellites: orbital elements from [CelesTrak](https://celestrak.org/); positions computed with [satellite.js](https://github.com/shashwatak/satellite-js) (MIT).
 - Street and topographic maps: [Esri](https://www.esri.com/) World Street Map and World Topo Map (Esri, HERE, Garmin, USGS, OpenStreetMap contributors and the GIS User Community), under [Esri's terms of use](https://www.esri.com/en-us/legal/terms/full-master-agreement).
+- Close-up night map: © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors © [CARTO](https://carto.com/attributions).
 - Night lights: [NASA Black Marble](https://earthobservatory.nasa.gov/features/NightLights) (public domain), via [NASA GIBS](https://www.earthdata.nasa.gov/engage/open-data-services-software/earthdata-developer-portal/gibs-api).
 - Satellite tiles: [Esri World Imagery](https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9) (Esri, Maxar, Earthstar Geographics and the GIS User Community), used under [Esri's terms of use](https://www.esri.com/en-us/legal/terms/full-master-agreement).
 - Backdrop image: NASA Blue Marble (public domain), via the [three-globe](https://github.com/vasturiano/three-globe) examples (MIT).

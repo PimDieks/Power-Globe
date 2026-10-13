@@ -13,7 +13,9 @@ import { majorAirports, toAirport } from '../src/airports.js';
 
 const OUT = new URL('../public/data/api/', import.meta.url);
 const AIRPORTS = new URL('../public/data/airports.json', import.meta.url);
-const CHUNK = 100;
+// Smaller requests than the site's own, so each answer stays well under a megabyte.
+const CHUNK = 50;
+const ATTEMPTS = 5;
 // Stay under Open-Meteo's 600 locations a minute.
 const PER_MINUTE = Number(process.env.PER_MINUTE) || 500;
 
@@ -29,19 +31,33 @@ async function paced(url, locations) {
     await sleep(60_000 - (now - window[0][0]) + 100);
   }
   window.push([Date.now(), locations]);
-  for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
-    if (res.ok) {
-      const data = await res.json();
-      return Array.isArray(data) ? data : [data];
-    }
-    const body = await res.text();
-    if (res.status === 429 && attempt < 4) {
-      await sleep(5_000 * 2 ** attempt);
+  // Network hiccups and cut-off answers happen on shared CI runners; try again with growing waits.
+  let lastError;
+  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+    if (attempt) await sleep(5_000 * 2 ** (attempt - 1));
+    let res;
+    let body;
+    try {
+      // gzip only: Node's fetch has had trouble with long brotli streams.
+      res = await fetch(url, { headers: { 'Accept-Encoding': 'gzip' }, signal: AbortSignal.timeout(90_000) });
+      body = await res.text();
+    } catch (err) {
+      lastError = new Error(`request failed: ${err.cause?.code ?? err.message}`);
       continue;
     }
-    throw new Error(`Open-Meteo ${res.status}: ${body.slice(0, 120)}`);
+    if (!res.ok) {
+      lastError = new Error(`Open-Meteo ${res.status}: ${body.slice(0, 120)}`);
+      if (res.status === 429 && /daily|hourly/i.test(body)) break;
+      continue;
+    }
+    try {
+      const data = JSON.parse(body);
+      return Array.isArray(data) ? data : [data];
+    } catch (err) {
+      lastError = new Error(`unreadable answer (${body.length} bytes): ${err.message}`);
+    }
   }
+  throw lastError;
 }
 
 const round = (v, digits) => (v == null ? null : Number(v.toFixed(digits)));
@@ -60,8 +76,17 @@ async function airportWeather() {
   const airports = majorAirports(rows.map(toAirport));
   const out = {};
   let times = null;
+  let failed = 0;
   for (const part of chunk(airports, CHUNK)) {
-    const data = await paced(buildAirportUrl(part), part.length);
+    let data;
+    try {
+      data = await paced(buildAirportUrl(part), part.length);
+    } catch (err) {
+      // Leave these airports out; the site asks Open-Meteo for them itself.
+      console.error(`airports ${part[0].ident}…: ${err.message}`);
+      failed += part.length;
+      continue;
+    }
     data.forEach(({ hourly }, i) => {
       // Every third hour (00, 03, ... GMT), the timeline's steps.
       const keep = hourly.time.flatMap((t, k) => (Number(t.slice(11, 13)) % AIRPORT_SNAPSHOT_STEP === 0 ? [k] : []));
@@ -69,6 +94,8 @@ async function airportWeather() {
       out[part[i].ident] = AIRPORT_VARIABLES.map((v) => keep.map((k) => round(hourly[v]?.[k], v === 'temperature_2m' || v === 'dew_point_2m' ? 1 : 0)));
     });
   }
+  if (!times) throw new Error('no airport weather at all');
+  if (failed) console.error(`${failed} of ${airports.length} airports left out`);
   return { step: AIRPORT_SNAPSHOT_STEP, variables: AIRPORT_VARIABLES, units: { wind: 'kn', temperature: '°C' }, times, airports: out };
 }
 

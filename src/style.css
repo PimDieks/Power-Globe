@@ -221,7 +221,26 @@ body.idle:has(.keep-awake:not(.hidden)) #timeline {
 }
 
 #controls-body {
+  margin-top: 6px;
+}
+
+/* Weather, Map and Live traffic, each with its own controls, divided by a line. */
+.control-group {
+  padding-top: 4px;
+}
+
+.control-group + .control-group {
+  margin-top: 16px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.control-group h2 {
   margin-top: 14px;
+}
+
+.control-group > .button-row + .button-row,
+#legend + .button-row {
+  margin-top: 12px;
 }
 
 /* Search */

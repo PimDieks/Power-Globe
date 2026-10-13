@@ -297,3 +297,13 @@ describe('colour scales', () => {
     expect(describeWeatherCode(1234)).toBe('Unknown');
   });
 });
+
+describe('limitPause', () => {
+  it('waits for the next day after the daily limit, an hour after the hourly one', async () => {
+    const { limitPause } = await import('../src/weather.js');
+    const now = Date.UTC(2026, 9, 13, 18, 0);
+    expect(limitPause('Daily API request limit exceeded. Please try again tomorrow.', now)).toBe(6 * 3_600_000);
+    expect(limitPause('Hourly API request limit exceeded.', now)).toBe(3_600_000);
+    expect(limitPause('Minutely API request limit exceeded.', now)).toBe(60_000);
+  });
+});

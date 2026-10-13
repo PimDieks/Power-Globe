@@ -35,7 +35,7 @@
           <input
             id="search-input"
             type="search"
-            placeholder="Search an airport, e.g. EHAM or JFK"
+            placeholder="Airport, city or code (EHAM)"
             autocomplete="off"
             spellcheck="false"
             enterkeyhint="search"
@@ -49,33 +49,37 @@
         </div>
 
         <div id="controls-body">
-          <div class="button-row" id="layer-buttons" role="radiogroup" aria-label="Weather layer"></div>
-          <div id="legend"></div>
+          <section class="control-group" aria-labelledby="weather-title">
+            <h2 id="weather-title">Weather</h2>
+            <div class="button-row" id="layer-buttons" role="radiogroup" aria-label="Weather layer"></div>
+            <div id="legend"></div>
+            <div class="button-row" id="mode-buttons" role="radiogroup" aria-label="Show the weather layer as"></div>
+            <label class="toggle"><input type="checkbox" id="toggle-wind" checked /> Wind flow</label>
+            <label class="toggle"><input type="checkbox" id="toggle-hazards" checked /> Storms &amp; heavy precipitation</label>
+            <div id="pattern-legend"></div>
+            <div class="status-row">
+              <span id="status" role="status">Loading forecast…</span>
+              <button id="refresh" type="button">Refresh</button>
+            </div>
+          </section>
 
-          <h2>Earth</h2>
-          <div class="button-row" id="basemap-buttons" role="radiogroup" aria-label="Map of the Earth"></div>
+          <section class="control-group" aria-labelledby="map-title">
+            <h2 id="map-title">Map</h2>
+            <div class="button-row" id="basemap-buttons" role="radiogroup" aria-label="Map of the Earth"></div>
+          </section>
 
-          <h2>Display</h2>
-          <div class="button-row" id="mode-buttons" role="radiogroup" aria-label="Display style"></div>
-          <label class="toggle"><input type="checkbox" id="toggle-wind" checked /> Wind flow</label>
-          <label class="toggle"><input type="checkbox" id="toggle-hazards" checked /> Storms &amp; heavy precipitation</label>
-          <div id="pattern-legend"></div>
-
-          <h2>Live traffic</h2>
-          <label class="toggle"><input type="checkbox" id="toggle-flights" /> Flights</label>
-          <label class="toggle"><input type="checkbox" id="toggle-military" /> Military flights</label>
-          <label class="toggle"><input type="checkbox" id="toggle-satellites" /> Satellites</label>
-          <label class="select-row" id="satellite-group-row" hidden>
-            <span>Show</span>
-            <select id="satellite-group"></select>
-          </label>
-          <div id="traffic-legend"></div>
-          <div id="traffic-status" class="traffic-status"></div>
-
-          <div class="status-row">
-            <span id="status" role="status">Loading forecast…</span>
-            <button id="refresh" type="button">Refresh</button>
-          </div>
+          <section class="control-group" aria-labelledby="traffic-title">
+            <h2 id="traffic-title">Live traffic</h2>
+            <label class="toggle"><input type="checkbox" id="toggle-flights" /> Flights</label>
+            <label class="toggle"><input type="checkbox" id="toggle-military" /> Military flights</label>
+            <label class="toggle"><input type="checkbox" id="toggle-satellites" /> Satellites</label>
+            <label class="select-row" id="satellite-group-row" hidden>
+              <span>Show</span>
+              <select id="satellite-group"></select>
+            </label>
+            <div id="traffic-legend"></div>
+            <div id="traffic-status" class="traffic-status"></div>
+          </section>
         </div>
       </div>
     </aside>

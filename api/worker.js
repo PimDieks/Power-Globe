@@ -8,6 +8,12 @@
 //   GET /flights/military         military aircraft worldwide (same feeds), cached 30 s
 //   GET /metar?ids=EHAM,KJFK      latest METARs (NOAA Aviation Weather Center), cached 2 min
 //   GET /satellites/<group>       orbital elements as TLE (CelesTrak), cached 2 h
+//   GET /forecast?<Open-Meteo query>  Open-Meteo forecasts (up to 100 places), cached 30 min
+//
+// Nothing upstream is ever asked more than its cache allows: every answer is cached at the edge
+// and shared by all visitors, a backup of it is kept for 6 hours and served if the service
+// fails or limits us (rather than asking again), and each visitor may make at most
+// RATE_LIMIT requests a minute.
 //
 // Settings (wrangler.toml [vars] or secrets): ALLOWED_ORIGINS, a comma-separated list of sites
 // allowed to use it ("*" for any); OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET (optional) for an
@@ -16,6 +22,12 @@
 const USER_AGENT = 'power-globe-api (https://github.com/PimDieks/Power-Globe)';
 const DEFAULT_ORIGINS = 'https://pimdieks.github.io,http://localhost:5173,http://localhost:4173';
 const SATELLITE_GROUPS = ['active', 'stations', 'starlink', 'gnss', 'weather', 'military'];
+const FORECAST_PARAMS = new Set(['latitude', 'longitude', 'elevation', 'hourly', 'forecast_days', 'timezone', 'temporal_resolution', 'wind_speed_unit']);
+const MAX_FORECAST_PLACES = 100;
+// Answers kept to serve when a service fails or limits us.
+const BACKUP_SECONDS = 6 * 3600;
+// Requests a minute per visitor (counted per Worker instance, so roughly).
+export const RATE_LIMIT = 120;
 
 export const ADSB_FEEDS = [
   { name: 'adsb.lol', military: 'https://api.adsb.lol/v2/mil', area: (lat, lon, nm) => `https://api.adsb.lol/v2/point/${lat}/${lon}/${nm}` },
@@ -102,6 +114,17 @@ export async function route(url, env = {}, fetchFn = fetch) {
     const text = await res.text();
     return new Response(text.trim() ? text : '[]', { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=120' } });
   }
+  if (path === '/forecast') {
+    const params = new URLSearchParams();
+    for (const [key, value] of url.searchParams) {
+      if (!FORECAST_PARAMS.has(key) || value.length > 4000) throw new HttpError(400, `Unsupported parameter: ${key}`);
+      params.set(key, value);
+    }
+    const places = (params.get('latitude') ?? '').split(',').filter(Boolean).length;
+    if (!places || places > MAX_FORECAST_PLACES) throw new HttpError(400, `latitude: 1 to ${MAX_FORECAST_PLACES} places`);
+    const res = await upstream(fetchFn, `https://api.open-meteo.com/v1/forecast?${params}`);
+    return new Response(await res.text(), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=1800' } });
+  }
   const satellites = path.match(/^\/satellites\/([a-z]+)$/);
   if (satellites) {
     if (!SATELLITE_GROUPS.includes(satellites[1])) throw new HttpError(404, 'Unknown satellite group');
@@ -111,6 +134,19 @@ export async function route(url, env = {}, fetchFn = fetch) {
     return new Response(text, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=7200' } });
   }
   throw new HttpError(404, 'Not found');
+}
+
+const visitors = new Map();
+// Whether a visitor has made too many requests this minute.
+export function overLimit(ip, now = Date.now(), limit = RATE_LIMIT) {
+  if (visitors.size > 10_000) visitors.clear();
+  const v = visitors.get(ip);
+  if (!v || now - v.start > 60_000) {
+    visitors.set(ip, { start: now, count: 1 });
+    return false;
+  }
+  v.count++;
+  return v.count > limit;
 }
 
 export function corsHeaders(origin, env = {}) {
@@ -130,13 +166,29 @@ export default {
     const url = new URL(request.url);
     const cache = globalThis.caches?.default;
     const key = new Request(url.toString(), { method: 'GET' });
+    const backupKey = new Request(`${url.origin}/__backup${url.pathname}${url.search}`, { method: 'GET' });
     let res = await cache?.match(key);
     if (!res) {
+      if (overLimit(request.headers.get('CF-Connecting-IP') ?? 'unknown')) {
+        return new Response(JSON.stringify({ error: 'Too many requests; slow down' }), { status: 429, headers: { ...cors, 'Content-Type': 'application/json', 'Retry-After': '60' } });
+      }
       try {
         res = await route(url, env);
-        if (cache) ctx?.waitUntil(cache.put(key, res.clone()));
+        if (cache) {
+          const backup = new Response(res.clone().body, res);
+          backup.headers.set('Cache-Control', `public, max-age=${BACKUP_SECONDS}`);
+          ctx?.waitUntil(Promise.all([cache.put(key, res.clone()), cache.put(backupKey, backup)]));
+        }
       } catch (err) {
-        res = new Response(JSON.stringify({ error: err.message }), { status: err.status ?? 502, headers: { 'Content-Type': 'application/json' } });
+        // Serve the last good answer rather than asking a failing or limiting service again.
+        res = await cache?.match(backupKey);
+        if (res) {
+          res = new Response(res.body, res);
+          res.headers.set('X-Power-Globe-Backup', '1');
+          res.headers.set('Cache-Control', 'public, max-age=60');
+        } else {
+          res = new Response(JSON.stringify({ error: err.message }), { status: err.status ?? 502, headers: { 'Content-Type': 'application/json' } });
+        }
       }
     }
     const out = new Response(res.body, res);

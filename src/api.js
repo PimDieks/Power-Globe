@@ -2,10 +2,12 @@
 // - a static data API published with the site (data/api/, refreshed every six hours by the
 //   deploy workflow, see scripts/build-data.mjs): the global forecast and airport weather;
 // - optionally a live proxy (api/worker.js, a Cloudflare Worker) for flights, METARs and
-//   satellites, whose address is set at build time in VITE_API_URL.
+//   satellites (see DEFAULT_PROXY_URL; VITE_API_URL at build time overrides it).
 
 export const DATA_URL = `${import.meta.env?.BASE_URL ?? '/'}data/`;
-export const PROXY_URL = (import.meta.env?.VITE_API_URL ?? '').replace(/\/+$/, '');
+// This site's own deployment; VITE_API_URL at build time points a fork at its own.
+const DEFAULT_PROXY_URL = 'https://power-globe-api.pimdieks.workers.dev';
+export const PROXY_URL = (import.meta.env?.VITE_API_URL || DEFAULT_PROXY_URL).replace(/\/+$/, '');
 
 // Snapshots this recent are used instead of asking the public services.
 export const SNAPSHOT_FRESH_MS = 6.5 * 3_600_000;
