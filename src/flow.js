@@ -1,14 +1,17 @@
 import * as THREE from 'three';
-import { sampleGrid } from './field.js';
+import { WORLD, patchGeometry } from './field.js';
 
 const DEG = Math.PI / 180;
-// How far particles travel: degrees per second for each km/h of wind.
+// How far particles travel: degrees per second for each km/h of wind, at full-globe scale.
 const RATE = 0.22;
 // Share of trail brightness lost per frame at 60 fps; lower means longer trails.
 const FADE = 0.035;
 // Faster wind draws brighter trails.
 const SPEED_BANDS = [8, 20, 38];
 const BAND_ALPHA = [0.16, 0.32, 0.55, 0.85];
+// Trails fade on an 8-bit canvas, so they never quite reach zero: with FADE, alpha gets stuck
+// below about 14/255. The layer's shader treats anything that faint as fully transparent.
+const RESIDUE = 0.06;
 
 // Eastward (u) and northward (v) components of wind blowing *from* `direction` degrees.
 export function windComponents(speed, direction) {
@@ -38,26 +41,25 @@ export function advect(lat, lng, u, v, seconds, rate = RATE) {
 }
 
 // Glowing particles drifting with the wind, painted with fading trails onto a canvas that
-// wraps a sphere just above the colour field.
+// wraps the sphere (or, zoomed in, just the area in view) above the colour field.
 export class WindFlow {
-  constructor(globe, shape, { count = 6000, width = 2048 } = {}) {
-    this.shape = shape;
+  constructor(globe, { bounds = WORLD, count = 6000, width = 2048, height = width / 2, lineWidth = 1.3, altitude = 0.004 } = {}) {
+    this.globe = globe;
+    this.altitude = altitude;
     this.width = width;
-    this.height = width / 2;
+    this.height = height;
     this.canvas = document.createElement('canvas');
-    this.canvas.width = this.width;
-    this.canvas.height = this.height;
+    this.canvas.width = width;
+    this.canvas.height = height;
     this.ctx = this.canvas.getContext('2d');
     this.ctx.lineCap = 'round';
-    this.ctx.lineWidth = Math.max(1, (1.3 * width) / 2048);
+    this.ctx.lineWidth = lineWidth;
 
-    this.u = new Float32Array(shape.rows * shape.cols);
-    this.v = new Float32Array(shape.rows * shape.cols);
     this.lat = new Float32Array(count);
     this.lng = new Float32Array(count);
     this.age = new Float32Array(count);
     this.life = new Float32Array(count);
-    for (let i = 0; i < count; i++) this.spawn(i, true);
+    this.wind = new Float32Array(2);
 
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.colorSpace = THREE.SRGBColorSpace;
@@ -71,11 +73,31 @@ export class WindFlow {
       polygonOffsetFactor: -4,
       polygonOffsetUnits: -4,
     });
-    this.mesh = new THREE.Mesh(new THREE.SphereGeometry(globe.getGlobeRadius() * 1.004, 128, 96), material);
-    this.mesh.rotation.y = -Math.PI / 2;
+    material.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+        diffuseColor.a = clamp((diffuseColor.a - ${RESIDUE}) / ${1 - RESIDUE}, 0.0, 1.0);`,
+      );
+    };
+    this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
     this.mesh.renderOrder = -1;
     this.mesh.raycast = () => {};
     globe.scene().add(this.mesh);
+    this.setBounds(bounds);
+  }
+
+  // Move the layer to cover `bounds`. Particle speed scales with the area so that motion
+  // looks the same on screen at any zoom.
+  setBounds(bounds) {
+    this.bounds = bounds;
+    this.rate = RATE * Math.min(1, (bounds.north - bounds.south) / 90);
+    this.sinSouth = Math.sin(bounds.south * DEG);
+    this.sinNorth = Math.sin(bounds.north * DEG);
+    this.mesh.geometry.dispose();
+    this.mesh.geometry = patchGeometry(this.globe, bounds, this.altitude);
+    this.ctx.clearRect(0, 0, this.width, this.height);
+    for (let i = 0; i < this.lat.length; i++) this.spawn(i, true);
   }
 
   set visible(value) {
@@ -87,24 +109,32 @@ export class WindFlow {
     return this.mesh.visible;
   }
 
-  // Respawn particle `i` somewhere random, spread evenly over the sphere's area.
+  // Respawn particle `i` somewhere random in the area, spread evenly over the sphere's surface.
   spawn(i, randomAge = false) {
-    this.lat[i] = Math.asin(Math.random() * 2 - 1) / DEG;
-    this.lng[i] = Math.random() * 360 - 180;
+    const { west, span } = this.bounds;
+    this.lat[i] = Math.asin(this.sinSouth + Math.random() * (this.sinNorth - this.sinSouth)) / DEG;
+    this.lng[i] = ((((west + Math.random() * span + 180) % 360) + 360) % 360) - 180;
     this.life[i] = 2 + Math.random() * 4;
     this.age[i] = randomAge ? Math.random() * this.life[i] : 0;
   }
 
-  // Wind for the current moment: steps `a` and `b` blended by `t`.
-  setWind(a, b, t) {
-    for (let i = 0; i < this.u.length; i++) {
-      this.u[i] = a.u[i] + (b.u[i] - a.u[i]) * t;
-      this.v[i] = a.v[i] + (b.v[i] - a.v[i]) * t;
-    }
+  // Pixel x of `lng` in this layer's canvas, or NaN outside its bounds.
+  x(lng) {
+    const { west, span } = this.bounds;
+    const rel = (((lng - west) % 360) + 360) % 360;
+    return rel > span ? NaN : (rel / span) * this.width;
   }
 
-  step(dt) {
-    const { ctx, width, height, shape } = this;
+  // Pixel y of `lat` in this layer's canvas, or NaN outside its bounds.
+  y(lat) {
+    const { south, north } = this.bounds;
+    return lat < south || lat > north ? NaN : ((north - lat) / (north - south)) * this.height;
+  }
+
+  // Advance every particle `dt` seconds. `sampleWind(lat, lng, out)` writes the wind's u and v
+  // (km/h) into `out` and returns false where there is no data.
+  step(dt, sampleWind) {
+    const { ctx, width, height, wind } = this;
     ctx.globalCompositeOperation = 'destination-out';
     ctx.fillStyle = `rgba(0, 0, 0, ${1 - Math.pow(1 - FADE, dt * 60)})`;
     ctx.fillRect(0, 0, width, height);
@@ -115,26 +145,28 @@ export class WindFlow {
       this.age[i] += dt;
       const lat = this.lat[i];
       const lng = this.lng[i];
-      const u = sampleGrid(this.u, shape, lat, lng);
-      const v = sampleGrid(this.v, shape, lat, lng);
-      if (this.age[i] > this.life[i] || Number.isNaN(u) || Number.isNaN(v)) {
+      if (this.age[i] > this.life[i] || !sampleWind(lat, lng, wind) || Number.isNaN(wind[0]) || Number.isNaN(wind[1])) {
         this.spawn(i);
         continue;
       }
-      const [nextLat, nextLng] = advect(lat, lng, u, v, dt);
-      if (Math.abs(nextLat) > 85) {
+      const u = wind[0];
+      const v = wind[1];
+      const [nextLat, nextLng] = advect(lat, lng, u, v, dt, this.rate);
+      const x0 = this.x(lng);
+      const x1 = this.x(nextLng);
+      const y0 = this.y(lat);
+      const y1 = this.y(nextLat);
+      if (Math.abs(nextLat) > 85 || Number.isNaN(x1) || Number.isNaN(y1)) {
         this.spawn(i);
         continue;
       }
-      const x0 = ((lng + 180) / 360) * width;
-      const x1 = ((nextLng + 180) / 360) * width;
       // Skip the segment that would streak across the whole map at the date line.
       if (Math.abs(x1 - x0) < width / 2) {
         const speed = Math.hypot(u, v);
         let band = 0;
         while (band < SPEED_BANDS.length && speed >= SPEED_BANDS[band]) band++;
-        paths[band].moveTo(x0, ((90 - lat) / 180) * height);
-        paths[band].lineTo(x1, ((90 - nextLat) / 180) * height);
+        paths[band].moveTo(x0, y0);
+        paths[band].lineTo(x1, y1);
       }
       this.lat[i] = nextLat;
       this.lng[i] = nextLng;

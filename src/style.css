@@ -350,13 +350,55 @@ body:not(.idle) #caption {
   position: fixed;
   bottom: 8px;
   right: 14px;
-  font-size: 0.65rem;
+  max-width: calc(100vw - 28px);
+  text-align: right;
+  font-size: 0.6rem;
   color: var(--muted);
   transition: opacity 1.2s var(--ease);
 }
 
 .attribution a {
   color: var(--muted);
+}
+
+/* City names on the map. The element itself is a zero-size anchor at the city's position. */
+
+.city-label {
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.city-label::before {
+  content: '';
+  position: absolute;
+  left: -2px;
+  top: -2px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.8);
+}
+
+.city-label {
+  position: relative;
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.82);
+  text-shadow:
+    0 0 3px rgba(0, 0, 0, 0.9),
+    0 0 8px rgba(0, 0, 0, 0.6);
+  text-indent: 7px;
+  line-height: 0;
+}
+
+.city-label.tier-1 {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.92);
 }
 
 .tooltip {
@@ -367,7 +409,11 @@ body:not(.idle) #caption {
 @media (max-width: 640px) {
   #details {
     top: auto;
-    bottom: 130px;
+    bottom: 150px;
+  }
+
+  #timeline {
+    bottom: 48px;
   }
 
   #timeline {
