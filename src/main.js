@@ -763,11 +763,33 @@ async function showDetails(lat, lng, name, pinLabel = name) {
     }
   } catch (err) {
     console.error(err);
-    if (state.detail === detail) {
-      els.detailsBody.innerHTML = `<p>Could not load weather here. ${err.message ?? ''}</p>`;
-      announce(`Could not load weather at ${title}.`);
+    if (state.detail !== detail) return;
+    // Open-Meteo could not be asked (e.g. its daily allowance is used up): show what the map
+    // shows here, from the global forecast.
+    if (state.forecast) {
+      detail.data = gridPointForecast(lat, lng);
+      renderDetails();
+      return;
     }
+    els.detailsBody.innerHTML = `<p>Could not load weather here. ${err.message ?? ''}</p>`;
+    announce(`Could not load weather at ${title}.`);
   }
+}
+
+// The forecast at a spot from the global grid, as the map shows it: interpolated between grid
+// points, and from the nearest one for wind direction and the weather type.
+function gridPointForecast(lat, lng) {
+  const { times, values } = state.forecast;
+  const r = Math.max(0, Math.min(shape.rows - 1, Math.round((lat - shape.lat0) / shape.step)));
+  const c = Math.round((((lng - shape.lng0) % 360) + 360) % 360 / shape.step) % shape.cols;
+  const nearest = r * shape.cols + c;
+  const data = { time: times, fromGrid: true };
+  for (const v of Object.keys(values)) {
+    data[v] = values[v].map((step) =>
+      v === 'weather_code' || v === 'wind_direction_10m' ? step[nearest] : sampleGrid(step, shape, lat, lng),
+    );
+  }
+  return data;
 }
 
 // An airport's ground conditions and runway winds. `fromList`: opened from the wind check, which
@@ -954,11 +976,13 @@ function renderDetails() {
   const { data } = detail;
   const index = detailIndex(data);
   const value = (variable) =>
-    // Same definition as the map: the average rate over the 3 hours up to this time.
-    variable === 'precipitation' ? precipitationRate(data.precipitation ?? [], index) : data[variable]?.[index];
+    // Same definition as the map: the average rate over the 3 hours up to this time (the global
+    // grid already holds that rate).
+    variable === 'precipitation' && !data.fromGrid ? precipitationRate(data.precipitation ?? [], index) : data[variable]?.[index];
   const rows = LAYERS.map((l) => `<dt>${l.label}</dt><dd>${fmt(value(l.variable), l.unit)}</dd>`).join('');
   els.detailsBody.innerHTML = `
     <p>${formatTime(data.time[index])} · ${describeWeatherCode(value('weather_code'))}</p>
+    ${data.fromGrid ? "<p>From the global forecast, as Open-Meteo could not be asked for this spot right now.</p>" : ''}
     <dl>${rows}<dt>Wind direction</dt><dd>${fmt(value('wind_direction_10m'), '°')}</dd></dl>
     ${sparkline(data.temperature_2m, index)}`;
 }

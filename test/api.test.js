@@ -129,3 +129,23 @@ describe('the site\'s own airport weather', () => {
     expect(conditionsAt(series, '2026-10-13T11:00')).toBeNull();
   });
 });
+
+describe('keeping the services from being overloaded', () => {
+  it('passes Open-Meteo requests through only with known parameters and up to 100 places', async () => {
+    const fetchFn = vi.fn(async () => reply({ hourly: {} }));
+    const ok = await route(new URL('https://api.example/forecast?latitude=52,53&longitude=4,5&hourly=temperature_2m&timezone=GMT'), {}, fetchFn);
+    expect(ok.headers.get('Cache-Control')).toBe('public, max-age=1800');
+    expect(fetchFn.mock.calls[0][0]).toContain('api.open-meteo.com/v1/forecast?latitude=52%2C53');
+    await expect(route(new URL('https://api.example/forecast?latitude=1&apikey=x'), {}, fetchFn)).rejects.toMatchObject({ status: 400 });
+    const many = Array.from({ length: 101 }, () => '1').join(',');
+    await expect(route(new URL(`https://api.example/forecast?latitude=${many}&longitude=${many}`), {}, fetchFn)).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('limits each visitor to a sensible number of requests a minute', async () => {
+    const { overLimit, RATE_LIMIT } = await import('../api/worker.js');
+    const ip = `test-${Math.random()}`;
+    for (let i = 0; i < RATE_LIMIT; i++) expect(overLimit(ip, 1000)).toBe(false);
+    expect(overLimit(ip, 1000)).toBe(true);
+    expect(overLimit(ip, 62_000)).toBe(false);
+  });
+});

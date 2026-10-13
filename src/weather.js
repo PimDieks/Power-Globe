@@ -1,5 +1,5 @@
 import { VARIABLES } from './layers.js';
-import { SNAPSHOT_FRESH_MS, fetchSnapshot } from './api.js';
+import { PROXY_URL, SNAPSHOT_FRESH_MS, fetchSnapshot } from './api.js';
 
 const API_URL = 'https://api.open-meteo.com/v1/forecast';
 // Open-Meteo accepts many coordinates per request; keep URLs and responses a sensible size.
@@ -72,8 +72,45 @@ const RATE_LIMIT_PAUSE_MS = 60_000;
 let spent = [];
 let pausedUntil = 0;
 
+// How long to stop asking after a usage limit: until the next day (GMT) for the daily limit, an
+// hour for the hourly one, else a minute. The site's own copy of the forecast covers meanwhile.
+export function limitPause(reason, now = Date.now()) {
+  if (/daily/i.test(reason ?? '')) return Math.max(RATE_LIMIT_PAUSE_MS, (Math.floor(now / 86_400_000) + 1) * 86_400_000 - now);
+  if (/hourly/i.test(reason ?? '')) return 3_600_000;
+  return RATE_LIMIT_PAUSE_MS;
+}
+
+// Whether Open-Meteo asked us to stop for now.
+export const apiPaused = (now = Date.now()) => now < pausedUntil;
+
+// Each browser keeps to half of Open-Meteo's free 10,000 locations a day, counted across page
+// loads, so one visitor never uses up the allowance (shared with others on the same network).
+export const DAILY_BUDGET = 5_000;
+const DAILY_KEY = 'power-globe:open-meteo-today';
+const today = (now) => new Date(now).toISOString().slice(0, 10);
+let daily = { day: '', used: 0 };
+
+function usedToday(now = Date.now()) {
+  if (daily.day !== today(now)) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(DAILY_KEY));
+      daily = saved?.day === today(now) ? saved : { day: today(now), used: 0 };
+    } catch {
+      daily = { day: today(now), used: 0 };
+    }
+  }
+  return daily.used;
+}
+
 function spend(locations, now = Date.now()) {
   spent.push([now, locations]);
+  usedToday(now);
+  daily.used += locations;
+  try {
+    localStorage.setItem(DAILY_KEY, JSON.stringify(daily));
+  } catch {
+    // Counting within this page still works.
+  }
 }
 
 // Locations that can still be requested now without exceeding the free limits.
@@ -81,6 +118,7 @@ export function apiBudget(now = Date.now()) {
   if (now < pausedUntil) return 0;
   spent = spent.filter(([t]) => now - t < LIMITS.at(-1)[0]);
   return Math.min(
+    DAILY_BUDGET - usedToday(now),
     ...LIMITS.map(([window, limit]) => limit - spent.reduce((sum, [t, n]) => (now - t < window ? sum + n : sum), 0)),
   );
 }
@@ -89,6 +127,7 @@ export function apiBudget(now = Date.now()) {
 export function resetApiBudget() {
   spent = [];
   pausedUntil = 0;
+  daily = { day: '', used: 0 };
 }
 
 export class ApiError extends Error {
@@ -103,7 +142,40 @@ const BUSY_RETRIES = 4;
 const BUSY_RETRY_MS = 1000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// The same request through the Power Globe API, which caches answers for all visitors and keeps
+// a backup for when Open-Meteo is unavailable.
+const proxied = (url) => (PROXY_URL && url.startsWith(API_URL) ? `${PROXY_URL}/forecast?${url.split('?')[1]}` : null);
+
+async function fetchViaProxy(url, cause) {
+  const via = proxied(url);
+  if (!via) throw cause;
+  let res;
+  try {
+    res = await fetch(via, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+  } catch {
+    throw cause;
+  }
+  if (!res.ok) throw cause;
+  return res.json();
+}
+
+// Ask Open-Meteo directly while this browser is within its allowance, else (or if Open-Meteo
+// refuses or cannot be reached) through the Power Globe API.
 async function fetchJsonNow(url) {
+  // Requests are counted before they are sent, so this one is already included.
+  if (apiPaused() || usedToday() > DAILY_BUDGET) {
+    return fetchViaProxy(url, new ApiError('Open-Meteo usage limit reached for today', 429));
+  }
+  try {
+    return await fetchDirect(url);
+  } catch (err) {
+    // Not for bad requests: those would fail through the proxy too.
+    if (err.status && err.status !== 429 && err.status < 500) throw err;
+    return fetchViaProxy(url, err);
+  }
+}
+
+async function fetchDirect(url) {
   for (let attempt = 0; ; attempt++) {
     let res;
     try {
@@ -121,7 +193,7 @@ async function fetchJsonNow(url) {
         await sleep(BUSY_RETRY_MS * 2 ** attempt);
         continue;
       }
-      if (!/concurrent/i.test(reason ?? '')) pausedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
+      if (!/concurrent/i.test(reason ?? '')) pausedUntil = Date.now() + limitPause(reason);
     }
     throw new ApiError(`Open-Meteo: ${reason ?? res.statusText ?? 'request failed'} (${res.status})`, res.status);
   }

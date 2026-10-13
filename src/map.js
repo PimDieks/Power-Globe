@@ -1,6 +1,9 @@
 import * as THREE from 'three';
 import { CITIES, labelTier } from './cities.js';
 
+// Black Marble is used up to this tile level (about 600 m per pixel).
+const NIGHT_LIGHTS_MAX_LEVEL = 7;
+
 const esri = (service) => (x, y, level) =>
   `https://server.arcgisonline.com/ArcGIS/rest/services/${service}/MapServer/tile/${level}/${y}/${x}`;
 
@@ -28,15 +31,20 @@ export const BASEMAPS = {
     light: 1.1,
     credit: 'Map <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, HERE, Garmin, FAO, NOAA, USGS, OpenStreetMap contributors and the GIS User Community',
   },
-  // City lights seen from space at night (NASA Black Marble, public domain), via NASA GIBS.
+  // City lights seen from space at night (NASA Black Marble, public domain, via NASA GIBS). Its
+  // pixels are about 500 m across, so closer in, where it would only blur, the view continues
+  // as CARTO's dark map of OpenStreetMap (sharp at any zoom).
   night: {
     label: 'Night lights',
     url: (x, y, level) =>
-      `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/${level}/${y}/${x}.png`,
-    maxLevel: 8,
+      level <= NIGHT_LIGHTS_MAX_LEVEL
+        ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/${level}/${y}/${x}.png`
+        : `https://${'abcd'[(x + y) % 4]}.basemaps.cartocdn.com/dark_all/${level}/${x}/${y}@2x.png`,
+    maxLevel: 18,
     light: 1.6,
     dark: true,
-    credit: 'Night lights <a href="https://earthobservatory.nasa.gov/features/NightLights" target="_blank" rel="noopener">NASA Black Marble</a> via GIBS',
+    credit:
+      'Night lights <a href="https://earthobservatory.nasa.gov/features/NightLights" target="_blank" rel="noopener">NASA Black Marble</a> via GIBS; close up © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>',
   },
 };
 // Below this altitude the view reads as a map: brighter imagery, borders and city names.
@@ -114,11 +122,15 @@ function matchTileDetailToScreen(globe) {
   // out a little under one texel per pixel at mid latitudes. Going all the way to one texel
   // per pixel looks barely sharper but downloads about twice as many tiles.
   const shift = Math.log2(Math.min(40, Math.max(8, 0.013 * pixels)) / 8);
-  // Keep the default for distant views, where it already looks sharp and finer levels would
-  // mean hundreds of extra tiles, and blend to the full shift from level 5 to 8.
-  engine.thresholds = engine.thresholds.map(
-    (_, level) => (8 / 2 ** level) * 2 ** (shift * Math.min(1, Math.max(0, (level - 5) / 3))),
-  );
+  // Up close, blend to the full shift from level 5 to 8 (a full shift at every level would mean
+  // thousands of tiles in mid-zoom views).
+  const zoomed = (level) => (8 / 2 ** level) * 2 ** (shift * Math.min(1, Math.max(0, (level - 5) / 3)));
+  // Looking at the whole globe, pick the level that gives the middle of the globe about 0.6 tile
+  // pixels per screen pixel: level L covers the Earth's circumference with 256 × 2^L pixels, and
+  // from `d` globe radii up the screen shows π·H / (d·tan 25°) pixels of it (50° field of view).
+  // The default is two levels coarser on a large screen, which looks soft.
+  const wholeGlobe = (level) => (Math.PI * pixels * 0.6) / (Math.tan((25 * Math.PI) / 180) * 256 * 2 ** level);
+  engine.thresholds = engine.thresholds.map((_, level) => (level <= 4 ? Math.max(zoomed(level), wholeGlobe(level)) : zoomed(level)));
   return true;
 }
 
