@@ -19,7 +19,10 @@
 // Nothing upstream is ever asked more than its cache allows: every answer is cached at the edge
 // and shared by all visitors, a backup of it is kept for 6 hours and served if the service
 // fails or limits us (rather than asking again), and each visitor may make at most
-// RATE_LIMIT requests a minute.
+// RATE_LIMIT requests a minute. A flight feed that refuses or limits us is also remembered in the
+// edge cache and left alone for a while (6 hours for a refusal, a minute or as long as it asks for
+// a limit; separately when asked direct and through the relay), so the other feeds answer
+// meanwhile instead of it being asked again on every request.
 //
 // Settings (wrangler.toml [vars] or secrets): ALLOWED_ORIGINS, a comma-separated list of sites
 // allowed to use it ("*" for any); OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET (optional) for an
@@ -40,6 +43,10 @@ const UPSTREAM_TIMEOUT_MS = 10_000;
 // Through the relay there is one more hop, the last of it up a home connection.
 const RELAY_TIMEOUT_MS = 20_000;
 const FAILURE_SECONDS = 120;
+// How long a flight feed is left alone after it limits the API (unless it says for how long), and
+// after it refuses the API.
+const LIMITED_SECONDS = 60;
+const BLOCKED_SECONDS = 6 * 3600;
 // Requests a minute per visitor (counted per Worker instance, so roughly). Map tiles come many
 // at a time as the view moves, so they have their own, larger allowance.
 export const RATE_LIMIT = 120;
@@ -58,9 +65,10 @@ export const RELAYED_HOSTS = ['opensky-network.org', 'auth.opensky-network.org',
 const relayOn = (env) => Boolean(env.FLIGHT_RELAY_URL && env.FLIGHT_RELAY_KEY);
 
 class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, details) {
     super(message);
     this.status = status;
+    Object.assign(this, details);
   }
 }
 
@@ -79,19 +87,70 @@ async function upstream(fetchFn, url, init = {}, env = {}) {
   } catch (err) {
     throw new HttpError(502, `${host} unreachable${via} (${err.message})`);
   }
-  if (!res.ok) throw new HttpError(res.status === 429 ? 429 : 502, `${host} answered ${res.status}${via}`);
+  if (!res.ok) {
+    const retryAfter = Number(res.headers.get('Retry-After'));
+    // The relay marks the answers it passes on, so one without the mark is the relay's own.
+    throw new HttpError(res.status === 429 ? 429 : 502, `${host} answered ${res.status}${via}`, {
+      answered: res.status,
+      retryAfter: retryAfter > 0 ? retryAfter : undefined,
+      byRelay: relayed && !res.headers.has('X-Answered-By'),
+    });
+  }
   return res;
 }
 
-// The first ADS-B feed that answers; if none does, an error saying what each one answered.
-async function fromFeeds(fetchFn, urlFor, env) {
+// How many seconds a feed is left alone after this failure, 0 for none. An answer through the
+// relay without its mark is the relay's own and says nothing about the feed, except its 404, which
+// means it does not ask this feed (a minute, so a corrected relay list applies soon). Only a
+// feed's own 401 or 403 is a refusal worth 6 hours.
+function coolOff(err) {
+  if (err.answered === 429) return err.retryAfter ? Math.ceil(Math.min(900, Math.max(5, err.retryAfter))) : LIMITED_SECONDS;
+  if (err.byRelay) return err.answered === 404 ? LIMITED_SECONDS : 0;
+  return err.answered === 401 || err.answered === 403 ? BLOCKED_SECONDS : 0;
+}
+
+// The edge cache keeps one small entry per feed that is being left alone: until when, and why. A
+// refusal is about the connection that asked, so asking direct and through the relay have their own.
+const feedKey = (origin, env, feed) => new Request(`${origin}/__feeds/${relayOn(env) ? 'relay' : 'direct'}/${feed.name}`);
+
+// Why the feed is being left alone, if it is. A cache that fails counts as no memory.
+async function leftAlone(cache, key) {
+  try {
+    const res = await cache?.match(key);
+    const memory = res && (await res.json());
+    return memory?.until > Date.now() ? memory.message : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function leaveAlone(cache, key, seconds, message) {
+  try {
+    const body = JSON.stringify({ until: Date.now() + seconds * 1000, message });
+    await cache?.put(key, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${seconds}` } }));
+  } catch (err) {
+    console.error(`Could not remember a failed feed (${key.url})`, err);
+  }
+}
+
+// The first ADS-B feed that answers, skipping those being left alone; if none does, an error
+// saying what each one answered.
+async function fromFeeds(fetchFn, urlFor, env, cache, origin) {
   const failures = [];
   for (const feed of ADSB_FEEDS) {
+    const key = feedKey(origin, env, feed);
+    const reason = await leftAlone(cache, key);
+    if (reason) {
+      failures.push(`${feed.name} is not asked for now (${reason})`);
+      continue;
+    }
     try {
       const res = await upstream(fetchFn, urlFor(feed), {}, env);
       return { source: feed.name, data: await res.json() };
     } catch (err) {
       failures.push(err.message);
+      const seconds = coolOff(err);
+      if (seconds > 0) await leaveAlone(cache, key, seconds, err.message);
     }
   }
   throw new HttpError(502, failures.join('; ') || 'No ADS-B feed answered');
@@ -134,8 +193,9 @@ const number = (v, min, max) => {
   return n;
 };
 
-// Answers a request (without CORS headers or caching, see the fetch handler).
-export async function route(url, env = {}, fetchFn = fetch) {
+// Answers a request (without CORS headers or caching, see the fetch handler). The cache is only
+// used to remember which flight feeds are being left alone.
+export async function route(url, env = {}, fetchFn = fetch, cache) {
   const path = url.pathname.replace(/\/+$/, '') || '/';
   if (path === '/') {
     return json(
@@ -164,10 +224,10 @@ export async function route(url, env = {}, fetchFn = fetch) {
     const lat = Math.round(number(url.searchParams.get('lat'), -90, 90) * 4) / 4;
     const lon = Math.round(number(url.searchParams.get('lon'), -180, 180) * 4) / 4;
     const nm = Math.min(250, Math.ceil(number(url.searchParams.get('nm'), 1, 1000) / 25) * 25);
-    return json({ fetched: Date.now(), ...(await fromFeeds(fetchFn, (f) => f.area(lat, lon, nm), env)) }, 10);
+    return json({ fetched: Date.now(), ...(await fromFeeds(fetchFn, (f) => f.area(lat, lon, nm), env, cache, url.origin)) }, 10);
   }
   if (path === '/flights/military') {
-    return json({ fetched: Date.now(), ...(await fromFeeds(fetchFn, (f) => f.military, env)) }, 30);
+    return json({ fetched: Date.now(), ...(await fromFeeds(fetchFn, (f) => f.military, env, cache, url.origin)) }, 30);
   }
   if (path === '/metar') {
     const ids = (url.searchParams.get('ids') ?? '').toUpperCase();
@@ -246,7 +306,7 @@ export default {
         return new Response(JSON.stringify({ error: 'Too many requests; slow down' }), { status: 429, headers: { ...cors, 'Content-Type': 'application/json', 'Retry-After': '60' } });
       }
       try {
-        res = await route(url, env);
+        res = await route(url, env, fetch, cache);
         if (cache) {
           const backup = new Response(res.clone().body, res);
           backup.headers.set('Cache-Control', `public, max-age=${BACKUP_SECONDS}`);

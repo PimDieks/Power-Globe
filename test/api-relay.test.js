@@ -54,6 +54,25 @@ describe('flight relay for the API', () => {
     expect((await down(get('/api.adsb.lol/v2/mil'))).status).toBe(504);
   });
 
+  it('marks the answers it passes on with the feed that gave them, and not its own', async () => {
+    const fetchFn = vi.fn(async (url) => (url.includes('opensky') ? reply('slow down', { status: 429 }) : reply({ ac: [] })));
+    const relay = createRelay({ key: KEY, fetchFn, now: () => 0, wait: async () => {}, maxWaitMs: 0 });
+    const passed = [await relay(get('/api.adsb.lol/v2/mil')), await relay(get('/opensky-network.org/api/states/all'))];
+    expect(passed.map((r) => r.status)).toEqual([200, 429]);
+    expect(passed.map((r) => r.headers['x-answered-by'])).toEqual(['api.adsb.lol', 'opensky-network.org']);
+
+    const down = createRelay({ key: KEY, fetchFn: async () => Promise.reject(new Error('timed out')) });
+    const own = [
+      await relay({ method: 'GET', path: '/api.adsb.lol/v2/mil', headers: {} }),
+      await relay(get('/evil.example/x')),
+      await relay({ ...get('/api.adsb.lol/v2/mil'), method: 'POST' }),
+      await relay(get('/api.adsb.lol/v2/mil')),
+      await down(get('/api.adsb.lol/v2/mil')),
+    ];
+    expect(own.map((r) => r.status)).toEqual([401, 404, 405, 429, 504]);
+    for (const r of own) expect(r.headers).not.toHaveProperty('x-answered-by');
+  });
+
   it('asks each feed at most once a second, and turns requests away rather than queue them long', async () => {
     let clock = 0;
     const wait = vi.fn(async () => {});

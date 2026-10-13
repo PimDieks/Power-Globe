@@ -10,7 +10,9 @@
 //
 // Only the flight feeds are relayed, only for requests carrying the key, and each feed is asked
 // at most once a second (when busier than that it answers 429, and the API serves its last
-// answer). Answers come back as the feed gave them, compressed for the trip up a home connection.
+// answer). Answers come back as the feed gave them, compressed for the trip up a home connection,
+// and carry an x-answered-by header naming the feed, which the relay's own answers do not, so the
+// API can tell the two apart.
 //
 // Settings (environment): RELAY_KEY, a long random secret, the same as the API's
 // FLIGHT_RELAY_KEY; PORT (default 8788); HOST (default 127.0.0.1, for a tunnel on this
@@ -81,7 +83,7 @@ export function createRelay({ key, fetchFn = fetch, spacingMs = SPACING_MS, maxW
     } catch (err) {
       return reply(504, { error: `${host} did not answer the relay (${err.message})` });
     }
-    const out = pick(Object.fromEntries(res.headers), RETURNED_HEADERS);
+    const out = { 'x-answered-by': host, ...pick(Object.fromEntries(res.headers), RETURNED_HEADERS) };
     if (data.length >= COMPRESS_FROM_BYTES && /\bgzip\b/.test(headers['accept-encoding'] ?? '')) {
       data = await compress(data);
       out['content-encoding'] = 'gzip';
