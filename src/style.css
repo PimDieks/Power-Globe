@@ -43,7 +43,16 @@ h1 {
   letter-spacing: 0.02em;
 }
 
-#layer-buttons {
+h2 {
+  margin: 14px 0 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.button-row {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -87,6 +96,45 @@ button[aria-checked='true'] {
   margin-top: 4px;
 }
 
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.toggle input {
+  accent-color: var(--accent);
+}
+
+#pattern-legend {
+  margin-top: 8px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.swatch {
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+.swatch.streak {
+  width: 16px;
+  height: 2px;
+  background: linear-gradient(to right, transparent, #fff);
+}
+
+.swatch.ring {
+  width: 8px;
+  height: 8px;
+  border: 2px solid;
+  border-radius: 50%;
+}
+
 .status-row {
   display: flex;
   align-items: center;
@@ -125,6 +173,65 @@ button[aria-checked='true'] {
   text-align: right;
 }
 
+#details p {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.sparkline {
+  display: block;
+  width: 100%;
+  height: 56px;
+  margin-top: 12px;
+}
+
+.sparkline path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.sparkline line {
+  stroke: var(--text);
+  stroke-dasharray: 3 3;
+}
+
+#timeline {
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(640px, calc(100vw - 32px));
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+}
+
+#play {
+  width: 36px;
+  flex: none;
+}
+
+#time-slider {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+#time-label {
+  flex: none;
+  min-width: 11ch;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+button:disabled,
+input:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .hidden {
   display: none;
 }
@@ -149,7 +256,16 @@ button[aria-checked='true'] {
 @media (max-width: 640px) {
   #details {
     top: auto;
-    bottom: 32px;
+    bottom: 120px;
     right: 16px;
+  }
+
+  #timeline {
+    flex-wrap: wrap;
+  }
+
+  #time-slider {
+    order: 3;
+    flex-basis: 100%;
   }
 }

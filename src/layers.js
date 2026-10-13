@@ -68,7 +68,8 @@ export const LAYERS = [
   },
 ];
 
-export const CURRENT_VARIABLES = [...new Set([...LAYERS.map((l) => l.variable), 'weather_code'])];
+// Every Open-Meteo variable the app requests: the layers plus what the pattern overlays need.
+export const VARIABLES = [...new Set([...LAYERS.map((l) => l.variable), 'wind_direction_10m', 'weather_code'])];
 
 export function getLayer(key) {
   return LAYERS.find((l) => l.key === key) ?? LAYERS[0];
@@ -100,6 +101,18 @@ export function colorFor(stops, value) {
     }
   }
   return last[1];
+}
+
+// Precomputed RGB lookup table spanning the stops' range, for fast per-pixel colouring.
+export function buildLut(stops, size = 256) {
+  const min = stops[0][0];
+  const max = stops[stops.length - 1][0];
+  const lut = new Uint8ClampedArray(size * 3);
+  for (let i = 0; i < size; i++) {
+    const [r, g, b] = hexToRgb(colorFor(stops, min + ((max - min) * i) / (size - 1)));
+    lut.set([r, g, b], i * 3);
+  }
+  return lut;
 }
 
 // 0..1 position of `value` within the layer's range, used for bar height on the globe.

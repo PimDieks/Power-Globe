@@ -3,8 +3,10 @@
 An open-source, interactive 3D globe that visualizes temperature and other weather conditions around the world.
 
 - **Layers:** temperature, wind speed, precipitation, cloud cover and humidity, each with its own colour scale and legend.
-- **Global view:** current conditions are sampled on a 10° grid (612 points) and drawn as coloured bars; taller bars mean higher values.
-- **Details on click:** click anywhere on the globe to fetch the current conditions for that exact spot.
+- **Forecast timeline:** a 5-day forecast in 3-hour steps. Press play to animate it, or drag the slider to any time; **Now** jumps back to the present.
+- **Two display styles:** a *smooth field* that interpolates the grid into a continuous colour map (blended between time steps while playing), or 3D *bars* where taller means higher.
+- **Weather patterns:** animated wind-flow streaks that point downwind, and pulsing rings marking thunderstorms, heavy rain and heavy snow.
+- **Details on click:** click anywhere on the globe to see the forecast for that exact spot at the selected time, with a 5-day temperature chart.
 - **No API key needed:** weather data comes from the free [Open-Meteo](https://open-meteo.com/) API.
 
 ## Getting started
@@ -29,8 +31,10 @@ Every push to `main` builds the site and deploys it to GitHub Pages via
 
 | File | Purpose |
 | --- | --- |
-| `src/main.js` | Sets up the [globe.gl](https://github.com/vasturiano/globe.gl) scene, layer switching, legend and the details panel. |
-| `src/weather.js` | Builds the sample grid and fetches current conditions from Open-Meteo in batches of 100 locations. Results are cached in `localStorage` for 30 minutes. |
+| `src/main.js` | Sets up the [globe.gl](https://github.com/vasturiano/globe.gl) scene, controls, timeline playback loop and the details panel. |
+| `src/weather.js` | Builds the 10° sample grid (612 points) and fetches the hourly forecast from Open-Meteo in batches of 100 locations, keeping every 3rd hour. Results are cached in `localStorage` for an hour. |
+| `src/field.js` | The smooth colour field: bilinear interpolation of the grid painted onto a translucent sphere just above the Earth. |
+| `src/patterns.js` | Wind-flow streaks and severe-weather classification for the pattern overlays. |
 | `src/layers.js` | Layer definitions (Open-Meteo variable, unit, colour stops) and WMO weather-code descriptions. |
 | `public/img/` | Earth texture, topology bump map and night-sky background. |
 

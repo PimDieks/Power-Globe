@@ -11,15 +11,29 @@
 
     <header class="panel" id="controls">
       <h1>Power Globe</h1>
-      <div id="layer-buttons" role="radiogroup" aria-label="Weather layer"></div>
+      <div class="button-row" id="layer-buttons" role="radiogroup" aria-label="Weather layer"></div>
       <div id="legend" aria-live="polite"></div>
+
+      <h2>Display</h2>
+      <div class="button-row" id="mode-buttons" role="radiogroup" aria-label="Display style"></div>
+      <label class="toggle"><input type="checkbox" id="toggle-wind" checked /> Wind flow</label>
+      <label class="toggle"><input type="checkbox" id="toggle-hazards" checked /> Storms &amp; heavy precipitation</label>
+      <div id="pattern-legend"></div>
+
       <div class="status-row">
-        <span id="status">Loading weather…</span>
+        <span id="status">Loading forecast…</span>
         <button id="refresh" type="button">Refresh</button>
       </div>
     </header>
 
     <aside class="panel hidden" id="details" aria-live="polite"></aside>
+
+    <div class="panel" id="timeline">
+      <button id="play" type="button" aria-label="Play forecast" disabled>▶</button>
+      <input type="range" id="time-slider" min="0" max="0" value="0" step="1" aria-label="Forecast time" disabled />
+      <span id="time-label">–</span>
+      <button id="now" type="button" disabled>Now</button>
+    </div>
 
     <footer class="attribution">
       Weather data by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a>
