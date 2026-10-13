@@ -5,8 +5,8 @@
 // few seconds, which also marks military aircraft, and a worldwide military feed comes from the
 // same. Between reports each aircraft moves along its track at its ground speed. Satellites
 // follow CelesTrak's orbital elements, computed in a worker.
-import { AircraftStore, estimatePosition, fromAdsb, fromOpenSky } from './aircraft.js';
-import { aircraftLayer, orbitLine, satelliteLayer, selectionRing } from './trafficlayer.js';
+import { AircraftStore, drawnAltitude, estimatePosition, fromAdsb, fromOpenSky } from './aircraft.js';
+import { aircraftLayer, behindGlobe, orbitLine, satelliteLayer, selectionRing } from './trafficlayer.js';
 import { EARTH_RADIUS_KM, orbitClass, orbitPath, parseTle, periodMinutes, satellitePosition, toGeodetic, toSatrec, tleEpoch } from './orbits.js';
 import { aircraftDetailsHtml, aircraftName, satelliteDetailsHtml } from './trafficview.js';
 import { PROXY_URL, explain } from './api.js';
@@ -62,8 +62,8 @@ const AIRCRAFT_FRAME_MS = 100;
 const AIRCRAFT_PER_FRAME = 2000;
 // Satellite positions are worked out a second apart and blended in between.
 const SATELLITE_STEP_MS = 1000;
-// Orbital elements: CelesTrak asks for each set at most every two hours; the copy bundled with
-// the site (refreshed when it is deployed) is used while it is fresh enough.
+// Orbital elements: CelesTrak asks for each set at most every two hours per browser; the copy
+// bundled with the site (refreshed when it is deployed) is used while it is fresh enough.
 const LIVE_ELEMENTS_MS = 2 * 3_600_000;
 const FRESH_SNAPSHOT_MS = 12 * 3_600_000;
 const TIMEOUT_MS = 20_000;
@@ -98,7 +98,7 @@ function browserReason(err) {
   return /failed to fetch|networkerror|load failed/i.test(err.message) ? 'blocked' : err.message;
 }
 
-async function fetchJson(url) {
+async function fetchChecked(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (!res.ok) {
     // The Power Globe API says what went wrong upstream as { error }.
@@ -107,8 +107,10 @@ async function fetchJson(url) {
     err.status = res.status;
     throw err;
   }
-  return res.json();
+  return res;
 }
+
+const fetchJson = async (url) => (await fetchChecked(url)).json();
 
 // Radius in nautical miles of a circle around the middle of the view that covers most of it.
 export function areaRadiusNm(altitude) {
@@ -139,48 +141,119 @@ function saveSettings(settings) {
   }
 }
 
-// Orbital elements for a group of satellites: the bundled copy while it is fresh, else
-// CelesTrak (cached for two hours), else the bundled copy however old it is.
-async function loadElements(group) {
+// Orbital elements for a group of satellites, as text: the bundled copy while it is fresh, else
+// live (see askLive), else the bundled copy however old it is.
+export async function loadElements(group) {
   const snapshot = async () => {
-    const res = await fetch(`${SNAPSHOT_URL}${group}.tle`);
-    if (!res.ok) throw new Error('No satellite data available');
-    return res.text();
+    try {
+      const res = await fetch(`${SNAPSHOT_URL}${group}.tle`);
+      const text = res.ok ? await res.text() : '';
+      return /^1 /m.test(text) ? text : null;
+    } catch {
+      return null;
+    }
   };
-  let built = 0;
+  let fetched = 0;
   try {
     const meta = await fetch(`${SNAPSHOT_URL}meta.json`).then((r) => (r.ok ? r.json() : null));
-    built = Date.parse(meta?.built) || 0;
+    // Each group has its own time; a copy made before that only says when it was all built.
+    fetched = Date.parse(meta?.fetched ? meta.fetched[group] : meta?.built) || 0;
   } catch {
     // No bundled copy (e.g. in development).
   }
-  if (Date.now() - built < FRESH_SNAPSHOT_MS) return snapshot();
+  if (Date.now() - fetched < FRESH_SNAPSHOT_MS) {
+    const text = await snapshot();
+    if (text) return text;
+  }
   try {
     return await liveElements(group);
   } catch (err) {
-    if (built) return snapshot();
+    const text = fetched ? await snapshot() : null;
+    if (text) return text;
     throw err;
   }
 }
 
-async function liveElements(group) {
-  // Through the Power Globe API when there is one, else straight from CelesTrak.
-  const url = PROXY_URL ? `${PROXY_URL}/satellites/${group}` : CELESTRAK_URL(group);
+// Groups being asked for now, so that two callers share one request.
+const asking = new Map();
+
+function liveElements(group) {
+  if (!asking.has(group)) asking.set(group, askLive(group).finally(() => asking.delete(group)));
+  return asking.get(group);
+}
+
+// A group that neither the API nor CelesTrak would give is remembered for two hours (in this
+// page and, as far as the browser allows, across page loads), so that a refusal does not turn
+// into a request every time satellites are switched on.
+const FAILED_KEY = 'power-globe:satellites-failed';
+const failures = new Map();
+
+function recentFailure(group) {
+  let known = failures.get(group);
+  try {
+    known ??= JSON.parse(localStorage.getItem(FAILED_KEY))?.[group];
+  } catch {
+    // Not remembered across page loads.
+  }
+  return known && Date.now() - known.at < LIVE_ELEMENTS_MS ? known.message : null;
+}
+
+function rememberFailure(group, message) {
+  const known = { at: Date.now(), message };
+  failures.set(group, known);
+  try {
+    localStorage.setItem(FAILED_KEY, JSON.stringify({ ...JSON.parse(localStorage.getItem(FAILED_KEY)), [group]: known }));
+  } catch {
+    // Remembered in this page only.
+  }
+}
+
+// A group's elements from one source. CelesTrak answers unknown or throttled requests with a
+// short message instead of elements.
+async function fetchElements(url) {
+  const text = await (await fetchChecked(url)).text();
+  if (!/^1 /m.test(text)) throw new Error(`sent no elements (${text.trim().slice(0, 80)})`);
+  return text;
+}
+
+// Elements from the Power Globe API (which asks CelesTrak from a server), else from CelesTrak
+// directly, which accepts requests from web pages. Each group is asked for at most once every
+// two hours per browser: an answer is kept for that long whichever way it came, and so is a
+// failure. The error says which of the two failed and how.
+async function askLive(group) {
+  const celestrak = CELESTRAK_URL(group);
   let cache = null;
   try {
     cache = await caches.open('power-globe-satellites');
-    const hit = await cache.match(url);
+    const hit = await cache.match(celestrak);
     if (hit && Date.now() - Number(hit.headers.get('x-saved-at')) < LIVE_ELEMENTS_MS) return hit.text();
   } catch {
     cache = null;
   }
-  const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
-  if (!res.ok) throw new Error(`CelesTrak answered ${res.status}`);
-  const text = await res.text();
-  // CelesTrak answers unknown or throttled requests with a short message instead of elements.
-  if (!/^1 /m.test(text)) throw new Error(`CelesTrak: ${text.trim().slice(0, 80)}`);
-  cache?.put(url, new Response(text, { headers: { 'x-saved-at': String(Date.now()) } })).catch(() => {});
-  return text;
+  const remembered = recentFailure(group);
+  if (remembered) throw new Error(remembered);
+  const keep = (text) => {
+    cache?.put(celestrak, new Response(text, { headers: { 'x-saved-at': String(Date.now()) } })).catch(() => {});
+    return text;
+  };
+  let proxyReason = null;
+  if (PROXY_URL) {
+    try {
+      return keep(await fetchElements(`${PROXY_URL}/satellites/${group}`));
+    } catch (err) {
+      console.error(err);
+      proxyReason = err.status ? err.message : browserReason(err);
+    }
+  }
+  try {
+    return keep(await fetchElements(celestrak));
+  } catch (err) {
+    console.error(err);
+    const own = `CelesTrak ${browserReason(err)}`;
+    const message = proxyReason ? `Power Globe API: ${proxyReason}; from this browser: ${own}` : own;
+    rememberFailure(group, message);
+    throw new Error(message);
+  }
 }
 
 export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
@@ -440,9 +513,6 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     out[3 * i + 2] = r * cosLat * Math.cos(lng * RAD);
   }
 
-  // Cruising altitude is drawn a little higher than to scale, so aircraft clear the weather.
-  const aircraftAltitude = (ac) => 0.0018 + (Math.max(0, ac.altitudeFt ?? 0) * 0.3048 * 3) / (EARTH_RADIUS_KM * 1000);
-
   function drawAircraft(now) {
     const show = settings.flights || settings.military;
     if (!show) return;
@@ -473,7 +543,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
       const ac = shown[i];
       const p = estimatePosition(ac, now);
       ac.estimate = p;
-      scenePoint(p.lat, p.lng, aircraftAltitude(ac), attrs.position, i);
+      scenePoint(p.lat, p.lng, drawnAltitude(ac), attrs.position, i);
     }
     cursor = from + n;
     planes.commit(shown.length);
@@ -563,7 +633,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
       const ac = store.byId.get(selected.id);
       if (!ac?.estimate) return null;
       const out = [0, 0, 0];
-      scenePoint(ac.estimate.lat, ac.estimate.lng, aircraftAltitude(ac), out, 0);
+      scenePoint(ac.estimate.lat, ac.estimate.lng, drawnAltitude(ac), out, 0);
       return { x: out[0], y: out[1], z: out[2] };
     }
     if (selected?.kind === 'satellite') {
@@ -583,7 +653,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   }
 
   // The aircraft or satellite drawn nearest to a screen point, within a finger's reach, that is
-  // not hidden behind the globe.
+  // not hidden behind the globe (by the same test as the layers use to hide them).
   function pick(clientX, clientY) {
     const camera = globe.camera();
     const rect = globe.renderer().domElement.getBoundingClientRect();
@@ -593,18 +663,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     let bestD = reach * reach;
     const v = { x: 0, y: 0, z: 0 };
     const test = (x, y, z, hit) => {
-      // Hidden behind the globe?
-      const dx = x - cam.x;
-      const dy = y - cam.y;
-      const dz = z - cam.z;
-      const a = dx * dx + dy * dy + dz * dz;
-      const b = 2 * (cam.x * dx + cam.y * dy + cam.z * dz);
-      const c = cam.x * cam.x + cam.y * cam.y + cam.z * cam.z - R * R * 0.998;
-      const disc = b * b - 4 * a * c;
-      if (disc > 0) {
-        const t = (-b - Math.sqrt(disc)) / (2 * a);
-        if (t > 0 && t < 1) return;
-      }
+      if (behindGlobe(cam, x, y, z, R)) return;
       v.x = x;
       v.y = y;
       v.z = z;

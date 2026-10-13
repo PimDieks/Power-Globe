@@ -12,10 +12,14 @@ export const PROXY_URL = (import.meta.env?.VITE_API_URL || DEFAULT_PROXY_URL).re
 // Snapshots this recent are used instead of asking the public services.
 export const SNAPSHOT_FRESH_MS = 6.5 * 3_600_000;
 
-// A JSON file from the static data API, or null if it is not there.
+// Give up on a download from the site's own data after this long, so that nothing waiting for it
+// can wait for ever.
+export const SNAPSHOT_TIMEOUT_MS = 10_000;
+
+// A JSON file from the static data API, or null if it is not there or does not come in time.
 export async function fetchSnapshot(path) {
   try {
-    const res = await fetch(`${DATA_URL}${path}`);
+    const res = await fetch(`${DATA_URL}${path}`, { signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS) });
     return res.ok ? await res.json() : null;
   } catch {
     return null;

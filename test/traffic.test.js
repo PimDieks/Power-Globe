@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { AircraftStore, estimatePosition, fromAdsb, fromOpenSky } from '../src/aircraft.js';
+import { AircraftStore, drawnAltitude, estimatePosition, fromAdsb, fromOpenSky } from '../src/aircraft.js';
 import { orbitClass, orbitPath, parseTle, periodMinutes, satellitePosition, toGeodetic, toSatrec, toScene, tleEpoch } from '../src/orbits.js';
 import { aircraftDetailsHtml, ago, satelliteDetailsHtml } from '../src/trafficview.js';
 import { areaRadiusNm } from '../src/traffic.js';
+import { behindGlobe } from '../src/trafficlayer.js';
 
 // The ISS in September 2008 (the classic example element set).
 const ISS = `ISS (ZARYA)
@@ -77,6 +78,68 @@ describe('estimatePosition', () => {
 
   it('wraps across the date line', () => {
     expect(estimatePosition({ ...ac, lng: 179.9 }, 600_000).lng).toBeCloseTo(-179.1, 2);
+  });
+});
+
+describe('drawnAltitude', () => {
+  const EARTH_RADIUS_M = 6_371_000;
+
+  it('draws a flying aircraft at its true height, in globe radii', () => {
+    expect(drawnAltitude({ onGround: false, altitudeFt: 35_000 })).toBeCloseTo((35_000 * 0.3048) / EARTH_RADIUS_M, 10);
+    expect(drawnAltitude({ onGround: false, altitudeFt: 0 })).toBe(0);
+  });
+
+  it('draws an aircraft on the ground at the surface, whatever its barometric altitude says', () => {
+    expect(drawnAltitude({ onGround: true, altitudeFt: 1200 })).toBe(0);
+    expect(drawnAltitude({ onGround: true, altitudeFt: null })).toBe(0);
+  });
+
+  it('never draws below the surface', () => {
+    expect(drawnAltitude({ onGround: false, altitudeFt: -75 })).toBe(0);
+    expect(drawnAltitude({ onGround: false, altitudeFt: null })).toBe(0);
+    expect(drawnAltitude({ onGround: false })).toBe(0);
+    expect(drawnAltitude({ onGround: false, altitudeFt: NaN })).toBe(0);
+  });
+
+  it('has no lift or exaggeration, so an aircraft on final is within metres of the ground', () => {
+    // 500 ft is 152 m: well under a thousandth of the 16 km the camera stops at.
+    expect(drawnAltitude({ onGround: false, altitudeFt: 500 }) * EARTH_RADIUS_M).toBeCloseTo(152.4, 3);
+  });
+});
+
+describe('behindGlobe', () => {
+  const R = 100;
+  const camera = { x: 0, y: 0, z: R * 1.0025 };
+
+  it('shows a point on the surface below the camera, at the same height as the ground', () => {
+    expect(behindGlobe(camera, 0, 0, R, R)).toBe(false);
+    expect(behindGlobe(camera, 0, 0, R * 1.00001, R)).toBe(false);
+  });
+
+  it('shows points near the camera, however low they are', () => {
+    const lat = (2 * Math.PI) / 360;
+    expect(behindGlobe(camera, 0, R * Math.sin(lat), R * Math.cos(lat), R)).toBe(false);
+  });
+
+  it('hides a point on the far side', () => {
+    expect(behindGlobe(camera, 0, 0, -R, R)).toBe(true);
+    expect(behindGlobe({ x: 0, y: 0, z: 2.4 * R }, 0, 0, -R * 1.002, R)).toBe(true);
+  });
+
+  it('hides a point just past the horizon but shows one in front of it', () => {
+    const far = { x: 0, y: 0, z: 2 * R };
+    // From 2 radii out, the horizon is 60 degrees from the point below the camera.
+    const at = (degrees) => [0, R * Math.sin((degrees * Math.PI) / 180), R * Math.cos((degrees * Math.PI) / 180)];
+    expect(behindGlobe(far, ...at(55), R)).toBe(false);
+    expect(behindGlobe(far, ...at(75), R)).toBe(true);
+  });
+
+  it('shows a high flying aircraft over the horizon', () => {
+    const far = { x: 0, y: 0, z: 2 * R };
+    const high = R * 1.05;
+    const d = (65 * Math.PI) / 180;
+    expect(behindGlobe(far, 0, R * Math.sin(d), R * Math.cos(d), R)).toBe(true);
+    expect(behindGlobe(far, 0, high * Math.sin(d), high * Math.cos(d), R)).toBe(false);
   });
 });
 
@@ -190,22 +253,14 @@ describe('live traffic', () => {
 });
 
 describe('Earth views', () => {
-  it('offers five maps of the Earth, each with tiles and a credit', async () => {
+  it('offers four maps of the Earth, each with tiles and a credit', async () => {
     const { BASEMAPS } = await import('../src/map.js');
-    expect(Object.keys(BASEMAPS)).toEqual(['satellite', 'streets', 'topo', 'clouds', 'aviation']);
+    expect(Object.keys(BASEMAPS)).toEqual(['satellite', 'streets', 'topo', 'aviation']);
     for (const map of Object.values(BASEMAPS)) {
-      expect(map.url(1, 2, 3)).toMatch(/^https:\/\/.+\/3\/2\/1(\.png|\.jpg)?$/);
+      expect(map.url(1, 2, 3)).toMatch(/^https:\/\/.+\/3\/2\/1(\.png)?$/);
       expect(map.credit).toBeTruthy();
       expect(map.maxLevel).toBeGreaterThan(0);
     }
-  });
-
-  it('shows the clouds of the last whole day, and the satellite imagery closer in', async () => {
-    const { BASEMAPS, cloudsDay } = await import('../src/map.js');
-    expect(cloudsDay(Date.parse('2026-10-13T00:30:00Z'))).toBe('2026-10-12');
-    expect(BASEMAPS.clouds.url(4, 2, 3)).toContain(`/VIIRS_NOAA20_CorrectedReflectance_TrueColor/default/${cloudsDay()}/`);
-    expect(BASEMAPS.clouds.url(4, 2, 12)).toBe(BASEMAPS.satellite.url(4, 2, 12));
-    expect(BASEMAPS.clouds.credit).toContain(cloudsDay());
   });
 
   it('draws the aviation chart through the Power Globe API, so its key stays there', async () => {

@@ -1057,6 +1057,21 @@ input:disabled {
   --status: #e6ebf2;
 }
 
+/* The airport open in the panel: its label in the look of an active button (accent tint and
+   border, white bold text), on an opaque base so it keeps its contrast over any map. */
+.airport-label.selected span,
+.wind-label.selected span {
+  font-weight: 700;
+  color: #fff;
+  background:
+    linear-gradient(rgba(155, 209, 255, 0.28), rgba(155, 209, 255, 0.28)),
+    #0a0e18;
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1.5px var(--accent),
+    0 0 14px rgba(155, 209, 255, 0.7);
+}
+
 .wind-label i {
   display: inline-block;
   margin-right: 4px;

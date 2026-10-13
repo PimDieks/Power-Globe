@@ -5,11 +5,6 @@ import { CITIES, labelTier } from './cities.js';
 import { STATUS } from './runways.js';
 import { retryingTextureLoad, withLoad } from './tileretry.js';
 
-// Daily cloud imagery is used up to this tile level (about 300 m per pixel).
-const CLOUDS_MAX_LEVEL = 9;
-// The last whole day (UTC) of satellite passes, as YYYY-MM-DD.
-export const cloudsDay = (now = Date.now()) => new Date(now - 86_400_000).toISOString().slice(0, 10);
-
 const esri = (service) => (x, y, level) =>
   `https://server.arcgisonline.com/ArcGIS/rest/services/${service}/MapServer/tile/${level}/${y}/${x}`;
 
@@ -36,24 +31,6 @@ export const BASEMAPS = {
     maxLevel: 18,
     light: 1.1,
     credit: 'Map <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, HERE, Garmin, FAO, NOAA, USGS, OpenStreetMap contributors and the GIS User Community',
-  },
-  // Yesterday's clouds as seen from space: one day of NASA's VIIRS true colour imagery (NOAA-20,
-  // public domain, via NASA GIBS), the most recent complete day. Its pixels are about 300 m
-  // across, so closer in the view continues as the satellite imagery.
-  clouds: {
-    label: 'Clouds',
-    url: (x, y, level) =>
-      level <= CLOUDS_MAX_LEVEL
-        ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_NOAA20_CorrectedReflectance_TrueColor/default/${cloudsDay()}/GoogleMapsCompatible_Level9/${level}/${y}/${x}.jpg`
-        : esri('World_Imagery')(x, y, level),
-    maxLevel: 17,
-    light: 1,
-    // Where the satellite saw nothing that day the imagery is pure black: see through it to
-    // the whole-Earth image beneath instead.
-    noDataBlack: true,
-    get credit() {
-      return `Clouds on ${cloudsDay()} (UTC): <a href="https://www.earthdata.nasa.gov/data/instruments/viirs" target="_blank" rel="noopener">NASA VIIRS</a> via GIBS; close up imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics and the GIS User Community`;
-    },
   },
   // An aeronautical chart: openAIP's airspaces, airports, navaids and reporting points (through
   // the Power Globe API, which holds the key) over a plain light grey map.
@@ -83,7 +60,6 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
   window.addEventListener('resize', () => {
     tilesTuned = matchTileDetailToScreen(globe, chart.engine);
   });
-  let engineHooked = false;
 
   const texture = new THREE.TextureLoader().load(backdropUrl);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -106,15 +82,6 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     altitude = value;
     // The tile engine joins the scene only once the globe has initialised, so keep trying.
     tilesTuned ||= matchTileDetailToScreen(globe, chart.engine);
-    if (!engineHooked) {
-      const engine = findTileEngine(globe, chart.engine);
-      if (engine) {
-        engineHooked = true;
-        seeThroughNoData(engine, () => style.noDataBlack);
-        // Tiles loaded before the hook was in place.
-        if (style.noDataBlack) globe.globeTileEngineClearCache();
-      }
-    }
     chart.update();
     const t = Math.min(1, Math.max(0, (altitude - 0.4) / (MAP_ALTITUDE + 0.6 - 0.4)));
     // Not full brightness even zoomed in, so white wind trails and labels keep their contrast.
@@ -146,33 +113,6 @@ function findTileEngine(globe, exclude) {
     if (!engine && obj !== exclude && Array.isArray(obj.thresholds) && 'tileUrl' in obj) engine = obj;
   });
   return engine;
-}
-
-// Pixels this dark (linear colour, about 5/255 before decoding) are taken as no data. Real
-// imagery is never this dark in all three channels by day, not even deep ocean.
-const NO_DATA_LEVEL = 0.0015;
-
-// While `active()`, new tiles leave out pure black pixels, so the whole-Earth image beneath
-// shows through gaps in the imagery.
-function seeThroughNoData(engine, active) {
-  const add = engine.add.bind(engine);
-  engine.add = (...tiles) => {
-    if (active()) {
-      for (const tile of tiles) {
-        if (!tile.material?.map) continue;
-        tile.material.onBeforeCompile = (shader) => {
-          shader.fragmentShader = shader.fragmentShader.replace(
-            '#include <map_fragment>',
-            `#include <map_fragment>
-            if (max(max(diffuseColor.r, diffuseColor.g), diffuseColor.b) < ${NO_DATA_LEVEL}) discard;`,
-          );
-        };
-        tile.material.customProgramCacheKey = () => 'see-through-no-data';
-        tile.material.needsUpdate = true;
-      }
-    }
-    return add(...tiles);
-  };
 }
 
 let blankImage = null;
@@ -315,15 +255,17 @@ function airportElement(airport, status, onClick) {
 }
 
 // A label at a runway end ("27 ✓"), the wind at an airport with an arrow pointing downwind, or
-// where an airfield is ("✈ AMS Schiphol", coloured by its wind status once known).
-// Hidden from screen readers: the airport panel says the same.
+// where an airfield is ("✈ AMS Schiphol", coloured by its wind status once known). The airport
+// open in the panel has its label `selected` (see airportmap.js). Hidden from screen readers: the
+// airport panel says the same.
 function runwayLabelElement(label, onSelect) {
   const el = document.createElement('div');
+  const selected = label.selected ? ' selected' : '';
   el.className =
     label.kind === 'wind'
-      ? 'wind-label'
+      ? `wind-label${selected}`
       : label.kind === 'airport'
-        ? `airport-label status-${label.status}${label.flag ? ' flagged' : ''}`
+        ? `airport-label status-${label.status}${label.flag ? ' flagged' : ''}${selected}`
         : `runway-label status-${label.status}`;
   el.setAttribute('aria-hidden', 'true');
   el.title = label.title ?? '';

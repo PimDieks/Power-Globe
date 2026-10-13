@@ -21,7 +21,7 @@ import { DETAIL_ALTITUDE, needsNewRegion, regionFor, viewBounds } from './detail
 import { BASEMAPS, setupBasemap, setupMapFeatures } from './map.js';
 import { setupSearch } from './search.js';
 import { airportPanelWeather, conditionsAt, loadAirports, searchAirports } from './airports.js';
-import { airportDetailsHtml, airportPlace, verdictText } from './airportview.js';
+import { airportDetailsHtml, airportPlace, panelStays, verdictText } from './airportview.js';
 import { setupWindCheck } from './windcheck.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
@@ -700,6 +700,7 @@ function showTraffic(item, title) {
   syncWindCheckButton();
   state.detail = { traffic: item };
   mapFeatures.setMarker(null);
+  airportMap.select(null);
   els.details.classList.remove('hidden');
   els.details.classList.add('keep-awake');
   els.detailsBack.hidden = true;
@@ -743,6 +744,7 @@ async function showDetails(lat, lng, name, pinLabel = name) {
   state.detail = detail;
   const title = name ?? coords(lat, lng);
   mapFeatures.setMarker({ lat, lng, name: pinLabel });
+  airportMap.select(null);
   els.details.classList.remove('hidden', 'keep-awake');
   els.detailsBack.hidden = true;
   els.detailsTitle.textContent = title;
@@ -801,7 +803,9 @@ async function showAirport(airport, { fromList = false } = {}) {
   // no forecast, once it is known.
   const detail = { airport, hourly: null, fromList, observation: undefined, error: null };
   state.detail = detail;
-  mapFeatures.setMarker({ lat: airport.lat, lng: airport.lng, name: airport.iata || airport.ident });
+  // The airport's own label on the map shows it is open (see airportmap.js): no pin of its own.
+  mapFeatures.setMarker(null);
+  airportMap.select(airport);
   els.details.classList.remove('hidden');
   // A tool to read, so it stays on screen rather than fading with the other controls.
   els.details.classList.add('keep-awake');
@@ -850,6 +854,7 @@ function closeDetails() {
   els.details.classList.add('hidden');
   els.details.classList.remove('keep-awake');
   mapFeatures.setMarker(null);
+  airportMap.select(null);
 }
 
 // Airport tools show the present rather than wherever the autoplay happened to be.
@@ -896,9 +901,10 @@ const LAT_SPAN_PER_ALTITUDE = 53;
 
 // Glide to an airport and open its conditions, from a height at which its runways show.
 // `stayClose` (a label on the map) never backs out from a closer view: it only centres on the
-// airport, and leaves the panel alone if that airport is already open. On phones the details panel
-// covers the lower half of the screen, so aim the camera a little south to put the airport in the
-// open space between the search box and the panel.
+// airport, and leaves the panel alone if that airport is already open (unless the panel is showing
+// an error, when it tries again). On phones the details panel covers the lower half of the screen,
+// so aim the camera a little south to put the airport in the open space between the search box and
+// the panel.
 function goToAirport(airport, { stayClose = false, ...options } = {}) {
   const altitude = stayClose ? airportFlightAltitude(globe.pointOfView().altitude) : AIRPORT_ALTITUDE;
   let lat = airport.lat;
@@ -918,8 +924,10 @@ function goToAirport(airport, { stayClose = false, ...options } = {}) {
   const duration = reducedMotion ? 0 : 2200;
   globe.pointOfView({ lat, lng: airport.lng, altitude }, duration);
   setTimeout(stopCameraDrift, duration + 50);
-  if (stayClose && state.detail?.airport?.ident === airport.ident) return;
-  showAirport(airport, options);
+  if (stayClose && panelStays(state.detail, airport)) return;
+  // Trying an open airport again keeps the way back to the wind check.
+  const again = stayClose && state.detail?.airport?.ident === airport.ident;
+  showAirport(airport, again ? { fromList: state.detail.fromList, ...options } : options);
 }
 
 // Drop any momentum left in the camera controls (damping eases movement out over many frames).

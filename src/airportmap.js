@@ -21,8 +21,9 @@ const MAX_AIRPORTS = 60;
 // Airports whose weather is looked up at a time, nearest to the middle of the view first.
 const MAX_WEATHER = 25;
 const SETTLE_MS = 350;
-// After the weather could not be had for the airports in view, no new lookup for this long, so
-// that every view change does not send the same failing request again.
+// After the weather could not be had for an airport, no new lookup for it for this long, so that
+// every view change does not send the same failing request again. It is asked again by itself
+// when this is over.
 export const WEATHER_RETRY_MS = 30_000;
 
 const DEG = Math.PI / 180;
@@ -76,8 +77,17 @@ export function airportsToLabel(airports, pov, aspect) {
     .slice(0, MAX_AIRPORT_LABELS * 3);
 }
 
+// Airports to give an airfield label, in the order they claim a place: the selected airport
+// always, whatever its tier or the crowd would allow, then the wind check's flagged ones, then
+// the rest by importance.
+export function labelCandidates(selected, flagged, labelled) {
+  const seen = new Set();
+  return [selected, ...flagged, ...labelled].filter((a) => a && !seen.has(a.ident) && seen.add(a.ident));
+}
+
 // `getProblems()`: the wind check's airports with wind trouble, [{ airport, status }]; zoomed
-// in, their airfield labels take the place of the wind check's markers.
+// in, their airfield labels take the place of the wind check's markers. `select(airport)` marks
+// the airport open in the panel (null for none): its label is drawn selected and is always shown.
 export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getProblems = () => [], onSelect }) {
   const runways = setupRunways(globe);
   const weather = new Map();
@@ -86,9 +96,13 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
   let labelled = [];
   let pov = null;
   let timer = null;
-  let request = 0;
   let active = false;
-  let retryAt = 0;
+  // Airports whose weather is being looked up, and those it could not be had for, until when.
+  const looking = new Set();
+  const retryAt = new Map();
+  let selected = null;
+  // Ident of the selected airport's label while it is shown on its own (see showAlone), if it is.
+  let alone = null;
 
   function aspect() {
     return window.innerWidth / window.innerHeight;
@@ -98,11 +112,22 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
   function view(next) {
     pov = next;
     clearTimeout(timer);
+    timer = null;
     if (next.altitude >= AIRPORT_LABEL_ALTITUDE) {
       if (active) clear();
+      else showAlone();
       return;
     }
     timer = setTimeout(update, SETTLE_MS);
+  }
+
+  // Updates again by itself when the first airport in view that is waiting to be asked again may
+  // be, unless an update is already coming (the camera moving schedules its own).
+  function retryWhenDue() {
+    if (timer) return;
+    const now = Date.now();
+    const due = shown.filter((a) => !weather.has(a.ident) && retryAt.get(a.ident) > now).map((a) => retryAt.get(a.ident));
+    if (due.length) timer = setTimeout(update, Math.min(...due) - now);
   }
 
   function clear() {
@@ -111,9 +136,52 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     labelled = [];
     runways.draw([], 1);
     mapFeatures.setRunwayLabels([]);
+    alone = null;
+    showAlone();
+  }
+
+  // The selected airport's label by itself, on the airport, while the airport map is not drawn
+  // (too far out, or not yet): there is always one label for the airport that is open.
+  function showAlone(again = false) {
+    const ident = selected?.ident ?? null;
+    if (ident === alone && !again) return;
+    alone = ident;
+    const flag = getProblems().find((p) => p.airport.ident === ident)?.status;
+    const label = selected && { ...airportLabel(selected, flag), lat: selected.lat, lng: selected.lng };
+    mapFeatures.setRunwayLabels(label ? [label] : [], onSelect);
+  }
+
+  // The label that says where an airfield is: its code and closer in its name, coloured by its wind
+  // status (`flag`: the wind check's status for it, which also badges the label).
+  function airportLabel(airport, flag) {
+    const code = airport.iata || airport.ident;
+    const named = (pov?.altitude ?? 1) < 0.15;
+    return {
+      key: `${airport.ident}:airport`,
+      kind: 'airport',
+      airport,
+      status: flag ?? statusOf(airport, getTime(), getLimits()).status,
+      flag: Boolean(flag),
+      text: named ? `${code} ${shortName(airport)}` : code,
+      title: flag ? `${airport.name}: ${STATUS[flag].label} in the wind check; open the runway check` : `${airport.name}: open the runway check`,
+      selected: airport.ident === selected?.ident,
+    };
+  }
+
+  function select(airport) {
+    if (airport?.ident === selected?.ident) return;
+    selected = airport;
+    refresh();
+  }
+
+  // Place the labels again, after the weather, the timeline or the wind check's findings changed.
+  function refresh() {
+    if (active) render();
+    else if (selected || alone) showAlone(true);
   }
 
   async function update() {
+    timer = null;
     if (!pov || pov.altitude >= AIRPORT_LABEL_ALTITUDE) return;
     airports ??= await loadAirports().catch(() => null);
     if (!airports) return;
@@ -121,21 +189,29 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     labelled = airportsToLabel(airports, pov, aspect());
     shown = pov.altitude < RUNWAY_ALTITUDE ? airportsInView(airports, pov, aspect()) : [];
     render();
-    // Weather for the nearest airports with runways shown and not looked up yet: the site's
-    // own data where it has them, else Open-Meteo.
-    const missing = shown.filter((a) => !weather.has(a.ident)).slice(0, MAX_WEATHER);
-    if (!missing.length || Date.now() < retryAt) return;
-    const id = ++request;
+    // Weather for the nearest airports with runways shown and not looked up yet (and not being
+    // looked up, or waiting to be asked again): the site's own data where it has them, else
+    // Open-Meteo.
+    const now = Date.now();
+    const missing = shown
+      .filter((a) => !weather.has(a.ident) && !looking.has(a.ident) && !(retryAt.get(a.ident) > now))
+      .slice(0, MAX_WEATHER);
+    retryWhenDue();
+    if (!missing.length) return;
+    for (const a of missing) looking.add(a.ident);
     try {
       await airportWeather(missing, {
         onData: (data) => {
           for (const [ident, hourly] of data) weather.set(ident, hourly);
-          if (id === request) render();
+          render();
         },
       });
     } catch (err) {
-      retryAt = Date.now() + WEATHER_RETRY_MS;
+      for (const a of missing) if (!weather.has(a.ident)) retryAt.set(a.ident, Date.now() + WEATHER_RETRY_MS);
+      retryWhenDue();
       console.error('Could not load weather for runways', err);
+    } finally {
+      for (const a of missing) looking.delete(a.ident);
     }
   }
 
@@ -196,6 +272,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
             text,
             direction: conditions.direction,
             title: `${airport.name}: open the runway check`,
+            selected: airport.ident === selected?.ident,
           },
           // North of the airport, clear of its runways.
           anchor: frame.toXY(destination(airport, 0, airportRadius(airport))),
@@ -207,41 +284,38 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     }
     // Where each airfield is: its code (and closer in, its name), on the airport when that is
     // free, else just above; left out where a more important airport's label already is.
-    // Airports the wind check flags come first, always labelled, in their status colour.
-    const named = pov.altitude < 0.15;
+    // The selected airport and those the wind check flags are always labelled (the flagged ones in
+    // their status colour); the selected one claims its place first.
     const bounds = viewBounds(pov, aspect());
     const flagged = new Map(getProblems().filter((p) => inBounds(p.airport, bounds)).map((p) => [p.airport.ident, p.status]));
-    const candidates = [...getProblems().map((p) => p.airport).filter((a) => flagged.has(a.ident)), ...labelled.filter((a) => !flagged.has(a.ident))];
+    const candidates = labelCandidates(
+      selected,
+      getProblems().map((p) => p.airport).filter((a) => flagged.has(a.ident)),
+      labelled,
+    );
     for (const airport of candidates) {
       if (withWind.has(airport.ident)) continue;
       const flag = flagged.get(airport.ident);
-      const status = flag ?? statusOf(airport, time, limits).status;
-      const code = airport.iata || airport.ident;
-      const text = named ? `${code} ${shortName(airport)}` : code;
+      const label = airportLabel(airport, flag);
       // Room for the plane, and for a flagged airport its status badge.
-      const extra = flag ? 50 : 30;
+      const extra = (flag ? 50 : 30) + (label.selected ? 6 : 0);
+      const always = flag || label.selected;
       wanted.push({
-        label: {
-          key: `${airport.ident}:airport`,
-          kind: 'airport',
-          airport,
-          status,
-          flag: Boolean(flag),
-          text,
-          title: flag ? `${airport.name}: ${STATUS[flag].label} in the wind check; open the runway check` : `${airport.name}: open the runway check`,
-        },
+        label,
         anchor: frame.toXY(airport),
         direction: { x: 0, y: 1 },
-        w: (7.4 * text.length + extra) * mpp,
+        w: (7.4 * label.text.length + extra) * mpp,
         h: 22 * mpp,
-        distances: flag ? [-11, 4, 14, 24, 36] : [-11, 4, 14],
-        optional: !flag,
+        distances: always ? [-11, 4, 14, 24, 36] : [-11, 4, 14],
+        optional: !always,
       });
     }
     runways.draw(strips, mpp);
-    // Runway ends first, so they get the spots nearest their runways; then winds, then airports.
+    // The selected airport's label first, then runway ends, so they get the spots nearest their
+    // runways; then winds, then airports.
     const order = { runway: 0, wind: 1, airport: 2 };
-    wanted.sort((p, q) => order[p.label.kind] - order[q.label.kind]);
+    const rank = ({ label }) => (label.selected ? -1 : order[label.kind]);
+    wanted.sort((p, q) => rank(p) - rank(q));
     // City names on the map (see map.js): a dot with the name to its right, 11 px capitals.
     const tier = labelTier(pov.altitude);
     const taken = CITIES.filter((c) => c.tier <= tier).map((c) => {
@@ -256,10 +330,11 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
       if (w.label.kind === 'airport' && ++airportsPlaced > MAX_AIRPORT_LABELS) return;
       labels.push({ ...w.label, ...frame.toLatLng(centres[i]) });
     });
+    alone = null;
     mapFeatures.setRunwayLabels(labels, onSelect);
   }
 
-  return { view, refresh: render };
+  return { view, refresh, select };
 }
 
 // The distinctive part of an airport's name: "Amsterdam Airport Schiphol" → "Schiphol".
