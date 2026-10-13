@@ -2,43 +2,62 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Power Globe</title>
+    <meta name="description" content="An open-source globe showing the weather forecast: temperature, wind, rain, clouds and humidity." />
     <link rel="stylesheet" href="/src/style.css" />
     <!-- Open connections early: weather loads at once, imagery as soon as you zoom. -->
     <link rel="preconnect" href="https://api.open-meteo.com" crossorigin />
     <link rel="preconnect" href="https://server.arcgisonline.com" crossorigin />
   </head>
   <body>
-    <div id="globe"></div>
+    <main id="globe" aria-label="Weather globe" aria-describedby="globe-help"></main>
 
-    <details class="panel" id="controls" open>
-      <summary><h1>Power Globe</h1></summary>
-      <div class="button-row" id="layer-buttons" role="radiogroup" aria-label="Weather layer"></div>
-      <div id="legend" aria-live="polite"></div>
+    <aside aria-label="Layers and display">
+      <p id="globe-help" class="visually-hidden">
+        An interactive globe showing the weather forecast. Drag to turn it, pinch or scroll to zoom, and tap a spot to
+        see its forecast. Use the controls to choose what is shown and the timeline to pick a time.
+      </p>
+      <details class="panel" id="controls" open>
+        <summary><h1>Power Globe</h1></summary>
+        <div class="button-row" id="layer-buttons" role="radiogroup" aria-label="Weather layer"></div>
+        <div id="legend"></div>
 
-      <h2>Display</h2>
-      <div class="button-row" id="mode-buttons" role="radiogroup" aria-label="Display style"></div>
-      <label class="toggle"><input type="checkbox" id="toggle-wind" checked /> Wind flow</label>
-      <label class="toggle"><input type="checkbox" id="toggle-hazards" checked /> Storms &amp; heavy precipitation</label>
-      <div id="pattern-legend"></div>
+        <h2>Display</h2>
+        <div class="button-row" id="mode-buttons" role="radiogroup" aria-label="Display style"></div>
+        <label class="toggle"><input type="checkbox" id="toggle-wind" checked /> Wind flow</label>
+        <label class="toggle"><input type="checkbox" id="toggle-hazards" checked /> Storms &amp; heavy precipitation</label>
+        <div id="pattern-legend"></div>
 
-      <div class="status-row">
-        <span id="status">Loading forecast…</span>
-        <button id="refresh" type="button">Refresh</button>
+        <div class="status-row">
+          <span id="status" role="status">Loading forecast…</span>
+          <button id="refresh" type="button">Refresh</button>
+        </div>
+      </details>
+    </aside>
+
+    <aside class="panel hidden" id="details" aria-labelledby="details-title">
+      <div class="details-head">
+        <h2 id="details-title"></h2>
+        <button id="details-close" class="icon-button" type="button">
+          <span aria-hidden="true">✕</span><span class="visually-hidden">Close details</span>
+        </button>
       </div>
-    </details>
+      <div id="details-body"></div>
+    </aside>
 
-    <aside class="panel hidden" id="details" aria-live="polite"></aside>
-
-    <div class="panel" id="timeline">
-      <button id="play" type="button" aria-label="Play forecast" disabled>▶</button>
+    <section class="panel" id="timeline" aria-label="Forecast timeline">
+      <button id="play" class="icon-button" type="button" disabled>
+        <span id="play-icon" aria-hidden="true">▶</span><span id="play-text" class="visually-hidden">Play forecast</span>
+      </button>
       <input type="range" id="time-slider" min="0" max="0" value="0" step="1" aria-label="Forecast time" disabled />
-      <span id="time-label">–</span>
+      <span id="time-label" aria-hidden="true">–</span>
       <button id="now" type="button" disabled>Now</button>
-    </div>
+    </section>
 
-    <div id="caption" aria-live="off"></div>
+    <div id="caption" aria-hidden="true"></div>
+    <!-- Announces things that happen on the map to screen readers, once. -->
+    <div id="announcer" class="visually-hidden" aria-live="polite"></div>
 
     <footer class="attribution">
       Weather by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> (CC BY 4.0) ·

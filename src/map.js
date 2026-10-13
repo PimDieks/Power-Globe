@@ -37,7 +37,8 @@ export function setupBasemap(globe, backdropUrl) {
     // The tile engine joins the scene only once the globe has initialised, so keep trying.
     tilesTuned ||= matchTileDetailToScreen(globe);
     const t = Math.min(1, Math.max(0, (altitude - 0.4) / (MAP_ALTITUDE + 0.6 - 0.4)));
-    const brightness = 1 - 0.45 * t;
+    // Not full brightness even zoomed in, so white wind trails and labels keep their contrast.
+    const brightness = 0.85 - 0.3 * t;
     for (const { light, intensity } of lights) light.intensity = intensity * brightness;
   };
 }
