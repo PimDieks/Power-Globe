@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { corsHeaders, route } from '../api/worker.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import worker, { corsHeaders, route } from '../api/worker.js';
 import { ceilingFt, flightCategory, toObservation, visibilityMiles } from '../src/metar.js';
 import { bearingBetween, destination, placeLabels, runwayEnds, runwayStatus } from '../src/runwaymap.js';
 import { conditionsAt, snapshotSeries, toAirport } from '../src/airports.js';
@@ -201,6 +201,202 @@ describe('keeping the services from being overloaded', () => {
     for (let i = 0; i < RATE_LIMIT; i++) expect(overLimit(ip, 1000)).toBe(false);
     expect(overLimit(ip, 1000)).toBe(true);
     expect(overLimit(ip, 62_000)).toBe(false);
+  });
+});
+
+describe('leaving a flight feed alone after it refuses or limits the API', () => {
+  const LOL = 'api.adsb.lol';
+  const LIVE = 'api.airplanes.live';
+  const FI = 'opendata.adsb.fi';
+  const AREA = new URL('https://api.example/flights/area?lat=52&lon=4&nm=50');
+  const RELAY = { FLIGHT_RELAY_URL: 'https://relay.example/', FLIGHT_RELAY_KEY: 'relay-secret-123456' };
+  const START = Date.parse('2026-10-13T12:00:00Z');
+  const marked = (host) => ({ 'X-Answered-By': host });
+  const flights = () => reply({ ac: [{ hex: 'abc' }] });
+  const flightsFrom = (host) => () => reply({ ac: [{ hex: 'abc' }] }, { headers: marked(host) });
+  const status = (code, headers) => () => reply('no', { status: code, headers });
+
+  // A stand-in for the edge cache that never lets an entry expire by itself.
+  const fakeCache = () => {
+    const entries = new Map();
+    return { entries, match: async (request) => entries.get(request.url)?.clone(), put: async (request, response) => void entries.set(request.url, response) };
+  };
+  const maxAge = (cache, feed, via = 'direct') => cache.entries.get(`https://api.example/__feeds/${via}/${feed}`)?.headers.get('Cache-Control');
+
+  // A fetch that answers as each feed is told to, and notes which hosts were asked.
+  const feedsAnswering = (answers) => {
+    const asked = [];
+    const fetchFn = vi.fn(async (url) => {
+      const { host, pathname } = new URL(url);
+      const feed = host === 'relay.example' ? pathname.split('/')[1] : host;
+      asked.push(feed);
+      return answers[feed]();
+    });
+    const hosts = () => asked.splice(0);
+    return { fetchFn, hosts };
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(START);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('leaves a feed that refuses for 6 hours and one that limits for a minute, while another answers', async () => {
+    const cache = fakeCache();
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429), [LIVE]: status(403), [FI]: flights });
+    const ask = () => route(AREA, {}, fetchFn, cache);
+    expect((await (await ask()).json()).source).toBe('adsb.fi');
+    expect(hosts()).toEqual([LOL, LIVE, FI]);
+    expect(maxAge(cache, 'adsb.lol')).toBe('public, max-age=60');
+    expect(maxAge(cache, 'airplanes.live')).toBe('public, max-age=21600');
+
+    await ask();
+    expect(hosts()).toEqual([FI]);
+    vi.setSystemTime(START + 61_000);
+    await ask();
+    expect(hosts()).toEqual([LOL, FI]);
+    vi.setSystemTime(START + 6 * 3600_000 + 1000);
+    await ask();
+    expect(hosts()).toEqual([LOL, LIVE, FI]);
+  });
+
+  it('leaves a limiting feed alone for as long as it asks, between 5 seconds and 15 minutes', async () => {
+    const cache = fakeCache();
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429, { 'Retry-After': '300' }), [LIVE]: flights, [FI]: flights });
+    const ask = () => route(AREA, {}, fetchFn, cache);
+    await ask();
+    expect(hosts()).toEqual([LOL, LIVE]);
+    expect(maxAge(cache, 'adsb.lol')).toBe('public, max-age=300');
+    vi.setSystemTime(START + 120_000);
+    await ask();
+    expect(hosts()).toEqual([LIVE]);
+    vi.setSystemTime(START + 301_000);
+    await ask();
+    expect(hosts()).toEqual([LOL, LIVE]);
+
+    for (const [asked, kept] of [['86400', 900], ['1', 5]]) {
+      const other = fakeCache();
+      const limited = feedsAnswering({ [LOL]: status(429, { 'Retry-After': asked }), [LIVE]: flights, [FI]: flights });
+      await route(AREA, {}, limited.fetchFn, other);
+      expect(maxAge(other, 'adsb.lol')).toBe(`public, max-age=${kept}`);
+    }
+  });
+
+  it('leaves a feed that refuses or limits alone through the relay as well, as the owner\'s relay passes it on', async () => {
+    const cache = fakeCache();
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429, marked(LOL)), [LIVE]: status(403, marked(LIVE)), [FI]: flightsFrom(FI) });
+    const ask = () => route(AREA, RELAY, fetchFn, cache);
+    expect((await (await ask()).json()).source).toBe('adsb.fi');
+    expect(hosts()).toEqual([LOL, LIVE, FI]);
+    expect(maxAge(cache, 'adsb.lol', 'relay')).toBe('public, max-age=60');
+    expect(maxAge(cache, 'airplanes.live', 'relay')).toBe('public, max-age=21600');
+    await ask();
+    expect(hosts()).toEqual([FI]);
+  });
+
+  it('leaves a feed the relay does not ask alone for a minute, but not one the relay cannot sign in to', async () => {
+    const cache = fakeCache();
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429, marked(LOL)), [LIVE]: status(404), [FI]: flightsFrom(FI) });
+    const ask = () => route(AREA, RELAY, fetchFn, cache);
+    expect((await (await ask()).json()).source).toBe('adsb.fi');
+    expect(hosts()).toEqual([LOL, LIVE, FI]);
+    expect(maxAge(cache, 'airplanes.live', 'relay')).toBe('public, max-age=60');
+    await ask();
+    expect(hosts()).toEqual([FI]);
+    vi.setSystemTime(START + 61_000);
+    await ask();
+    expect(hosts()).toEqual([LOL, LIVE, FI]);
+
+    // The relay's own 401 means its key does not match, which says nothing about the feeds.
+    const wrongKey = fakeCache();
+    const refused = feedsAnswering({ [LOL]: status(401), [LIVE]: status(401), [FI]: status(401) });
+    await expect(route(AREA, RELAY, refused.fetchFn, wrongKey)).rejects.toMatchObject({ status: 502 });
+    await expect(route(AREA, RELAY, refused.fetchFn, wrongKey)).rejects.toMatchObject({ status: 502 });
+    expect(refused.hosts()).toEqual([LOL, LIVE, FI, LOL, LIVE, FI]);
+    expect(wrongKey.entries.size).toBe(0);
+  });
+
+  it('goes by what the relay marked: a feed\'s own 401 or 403 is remembered, its own 404 or an unmarked 403 is not', async () => {
+    for (const [code, headers, remembered] of [[401, marked(LOL), true], [403, marked(LOL), true], [404, marked(LOL), false], [403, undefined, false]]) {
+      const cache = fakeCache();
+      const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(code, headers), [LIVE]: flightsFrom(LIVE), [FI]: flights });
+      await route(AREA, RELAY, fetchFn, cache);
+      expect(hosts()).toEqual([LOL, LIVE]);
+      await route(AREA, RELAY, fetchFn, cache);
+      expect(hosts(), `a ${headers ? 'marked' : 'unmarked'} ${code}`).toEqual(remembered ? [LIVE] : [LOL, LIVE]);
+    }
+  });
+
+  it('keeps what direct requests were refused apart from what the relay will be asked', async () => {
+    const cache = fakeCache();
+    const answers = { [LOL]: status(403), [LIVE]: flights, [FI]: flights };
+    const { fetchFn, hosts } = feedsAnswering(answers);
+    expect((await (await route(AREA, {}, fetchFn, cache)).json()).source).toBe('airplanes.live');
+    expect(hosts()).toEqual([LOL, LIVE]);
+    expect(maxAge(cache, 'adsb.lol')).toBe('public, max-age=21600');
+
+    answers[LOL] = flightsFrom(LOL);
+    expect((await (await route(AREA, RELAY, fetchFn, cache)).json()).source).toBe('adsb.lol');
+    expect(hosts()).toEqual([LOL]);
+    expect(fetchFn.mock.lastCall[0]).toMatch(/^https:\/\/relay\.example\/api\.adsb\.lol\//);
+  });
+
+  it('asks again after a feed\'s own 404 or trouble, and leaves it alone after a 401 when asked direct', async () => {
+    for (const [code, remembered] of [[401, true], [404, false], [503, false]]) {
+      const cache = fakeCache();
+      const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(code), [LIVE]: flights, [FI]: flights });
+      await route(AREA, {}, fetchFn, cache);
+      expect(hosts()).toEqual([LOL, LIVE]);
+      await route(AREA, {}, fetchFn, cache);
+      expect(hosts(), `a direct ${code}`).toEqual(remembered ? [LIVE] : [LOL, LIVE]);
+    }
+  });
+
+  it('says which feeds are being left alone, without asking any, when none can be asked', async () => {
+    const cache = fakeCache();
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(403), [LIVE]: status(403), [FI]: status(403) });
+    await expect(route(AREA, {}, fetchFn, cache)).rejects.toMatchObject({ status: 502 });
+    expect(hosts()).toEqual([LOL, LIVE, FI]);
+    const err = await route(AREA, {}, fetchFn, cache).catch((e) => e);
+    expect(err.status).toBe(502);
+    expect(err.message).toBe(
+      'adsb.lol is not asked for now (api.adsb.lol answered 403); airplanes.live is not asked for now (api.airplanes.live answered 403); adsb.fi is not asked for now (opendata.adsb.fi answered 403)',
+    );
+    expect(hosts()).toEqual([]);
+  });
+
+  it('remembers nothing without a cache, and carries on when the cache fails', async () => {
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(403), [LIVE]: flights, [FI]: flights });
+    await route(AREA, {}, fetchFn);
+    await route(AREA, {}, fetchFn);
+    expect(hosts()).toEqual([LOL, LIVE, LOL, LIVE]);
+
+    const broken = { match: async () => Promise.reject(new Error('no cache')), put: async () => Promise.reject(new Error('no cache')) };
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect((await (await route(AREA, {}, fetchFn, broken)).json()).source).toBe('airplanes.live');
+    expect(hosts()).toEqual([LOL, LIVE]);
+    expect(log).toHaveBeenCalledTimes(1);
+  });
+
+  it('is shared by the requests the handler answers', async () => {
+    const cache = fakeCache();
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429), [LIVE]: status(403), [FI]: flights });
+    vi.stubGlobal('caches', { default: cache });
+    vi.stubGlobal('fetch', fetchFn);
+    const pending = [];
+    const ctx = { waitUntil: (promise) => pending.push(promise) };
+    for (const area of ['lat=52&lon=4&nm=50', 'lat=40&lon=-74&nm=50']) {
+      const res = await worker.fetch(new Request(`https://api.example/flights/area?${area}`), {}, ctx);
+      expect(res.status).toBe(200);
+      expect((await res.json()).source).toBe('adsb.fi');
+      await Promise.all(pending);
+    }
+    expect(hosts()).toEqual([LOL, LIVE, FI, FI]);
   });
 });
 
