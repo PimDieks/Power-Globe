@@ -204,7 +204,9 @@ export function setupMapFeatures(globe) {
   globe
     .htmlLat('lat')
     .htmlLng('lng')
-    .htmlAltitude(0.0006)
+    // On the ground (about 60 m up), so labels stay on the spot they name: higher up, they
+    // would drift away from it as the view moves, a lot when zoomed in to an airport.
+    .htmlAltitude(0.00001)
     .htmlTransitionDuration(0)
     .htmlElement((d) => d.el ?? elements.get(d))
     .pathPoints((line) => line)
