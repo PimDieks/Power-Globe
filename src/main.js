@@ -4,6 +4,7 @@ import {
   FORECAST_DAYS,
   GRID_STEP,
   gridShape,
+  apiBudget,
   isRegionCached,
   loadForecast,
   loadPointForecast,
@@ -25,6 +26,10 @@ const LAYER_FADE = 0.9;
 const IDLE_MS = 4000;
 // Minimum gap between fetches of zoomed-in detail, to stay within the free API's limits.
 const REGION_FETCH_INTERVAL_MS = 4000;
+// API locations kept free for tapping on the map, so zoomed-in detail never uses them up.
+const POINT_RESERVE = 20;
+// How long zoomed-in detail waits before retrying when the API budget is low.
+const REGION_RETRY_MS = 15_000;
 // How often the zoomed-in detail follows a moving camera.
 const REGION_FOLLOW_MS = 400;
 // Seconds for zoomed-in detail to fade in once it arrives.
@@ -117,8 +122,8 @@ const globe = new Globe(els.globe, { animateIn: !reducedMotion })
   .ringMaxRadius(4)
   .ringPropagationSpeed(1.4)
   .ringRepeatPeriod(2400)
-  // Above the colour field and wind layers.
-  .ringAltitude(0.006)
+  // Drawn after the colour field and wind layers, which do not write depth, so they show on top.
+  .ringAltitude(0.0008)
   .onGlobeClick(({ lat, lng }) => showDetails(lat, lng));
 
 const setMapBrightness = setupBasemap(globe, `${IMAGE_BASE}/earth-blue-marble.jpg`);
@@ -129,8 +134,8 @@ controls.autoRotate = !reducedMotion;
 controls.autoRotateSpeed = 0.22;
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
-// Stop about 100 km above the ground: the imagery has no finer detail to show.
-controls.minDistance = globe.getGlobeRadius() * 1.015;
+// Stop about 40 km above the ground, a little above the weather layers.
+controls.minDistance = globe.getGlobeRadius() * 1.006;
 
 const shape = gridShape(GRID_STEP);
 const field = new FieldOverlay(globe, { shape });
@@ -146,7 +151,7 @@ const detailField = new FieldOverlay(globe, {
   bounds: initialRegion.bounds,
   width: 256,
   height: 256,
-  altitude: 0.0025,
+  altitude: 0.0012,
   depthBias: 3,
   feather: 0.12,
   renderOrder: -2,
@@ -157,7 +162,7 @@ const detailFlow = new WindFlow(globe, {
   width: 1024,
   height: 1024,
   lineWidth: 1.2,
-  altitude: 0.0045,
+  altitude: 0.0018,
 });
 detailField.visible = false;
 detailFlow.visible = false;
@@ -415,6 +420,11 @@ function leaveRegion() {
 let lastRegionFetch = 0;
 async function fetchRegion(region) {
   if (!isRegionCached(region.shape)) {
+    // Zoomed-in detail is optional: wait rather than spend the API's free allowance down to zero.
+    if (apiBudget() < region.shape.rows * region.shape.cols + POINT_RESERVE) {
+      setTimeout(() => state.region === region && fetchRegion(region), REGION_RETRY_MS);
+      return;
+    }
     const wait = lastRegionFetch + REGION_FETCH_INTERVAL_MS - Date.now();
     if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
     // The view may have moved on while waiting.
@@ -476,7 +486,7 @@ async function showDetails(lat, lng) {
   } catch (err) {
     console.error(err);
     if (state.detail === detail) {
-      els.details.innerHTML = `<h2>${lat.toFixed(2)}°, ${lng.toFixed(2)}°</h2><p>Could not load weather here.</p>`;
+      els.details.innerHTML = `<h2>${lat.toFixed(2)}°, ${lng.toFixed(2)}°</h2><p>Could not load weather here. ${err.message ?? ''}</p>`;
     }
   }
 }

@@ -3,8 +3,8 @@
 const DEG = Math.PI / 180;
 // Below this camera altitude (in globe radii) the view switches to regional detail.
 export const DETAIL_ALTITUDE = 1.1;
-// Locations per regional request: keeps panning well within the free API's 600 per minute.
-const MAX_POINTS = 200;
+// Locations per regional request: a few views fit in the free API's 600 per minute.
+const MAX_POINTS = 150;
 const NICE_STEPS = [0.25, 0.5, 1, 1.5, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20];
 
 // Area of the globe in view, with a margin, for camera `pov` and viewport `aspect` (w/h).
