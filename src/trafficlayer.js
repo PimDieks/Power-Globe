@@ -2,6 +2,43 @@
 // so they stay cheap to move every frame.
 import * as THREE from 'three';
 
+// Aircraft are drawn at their true height, so one on the ground is at the surface, below the
+// layers that sit just above it (the chart, weather, paths, runways). They and the selection
+// ring are therefore drawn after those layers and without depth testing, and are hidden behind
+// the globe by this test instead: a point is behind it when the line of sight to the camera
+// passes through a sphere this share of the globe's radius first. A little under 1, so a point
+// right on the surface does not hide itself.
+export const HIDE_RADIUS = 0.999;
+
+// Whether (x, y, z) is behind the globe as seen from `cam`, for a globe of the given radius.
+export function behindGlobe(cam, x, y, z, radius) {
+  const dx = x - cam.x;
+  const dy = y - cam.y;
+  const dz = z - cam.z;
+  const a = dx * dx + dy * dy + dz * dz;
+  const b = 2 * (cam.x * dx + cam.y * dy + cam.z * dz);
+  const c = cam.x * cam.x + cam.y * cam.y + cam.z * cam.z - (radius * HIDE_RADIUS) ** 2;
+  const disc = b * b - 4 * a * c;
+  if (disc <= 0) return false;
+  const t = (-b - Math.sqrt(disc)) / (2 * a);
+  return t > 0 && t < 1;
+}
+
+// The same test in the vertex shader, for a globe of radius sqrt(uHideRadiusSq).
+const BEHIND_GLOBE = /* glsl */ `
+  uniform float uHideRadiusSq;
+  bool behindGlobe(vec3 p) {
+    vec3 d = p - cameraPosition;
+    float a = dot(d, d);
+    float b = 2.0 * dot(cameraPosition, d);
+    float c = dot(cameraPosition, cameraPosition) - uHideRadiusSq;
+    float disc = b * b - 4.0 * a * c;
+    float t = (-b - sqrt(max(disc, 0.0))) / (2.0 * a);
+    return disc > 0.0 && t > 0.0 && t < 1.0;
+  }
+`;
+const hideUniform = (globe) => ({ value: (globe.getGlobeRadius() * HIDE_RADIUS) ** 2 });
+
 // Plane silhouettes, nose up, white with a dark outline so they read over any map or weather.
 function planeTexture() {
   const canvas = document.createElement('canvas');
@@ -29,6 +66,7 @@ function planeTexture() {
 }
 
 const AIRCRAFT_VERTEX = /* glsl */ `
+  ${BEHIND_GLOBE}
   attribute vec3 aColor;
   attribute float aHeading;
   attribute float aScale;
@@ -49,7 +87,7 @@ const AIRCRAFT_VERTEX = /* glsl */ `
     vec2 d = (ahead.xy / ahead.w - clip.xy / clip.w) * uViewport;
     vAngle = atan(d.y, d.x);
     vColor = aColor;
-    gl_Position = clip;
+    gl_Position = behindGlobe(position) ? vec4(2.0, 2.0, 2.0, 1.0) : clip;
     gl_PointSize = uSize * aScale;
   }
 `;
@@ -68,18 +106,6 @@ const AIRCRAFT_FRAGMENT = /* glsl */ `
     vec4 g = texture2D(uGlyph, uv);
     if (g.a < 0.04) discard;
     gl_FragColor = vec4(g.rgb * vColor, g.a);
-  }
-`;
-
-const DOT_VERTEX = /* glsl */ `
-  attribute vec3 aColor;
-  attribute float aScale;
-  uniform float uSize;
-  varying vec3 vColor;
-  void main() {
-    vColor = aColor;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = uSize * aScale;
   }
 `;
 
@@ -107,6 +133,20 @@ const DOT_FRAGMENT = /* glsl */ `
     float core = smoothstep(0.55, 0.25, d);
     float glow = (1.0 - d) * 0.45;
     gl_FragColor = vec4(mix(vColor, vec3(1.0), core * 0.5), max(core, glow));
+  }
+`;
+
+const RING_VERTEX = /* glsl */ `
+  ${BEHIND_GLOBE}
+  attribute vec3 aColor;
+  attribute float aScale;
+  uniform float uSize;
+  varying vec3 vColor;
+  void main() {
+    vColor = aColor;
+    vec4 clip = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    gl_Position = behindGlobe(position) ? vec4(2.0, 2.0, 2.0, 1.0) : clip;
+    gl_PointSize = uSize * aScale;
   }
 `;
 
@@ -174,10 +214,16 @@ class PointCloud {
 
 export function aircraftLayer(globe) {
   const material = new THREE.ShaderMaterial({
-    uniforms: { uSize: { value: 10 }, uViewport: { value: new THREE.Vector2(1, 1) }, uGlyph: { value: planeTexture() } },
+    uniforms: {
+      uSize: { value: 10 },
+      uViewport: { value: new THREE.Vector2(1, 1) },
+      uGlyph: { value: planeTexture() },
+      uHideRadiusSq: hideUniform(globe),
+    },
     vertexShader: AIRCRAFT_VERTEX,
     fragmentShader: AIRCRAFT_FRAGMENT,
     transparent: true,
+    depthTest: false,
     depthWrite: false,
   });
   const cloud = new PointCloud(globe, material, { aColor: 3, aHeading: 1, aScale: 1 }, 10);
@@ -204,10 +250,11 @@ export function satelliteLayer(globe) {
 
 export function selectionRing(globe) {
   const material = new THREE.ShaderMaterial({
-    uniforms: { uSize: { value: 30 } },
-    vertexShader: DOT_VERTEX,
+    uniforms: { uSize: { value: 30 }, uHideRadiusSq: hideUniform(globe) },
+    vertexShader: RING_VERTEX,
     fragmentShader: RING_FRAGMENT,
     transparent: true,
+    depthTest: false,
     depthWrite: false,
   });
   const cloud = new PointCloud(globe, material, { aColor: 3, aScale: 1 }, 11);

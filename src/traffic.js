@@ -5,8 +5,8 @@
 // few seconds, which also marks military aircraft, and a worldwide military feed comes from the
 // same. Between reports each aircraft moves along its track at its ground speed. Satellites
 // follow CelesTrak's orbital elements, computed in a worker.
-import { AircraftStore, estimatePosition, fromAdsb, fromOpenSky } from './aircraft.js';
-import { aircraftLayer, orbitLine, satelliteLayer, selectionRing } from './trafficlayer.js';
+import { AircraftStore, drawnAltitude, estimatePosition, fromAdsb, fromOpenSky } from './aircraft.js';
+import { aircraftLayer, behindGlobe, orbitLine, satelliteLayer, selectionRing } from './trafficlayer.js';
 import { EARTH_RADIUS_KM, orbitClass, orbitPath, parseTle, periodMinutes, satellitePosition, toGeodetic, toSatrec, tleEpoch } from './orbits.js';
 import { aircraftDetailsHtml, aircraftName, satelliteDetailsHtml } from './trafficview.js';
 import { PROXY_URL, explain } from './api.js';
@@ -440,9 +440,6 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     out[3 * i + 2] = r * cosLat * Math.cos(lng * RAD);
   }
 
-  // Cruising altitude is drawn a little higher than to scale, so aircraft clear the weather.
-  const aircraftAltitude = (ac) => 0.0018 + (Math.max(0, ac.altitudeFt ?? 0) * 0.3048 * 3) / (EARTH_RADIUS_KM * 1000);
-
   function drawAircraft(now) {
     const show = settings.flights || settings.military;
     if (!show) return;
@@ -473,7 +470,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
       const ac = shown[i];
       const p = estimatePosition(ac, now);
       ac.estimate = p;
-      scenePoint(p.lat, p.lng, aircraftAltitude(ac), attrs.position, i);
+      scenePoint(p.lat, p.lng, drawnAltitude(ac), attrs.position, i);
     }
     cursor = from + n;
     planes.commit(shown.length);
@@ -563,7 +560,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
       const ac = store.byId.get(selected.id);
       if (!ac?.estimate) return null;
       const out = [0, 0, 0];
-      scenePoint(ac.estimate.lat, ac.estimate.lng, aircraftAltitude(ac), out, 0);
+      scenePoint(ac.estimate.lat, ac.estimate.lng, drawnAltitude(ac), out, 0);
       return { x: out[0], y: out[1], z: out[2] };
     }
     if (selected?.kind === 'satellite') {
@@ -583,7 +580,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   }
 
   // The aircraft or satellite drawn nearest to a screen point, within a finger's reach, that is
-  // not hidden behind the globe.
+  // not hidden behind the globe (by the same test as the layers use to hide them).
   function pick(clientX, clientY) {
     const camera = globe.camera();
     const rect = globe.renderer().domElement.getBoundingClientRect();
@@ -593,18 +590,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     let bestD = reach * reach;
     const v = { x: 0, y: 0, z: 0 };
     const test = (x, y, z, hit) => {
-      // Hidden behind the globe?
-      const dx = x - cam.x;
-      const dy = y - cam.y;
-      const dz = z - cam.z;
-      const a = dx * dx + dy * dy + dz * dz;
-      const b = 2 * (cam.x * dx + cam.y * dy + cam.z * dz);
-      const c = cam.x * cam.x + cam.y * cam.y + cam.z * cam.z - R * R * 0.998;
-      const disc = b * b - 4 * a * c;
-      if (disc > 0) {
-        const t = (-b - Math.sqrt(disc)) / (2 * a);
-        if (t > 0 && t < 1) return;
-      }
+      if (behindGlobe(cam, x, y, z, R)) return;
       v.x = x;
       v.y = y;
       v.z = z;
