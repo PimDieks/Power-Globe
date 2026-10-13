@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <!-- Lit from the upper left: a mid blue fading through the page navy (#10213a) to the panel colour (#0a0e18). -->
+    <radialGradient id="g" cx="10" cy="9" r="21" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6aa3d8"/>
+      <stop offset=".5" stop-color="#10213a"/>
+      <stop offset="1" stop-color="#0a0e18"/>
+    </radialGradient>
+    <clipPath id="c"><circle cx="16" cy="16" r="14"/></clipPath>
+  </defs>
+  <circle cx="16" cy="16" r="14" fill="url(#g)"/>
+  <!-- One meridian and a tilted parallel, in the accent blue (#9bd1ff). -->
+  <g clip-path="url(#c)" fill="none" stroke="#9bd1ff" stroke-width="2">
+    <ellipse cx="16" cy="16" rx="7" ry="14"/>
+    <path d="M1 15Q16 22 31 15"/>
+  </g>
+  <!-- The rim: the atmosphere, and what keeps the dark disc visible on a dark tab bar. -->
+  <circle cx="16" cy="16" r="14" fill="none" stroke="#9bd1ff" stroke-width="2"/>
+</svg>

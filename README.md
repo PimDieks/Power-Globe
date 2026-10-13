@@ -143,6 +143,7 @@ Every push to `main` builds the site and deploys it to GitHub Pages via
 | `src/patterns.js` | Severe-weather classification for the storm markers. |
 | `src/layers.js` | Layer definitions (Open-Meteo variable, unit, palette, opacity) and WMO weather-code descriptions. |
 | `public/img/` | Whole-Earth backdrop image, shown where map tiles are missing (the poles, while loading, or offline). |
+| `public/favicon.svg`, `favicon-32.png`, `apple-touch-icon.png` | The site icon: a globe in the app's blues, as an SVG with PNG fallbacks for older browsers and iOS. |
 
 ### Adding a layer
 
