@@ -170,3 +170,26 @@ describe('screen-space wind', async () => {
     expect(facesCamera(...toCartesian(0, 180, 100), ...camera, 100 * 100)).toBe(false);
   });
 });
+
+describe('poles', async () => {
+  const { fillPoleRows, padPoles, sampleGridCubic: cubic } = await import('../src/field.js');
+  const { gridShape } = await import('../src/weather.js');
+
+  it('adds a row of averages past each edge of a global grid', () => {
+    const shape = { rows: 2, cols: 3, lat0: -10, lng0: -180, step: 10, wrap: true };
+    const padded = padPoles(shape);
+    expect(padded).toMatchObject({ rows: 4, lat0: -20 });
+    const values = new Float32Array([0, 0, 0, 1, 2, 3, 4, NaN, 8, 0, 0, 0]);
+    fillPoleRows(values, padded);
+    expect([...values.slice(0, 3)]).toEqual([2, 2, 2]);
+    expect([...values.slice(9)]).toEqual([6, 6, 6]);
+  });
+
+  it('converges on one value at the pole instead of fanning out by longitude', () => {
+    const shape = padPoles(gridShape());
+    const values = Float32Array.from({ length: shape.rows * shape.cols }, (_, i) => Math.sin(i * 1.7) * 50);
+    fillPoleRows(values, shape);
+    const nearPole = [-180, -90, 0, 45, 135].map((lng) => cubic(values, shape, 88, lng));
+    for (const v of nearPole) expect(v).toBeCloseTo(nearPole[0], 5);
+  });
+});

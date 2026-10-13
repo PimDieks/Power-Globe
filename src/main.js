@@ -13,7 +13,7 @@ import {
   parseTime,
   startIndex,
 } from './weather.js';
-import { FieldOverlay, covers, sampleGrid } from './field.js';
+import { FieldOverlay, covers, fillPoleRows, padPoles, sampleGrid } from './field.js';
 import { WindFlow, windGrids } from './flow.js';
 import { ScreenFlow } from './screenflow.js';
 import { HAZARDS, hazardRings } from './patterns.js';
@@ -291,13 +291,19 @@ function drawField() {
 }
 
 // Wind for the current moment, blended between steps: global, and regional when zoomed in.
-const globalWind = { u: new Float32Array(shape.rows * shape.cols), v: new Float32Array(shape.rows * shape.cols) };
+// The global wind gets a row of pole averages at each end, so particles near the poles follow
+// one averaged wind instead of spokes (see padPoles).
+const windShape = padPoles(shape);
+const globalWind = {
+  u: new Float32Array(windShape.rows * windShape.cols),
+  v: new Float32Array(windShape.rows * windShape.cols),
+};
 let regionWind = null;
 
-function blendWind(steps, a, b, t, out) {
-  for (let i = 0; i < out.u.length; i++) {
-    out.u[i] = steps[a].u[i] + (steps[b].u[i] - steps[a].u[i]) * t;
-    out.v[i] = steps[a].v[i] + (steps[b].v[i] - steps[a].v[i]) * t;
+function blendWind(steps, a, b, t, out, offset = 0) {
+  for (let i = 0; i < steps[a].u.length; i++) {
+    out.u[offset + i] = steps[a].u[i] + (steps[b].u[i] - steps[a].u[i]) * t;
+    out.v[offset + i] = steps[a].v[i] + (steps[b].v[i] - steps[a].v[i]) * t;
   }
 }
 
@@ -308,8 +314,8 @@ function sampleWind(lat, lng, out) {
     out[0] = sampleGrid(regionWind.u, regionShape, lat, lng);
     out[1] = sampleGrid(regionWind.v, regionShape, lat, lng);
   } else {
-    out[0] = sampleGrid(globalWind.u, shape, lat, lng);
-    out[1] = sampleGrid(globalWind.v, shape, lat, lng);
+    out[0] = sampleGrid(globalWind.u, windShape, lat, lng);
+    out[1] = sampleGrid(globalWind.v, windShape, lat, lng);
   }
   return true;
 }
@@ -318,7 +324,9 @@ function stepWind(dt) {
   const active = state.region ? detailFlow : flow;
   if (!active.visible) return;
   const [i0, i1, t] = blendIndices();
-  blendWind(state.winds, i0, i1, t, globalWind);
+  blendWind(state.winds, i0, i1, t, globalWind, shape.cols);
+  fillPoleRows(globalWind.u, windShape);
+  fillPoleRows(globalWind.v, windShape);
   const ri = regionIndices(i0, i1);
   if (ri) {
     const size = state.region.winds[0].u.length;

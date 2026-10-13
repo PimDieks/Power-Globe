@@ -18,6 +18,31 @@ const gridY = (lat, { rows, lat0, step }) => Math.min(rows - 1, Math.max(0, (lat
 
 const colIndex = (c, { cols, wrap }) => (wrap ? (c + cols) % cols : Math.min(cols - 1, Math.max(0, c)));
 
+// A global grid stops short of the poles. Beyond its last row, each longitude would keep its
+// own value, and as the meridians converge those values fan out into spokes around the pole.
+// padPoles describes the grid with one extra row past each edge, and fillPoleRows fills those
+// rows with the average of the edge row, so values blend into a single one at each pole.
+export const padPoles = (shape) => ({ ...shape, lat0: shape.lat0 - shape.step, rows: shape.rows + 2 });
+
+// Fill the outer rows of `values` (laid out as padPoles(shape)) from the rows next to them.
+export function fillPoleRows(values, { rows, cols }) {
+  for (const [target, source] of [
+    [0, 1],
+    [rows - 1, rows - 2],
+  ]) {
+    let sum = 0;
+    let count = 0;
+    for (let c = 0; c < cols; c++) {
+      const v = values[source * cols + c];
+      if (!Number.isNaN(v)) {
+        sum += v;
+        count++;
+      }
+    }
+    values.fill(count ? sum / count : NaN, target * cols, (target + 1) * cols);
+  }
+}
+
 // Whether a regional grid has data at this point (a global grid always does).
 export function covers(shape, lat, lng) {
   if (shape.wrap) return true;
@@ -221,8 +246,11 @@ export class FieldOverlay {
 
   setRegion(shape, bounds) {
     this.shape = shape;
-    this.blended = new Float32Array(shape.rows * shape.cols);
-    this.tables = samplingTables(shape, this.canvas.width, this.canvas.height, bounds, this.feather);
+    // A global grid gets a row of pole averages at each end (see padPoles).
+    this.gridShape = shape.wrap ? padPoles(shape) : shape;
+    this.offset = shape.wrap ? shape.cols : 0;
+    this.blended = new Float32Array(this.gridShape.rows * this.gridShape.cols);
+    this.tables = samplingTables(this.gridShape, this.canvas.width, this.canvas.height, bounds, this.feather);
     this.mesh.geometry.dispose();
     this.mesh.geometry = patchGeometry(this.globe, bounds, this.altitude);
   }
@@ -247,10 +275,11 @@ export class FieldOverlay {
 
   // Paint the field for grid values `a` and `b` (two consecutive time steps) blended by `t`.
   render(a, b, t, layer) {
-    for (let i = 0; i < this.blended.length; i++) {
+    for (let i = 0; i < a.length; i++) {
       const va = a[i] ?? NaN;
-      this.blended[i] = va + ((b[i] ?? NaN) - va) * t;
+      this.blended[this.offset + i] = va + ((b[i] ?? NaN) - va) * t;
     }
+    if (this.shape.wrap) fillPoleRows(this.blended, this.gridShape);
     const { stops } = layer;
     renderField(this.blended, this.tables, this.lutFor(layer), stops[0][0], stops.at(-1)[0], this.image.data);
     this.ctx.putImageData(this.image, 0, 0);
