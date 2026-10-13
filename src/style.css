@@ -1,0 +1,155 @@
+:root {
+  --panel-bg: rgba(15, 20, 30, 0.82);
+  --text: #e9ecef;
+  --muted: #adb5bd;
+  --accent: #4dabf7;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color: var(--text);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #000;
+  overflow: hidden;
+}
+
+#globe {
+  position: fixed;
+  inset: 0;
+}
+
+.panel {
+  position: fixed;
+  background: var(--panel-bg);
+  backdrop-filter: blur(6px);
+  border-radius: 10px;
+  padding: 14px 16px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+#controls {
+  top: 16px;
+  left: 16px;
+  width: min(320px, calc(100vw - 32px));
+}
+
+h1 {
+  margin: 0 0 10px;
+  font-size: 1.25rem;
+  letter-spacing: 0.02em;
+}
+
+#layer-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+button {
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+button[aria-checked='true'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b1320;
+}
+
+#legend {
+  margin-top: 12px;
+}
+
+.legend-bar {
+  height: 10px;
+  border-radius: 5px;
+}
+
+.legend-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+#details {
+  top: 16px;
+  right: 16px;
+  width: min(280px, calc(100vw - 32px));
+  font-size: 0.9rem;
+}
+
+#details h2 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+#details dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+}
+
+#details dt {
+  color: var(--muted);
+}
+
+#details dd {
+  margin: 0;
+  text-align: right;
+}
+
+.hidden {
+  display: none;
+}
+
+.attribution {
+  position: fixed;
+  bottom: 8px;
+  right: 12px;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.attribution a {
+  color: var(--muted);
+}
+
+.tooltip {
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+@media (max-width: 640px) {
+  #details {
+    top: auto;
+    bottom: 32px;
+    right: 16px;
+  }
+}

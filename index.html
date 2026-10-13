@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Power Globe</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="globe"></div>
+
+    <header class="panel" id="controls">
+      <h1>Power Globe</h1>
+      <div id="layer-buttons" role="radiogroup" aria-label="Weather layer"></div>
+      <div id="legend" aria-live="polite"></div>
+      <div class="status-row">
+        <span id="status">Loading weather…</span>
+        <button id="refresh" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <aside class="panel hidden" id="details" aria-live="polite"></aside>
+
+    <footer class="attribution">
+      Weather data by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a>
+      (CC BY 4.0) · Imagery via <a href="https://github.com/vasturiano/three-globe" target="_blank" rel="noopener">three-globe</a>
+    </footer>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
