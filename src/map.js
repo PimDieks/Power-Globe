@@ -53,8 +53,10 @@ function matchTileDetailToScreen(globe) {
   });
   if (!engine) return false;
   const pixels = window.innerHeight * window.devicePixelRatio;
-  // Levels finer than the default that the screen can show, e.g. about 2 on a phone.
-  const shift = Math.log2(Math.min(48, Math.max(8, 0.02 * pixels)) / 8);
+  // Levels finer than the default that the screen can show: on a phone about 1.8, which comes
+  // out a little under one texel per pixel at mid latitudes. Going all the way to one texel
+  // per pixel looks barely sharper but downloads about twice as many tiles.
+  const shift = Math.log2(Math.min(40, Math.max(8, 0.013 * pixels)) / 8);
   // Keep the default for distant views, where it already looks sharp and finer levels would
   // mean hundreds of extra tiles, and blend to the full shift from level 5 to 8.
   engine.thresholds = engine.thresholds.map(

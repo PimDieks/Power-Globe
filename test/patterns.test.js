@@ -146,3 +146,27 @@ describe('hazards', () => {
     expect(hazardRings(points, [0, 99], [0, 0])).toEqual([{ lat: 3, lng: 4, kind: 'storm' }]);
   });
 });
+
+describe('screen-space wind', async () => {
+  const { facesCamera, project, toCartesian } = await import('../src/screenflow.js');
+
+  it('places points like three-globe does', () => {
+    const [x, y, z] = toCartesian(0, 0, 100);
+    expect([x, y, z].map((v) => Math.round(v))).toEqual([0, 0, 100]);
+    expect(Math.round(toCartesian(90, 0, 100)[1])).toBe(100);
+  });
+
+  it('projects through a view-projection matrix to pixels', () => {
+    // Identity projection: clip space equals world space.
+    const e = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    expect(project(e, 0, 0, 0, 200, 100)).toEqual([100, 50]);
+    expect(project(e, 1, 1, 0, 200, 100)).toEqual([200, 0]);
+    expect(project([...e.slice(0, 15), -1], 0, 0, 0, 200, 100)).toBeNull();
+  });
+
+  it('hides points over the horizon', () => {
+    const camera = [0, 0, 300];
+    expect(facesCamera(...toCartesian(0, 0, 100), ...camera, 100 * 100)).toBe(true);
+    expect(facesCamera(...toCartesian(0, 180, 100), ...camera, 100 * 100)).toBe(false);
+  });
+});

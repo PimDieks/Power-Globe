@@ -35,8 +35,9 @@ Every push to `main` builds the site and deploys it to GitHub Pages via
 | File | Purpose |
 | --- | --- |
 | `src/main.js` | Sets up the [globe.gl](https://github.com/vasturiano/globe.gl) scene, controls, idle fade, timeline playback loop and the details panel. |
-| `src/weather.js` | Builds a 12° sample grid (390 locations, within the free API's per-minute limit) and fetches the 5-day forecast in 3-hour steps, 3 requests at a time with a timeout. Cached in `localStorage` for an hour. |
+| `src/weather.js` | Builds a 12° sample grid (390 locations, within the free API's per-minute limit) and fetches the 5-day forecast in 3-hour steps. All requests share one queue (the free API allows only a few at once), retry when the API is busy, time out, and are counted against the free limits. Cached in `localStorage` for an hour. |
 | `src/field.js` | The colour field: bicubic interpolation of the grid painted onto a translucent sphere just above the Earth. |
+| `src/screenflow.js` | Zoomed-in wind particles, drawn straight onto a screen-sized canvas so they stay crisp at any zoom. |
 | `src/flow.js` | The wind particles: advected through the interpolated wind field and drawn with fading trails onto a glowing sphere. |
 | `src/detail.js` | Works out the area in view when zoomed in and the finer grid to fetch for it (at most 150 locations per request, snapped so nearby views share data, and held back when the free API allowance runs low). |
 | `src/map.js` | Satellite tiles over a whole-Earth backdrop, lighting that brightens as you zoom in, and on-demand country borders and city labels. |

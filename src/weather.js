@@ -3,8 +3,6 @@ import { VARIABLES } from './layers.js';
 const API_URL = 'https://api.open-meteo.com/v1/forecast';
 // Open-Meteo accepts many coordinates per request; keep URLs and responses a sensible size.
 const CHUNK_SIZE = 100;
-// Requests in flight at once.
-const CONCURRENCY = 3;
 // Give up on a request after this long rather than leaving the page loading forever.
 const TIMEOUT_MS = 30_000;
 const CACHE_KEY = 'power-globe:forecast:v2';
@@ -99,42 +97,50 @@ export class ApiError extends Error {
   }
 }
 
-async function fetchJson(url) {
-  let res;
-  try {
-    res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
-  } catch (err) {
-    throw new ApiError(err.name === 'TimeoutError' ? 'Open-Meteo did not respond in time' : 'Could not reach Open-Meteo');
-  }
-  if (!res.ok) {
-    if (res.status === 429) pausedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
+// Retries, with growing waits, when Open-Meteo is busy with another of our requests.
+const BUSY_RETRIES = 4;
+const BUSY_RETRY_MS = 1000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function fetchJsonNow(url) {
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    } catch (err) {
+      throw new ApiError(err.name === 'TimeoutError' ? 'Open-Meteo did not respond in time' : 'Could not reach Open-Meteo');
+    }
+    if (res.ok) return res.json();
     // Open-Meteo explains errors as { error: true, reason: "..." }.
     const reason = await res.json().then((body) => body.reason, () => null);
+    if (res.status === 429) {
+      // "Too many concurrent requests" clears as soon as the other request finishes; a usage
+      // limit ("... limit exceeded") does not, so stop asking for a while.
+      if (/concurrent/i.test(reason ?? '') && attempt < BUSY_RETRIES) {
+        await sleep(BUSY_RETRY_MS * 2 ** attempt);
+        continue;
+      }
+      if (!/concurrent/i.test(reason ?? '')) pausedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
+    }
     throw new ApiError(`Open-Meteo: ${reason ?? res.statusText ?? 'request failed'} (${res.status})`, res.status);
   }
-  return res.json();
 }
 
-// Run `fn` over `items` with at most `limit` calls in flight, keeping result order.
-async function mapLimit(items, limit, fn) {
-  const results = new Array(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      results[i] = await fn(items[i]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
+// Open-Meteo's free tier also limits how many requests may run at once, so every request
+// (the global forecast, zoomed-in detail and tapped spots) waits its turn in one queue.
+let queue = Promise.resolve();
+function fetchJson(url) {
+  const run = queue.then(() => fetchJsonNow(url));
+  queue = run.catch(() => {});
+  return run;
 }
 
 // Hourly forecasts for a list of points, in the same order. The API returns an array for
 // multiple coordinates and a single object for one. `onProgress(done, total)` reports chunks.
 export async function fetchHourly(points, { threeHourly = false, onProgress } = {}) {
   const parts = chunk(points, CHUNK_SIZE);
-  let done = 0;
-  const responses = await mapLimit(parts, CONCURRENCY, async (part) => {
+  const results = [];
+  for (const [i, part] of parts.entries()) {
     let data;
     spend(part.length);
     try {
@@ -144,10 +150,10 @@ export async function fetchHourly(points, { threeHourly = false, onProgress } = 
       if (!threeHourly || err.status !== 400) throw err;
       data = await fetchJson(buildUrl(part));
     }
-    onProgress?.(++done, parts.length);
-    return (Array.isArray(data) ? data : [data]).map((item) => item.hourly);
-  });
-  return responses.flat();
+    onProgress?.(i + 1, parts.length);
+    results.push(...(Array.isArray(data) ? data : [data]).map((item) => item.hourly));
+  }
+  return results;
 }
 
 const round1 = (v) => (v == null ? null : Math.round(v * 10) / 10);

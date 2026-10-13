@@ -14,6 +14,7 @@ import {
 } from './weather.js';
 import { FieldOverlay, covers, sampleGrid } from './field.js';
 import { WindFlow, windGrids } from './flow.js';
+import { ScreenFlow } from './screenflow.js';
 import { HAZARDS, hazardRings } from './patterns.js';
 import { DETAIL_ALTITUDE, needsNewRegion, regionFor, viewBounds } from './detail.js';
 import { setupBasemap, setupMapFeatures } from './map.js';
@@ -26,6 +27,8 @@ const LAYER_FADE = 0.9;
 const IDLE_MS = 4000;
 // Minimum gap between fetches of zoomed-in detail, to stay within the free API's limits.
 const REGION_FETCH_INTERVAL_MS = 4000;
+// Wait before retrying a failed forecast load.
+const RETRY_MS = 20_000;
 // API locations kept free for tapping on the map, so zoomed-in detail never uses them up.
 const POINT_RESERVE = 20;
 // How long zoomed-in detail waits before retrying when the API budget is low.
@@ -156,14 +159,8 @@ const detailField = new FieldOverlay(globe, {
   feather: 0.12,
   renderOrder: -2,
 });
-const detailFlow = new WindFlow(globe, {
-  bounds: initialRegion.bounds,
-  count: largeScreen ? 2200 : 1200,
-  width: 1024,
-  height: 1024,
-  lineWidth: 1.2,
-  altitude: 0.0018,
-});
+// Zoomed-in wind is drawn at screen resolution so it stays crisp at any zoom.
+const detailFlow = new ScreenFlow(globe, els.globe, { count: largeScreen ? 2200 : 1400 });
 detailField.visible = false;
 detailFlow.visible = false;
 
@@ -364,7 +361,9 @@ function seek(step) {
   state.dirty = true;
 }
 
+let retryTimer;
 async function refresh(force = false) {
+  clearTimeout(retryTimer);
   els.status.textContent = 'Loading forecast…';
   els.refresh.disabled = true;
   try {
@@ -385,7 +384,10 @@ async function refresh(force = false) {
     els.status.textContent = `${FORECAST_DAYS}-day forecast, every 3 hours`;
   } catch (err) {
     console.error(err);
-    els.status.textContent = `${err.message || 'Could not load weather data'}. Try Refresh.`;
+    // Most failures are temporary (a busy or rate-limited API), so try again by itself.
+    els.status.textContent = `${err.message || 'Could not load weather data'}. Retrying shortly…`;
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => refresh(), RETRY_MS);
   } finally {
     els.refresh.disabled = false;
   }

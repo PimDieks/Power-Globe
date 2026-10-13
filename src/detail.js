@@ -10,7 +10,7 @@ const NICE_STEPS = [0.25, 0.5, 1, 1.5, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20];
 // Area of the globe in view, with a margin, for camera `pov` and viewport `aspect` (w/h).
 // The camera's vertical field of view shows roughly 53° of latitude per globe radius of altitude.
 export function viewBounds({ lat, lng, altitude }, aspect = 1) {
-  const latSpan = Math.min(100, 70 * altitude + 1);
+  const latSpan = Math.min(100, 70 * altitude + 0.2);
   const south = Math.max(-85, lat - latSpan / 2);
   const north = Math.min(85, lat + latSpan / 2);
   const cos = Math.max(0.2, Math.cos(lat * DEG));
