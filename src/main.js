@@ -6,6 +6,7 @@ import {
   gridShape,
   apiBudget,
   isRegionCached,
+  precipitationRate,
   loadForecast,
   loadPointForecast,
   loadRegion,
@@ -561,7 +562,9 @@ function renderDetails() {
   if (!detail?.data || !state.forecast) return;
   const { data } = detail;
   const index = detailIndex(data);
-  const value = (variable) => data[variable]?.[index];
+  const value = (variable) =>
+    // Same definition as the map: the average rate over the 3 hours up to this time.
+    variable === 'precipitation' ? precipitationRate(data.precipitation ?? [], index) : data[variable]?.[index];
   const rows = LAYERS.map((l) => `<dt>${l.label}</dt><dd>${fmt(value(l.variable), l.unit)}</dd>`).join('');
   els.detailsBody.innerHTML = `
     <p>${formatTime(data.time[index])} · ${describeWeatherCode(value('weather_code'))}</p>
