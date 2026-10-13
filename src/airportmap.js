@@ -21,6 +21,9 @@ const MAX_AIRPORTS = 60;
 // Airports whose weather is looked up at a time, nearest to the middle of the view first.
 const MAX_WEATHER = 25;
 const SETTLE_MS = 350;
+// After the weather could not be had for the airports in view, no new lookup for this long, so
+// that every view change does not send the same failing request again.
+export const WEATHER_RETRY_MS = 30_000;
 
 const DEG = Math.PI / 180;
 const wrapLng = (d) => ((((d + 180) % 360) + 360) % 360) - 180;
@@ -85,6 +88,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
   let timer = null;
   let request = 0;
   let active = false;
+  let retryAt = 0;
 
   function aspect() {
     return window.innerWidth / window.innerHeight;
@@ -120,7 +124,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     // Weather for the nearest airports with runways shown and not looked up yet: the site's
     // own data where it has them, else Open-Meteo.
     const missing = shown.filter((a) => !weather.has(a.ident)).slice(0, MAX_WEATHER);
-    if (!missing.length) return;
+    if (!missing.length || Date.now() < retryAt) return;
     const id = ++request;
     try {
       await airportWeather(missing, {
@@ -130,6 +134,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
         },
       });
     } catch (err) {
+      retryAt = Date.now() + WEATHER_RETRY_MS;
       console.error('Could not load weather for runways', err);
     }
   }

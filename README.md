@@ -17,7 +17,7 @@ An open-source, interactive 3D globe that visualizes temperature and other weath
 - **Wind as living brushstrokes:** thousands of glowing particles drift along the forecast wind, leaving fading trails, in the spirit of [earth.nullschool.net](https://earth.nullschool.net).
 - **Smooth colour fields:** temperature, wind speed, precipitation, cloud cover and humidity are painted as soft, bicubic-interpolated colour maps in muted palettes. Clear skies and dry areas fade to transparent so the Earth shows through.
 - **An animated 5-day forecast:** it plays on its own in 3-hour steps, blending smoothly between them. Pause, scrub or jump back to **Now** at any time.
-- **A map when you zoom in:** satellite imagery sharpens as you zoom, down to city level ([Esri World Imagery](https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9) tiles, with the detail level matched to your screen), country borders and city names fade in, and the area in view loads its own finer weather grid (down to 0.25° spacing), so wind and colour fields show local detail instead of a magnified blur.
+- **A map when you zoom in:** satellite imagery sharpens as you zoom, down to city level ([Esri World Imagery](https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9) tiles, with the detail level matched to your screen), country borders and city names fade in, and, while a weather layer or wind flow is on, the area in view loads its own finer weather grid (down to 0.25° spacing), so wind and colour fields show local detail instead of a magnified blur.
 - **Made to be watched:** the camera turns slowly, and the controls fade away after a few seconds without interaction, leaving just the globe and a small caption.
 - **Severe weather:** soft pulses mark thunderstorms, heavy rain and heavy snow.
 - **Details on click:** the forecast for any spot at the selected time, with a 5-day temperature chart.
@@ -51,7 +51,7 @@ Visitors should not depend on public services that limit or refuse requests, so 
 | `data/satellites/<group>.tle` | Satellite orbital elements | CelesTrak |
 | `data/api/index.json` | What is there and when it was built | |
 
-The globe and the wind check use these while they are less than six and a half hours old (one shared download instead of every visitor spending the free API allowance; the wind check fills in all major airports at once), ask Open-Meteo directly otherwise, and fall back to the copy if Open-Meteo fails. The airport panel asks Open-Meteo first for the freshest forecast, and when Open-Meteo refuses it asks the Power Globe API, then the site's copy; if none of them answers, the panel says why. Build them yourself with `npm run data` (about 1,550 Open-Meteo locations, paced to its limits).
+The globe and the wind check use these while they are less than six and a half hours old (one shared download instead of every visitor spending the free API allowance; the wind check fills in all major airports at once), ask Open-Meteo directly otherwise, and fall back to the copy if Open-Meteo fails. The airport panel asks Open-Meteo first for the freshest forecast, and when Open-Meteo refuses or this browser's allowance is short it asks the Power Globe API, then the site's copy; if none of them answers, the panel says why. Build them yourself with `npm run data` (about 1,550 Open-Meteo locations, paced to its limits).
 
 ## Power Globe API (live data proxy)
 
@@ -62,7 +62,7 @@ Live flights, METARs and (if needed) satellites come from services that do not a
 - **One shared answer instead of many:** the site's own data (above) and the API's edge cache mean visitors share downloads; the global forecast is the same for everyone.
 - **Backups instead of retries:** the API keeps every answer for 6 hours and serves that copy if a service fails or limits it, rather than asking again.
 - **Per-visitor limits:** the API answers each visitor at most 120 requests a minute.
-- **Browser budgets:** each browser keeps to half of Open-Meteo's free daily allowance (5,000 locations, remembered across page loads) and to its per-minute and per-hour limits, and after a limit is reported stops asking until it resets (the next day for the daily limit), using the site's copy or the API instead. Zoomed-in detail is skipped rather than sent through the API.
+- **Browser budgets:** each browser keeps to half of Open-Meteo's free daily allowance (5,000 locations, remembered across page loads) and to its per-minute and per-hour limits, and after a limit is reported stops asking until it resets (the next day for the daily limit), using the site's copy or the API instead. Lists (the wind check, the airport labels) wait for the per-minute and per-hour allowance and keep 20 locations free; the airport being looked at uses those and goes straight to the API instead of waiting. When Open-Meteo cannot be asked at all (paused, or the day's share spent), a list takes the site's copy first and asks the API only for the airports it lacks. Zoomed-in detail is skipped rather than sent through the API, and is not loaded at all unless a weather layer or wind flow is on.
 - **Paced feeds:** flights are asked for at most every 15 seconds (area), 60 seconds (military) and 5 minutes (worldwide), METARs at most every 5 minutes per airport, satellites every 2 hours.
 
 To set it up once:
