@@ -1,8 +1,10 @@
 import * as THREE from 'three';
 import { CITIES, labelTier } from './cities.js';
 
-// Black Marble is used up to this tile level (about 600 m per pixel).
-const NIGHT_LIGHTS_MAX_LEVEL = 7;
+// Daily cloud imagery is used up to this tile level (about 300 m per pixel).
+const CLOUDS_MAX_LEVEL = 9;
+// The last whole day (UTC) of satellite passes, as YYYY-MM-DD.
+export const cloudsDay = (now = Date.now()) => new Date(now - 86_400_000).toISOString().slice(0, 10);
 
 const esri = (service) => (x, y, level) =>
   `https://server.arcgisonline.com/ArcGIS/rest/services/${service}/MapServer/tile/${level}/${y}/${x}`;
@@ -31,20 +33,20 @@ export const BASEMAPS = {
     light: 1.1,
     credit: 'Map <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, HERE, Garmin, FAO, NOAA, USGS, OpenStreetMap contributors and the GIS User Community',
   },
-  // City lights seen from space at night (NASA Black Marble, public domain, via NASA GIBS). Its
-  // pixels are about 500 m across, so closer in, where it would only blur, the view continues
-  // as Esri's dark grey map (sharp down to street level, no key needed).
-  night: {
-    label: 'Night lights',
+  // Yesterday's clouds as seen from space: one day of NASA's VIIRS true colour imagery (NOAA-20,
+  // public domain, via NASA GIBS), the most recent complete day. Its pixels are about 300 m
+  // across, so closer in the view continues as the satellite imagery.
+  clouds: {
+    label: 'Clouds',
     url: (x, y, level) =>
-      level <= NIGHT_LIGHTS_MAX_LEVEL
-        ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/${level}/${y}/${x}.png`
-        : esri('Canvas/World_Dark_Gray_Base')(x, y, level),
-    maxLevel: 16,
-    light: 1.6,
-    dark: true,
-    credit:
-      'Night lights <a href="https://earthobservatory.nasa.gov/features/NightLights" target="_blank" rel="noopener">NASA Black Marble</a> via GIBS; close up <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, HERE, Garmin, OpenStreetMap contributors and the GIS User Community',
+      level <= CLOUDS_MAX_LEVEL
+        ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_NOAA20_CorrectedReflectance_TrueColor/default/${cloudsDay()}/GoogleMapsCompatible_Level9/${level}/${y}/${x}.jpg`
+        : esri('World_Imagery')(x, y, level),
+    maxLevel: 17,
+    light: 1,
+    get credit() {
+      return `Clouds on ${cloudsDay()} (UTC): <a href="https://www.earthdata.nasa.gov/data/instruments/viirs" target="_blank" rel="noopener">NASA VIIRS</a> via GIBS; close up imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics and the GIS User Community`;
+    },
   },
 };
 // Below this altitude the view reads as a map: brighter imagery, borders and city names.
@@ -65,11 +67,9 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
   const texture = new THREE.TextureLoader().load(backdropUrl);
   texture.colorSpace = THREE.SRGBColorSpace;
   const dayMaterial = new THREE.MeshLambertMaterial({ map: texture });
-  // Behind the night lights, where tiles are missing, the Earth is simply dark.
-  const nightMaterial = new THREE.MeshBasicMaterial({ color: 0x04060c });
   const backdrop = new THREE.Mesh(
     new THREE.SphereGeometry(globe.getGlobeRadius() * 0.995, 96, 64),
-    style.dark ? nightMaterial : dayMaterial,
+    dayMaterial,
   );
   // three-globe rotates its globe mesh this way so equirectangular textures line up.
   backdrop.rotation.y = -Math.PI / 2;
@@ -98,7 +98,6 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     // Drop the old map's tiles; the new URL then loads tiles for the current view.
     globe.globeTileEngineClearCache();
     globe.globeTileEngineMaxLevel(style.maxLevel).globeTileEngineUrl(style.url);
-    backdrop.material = style.dark ? nightMaterial : dayMaterial;
     setAltitude(altitude);
     onCredit?.(style.credit);
   }
