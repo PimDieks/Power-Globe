@@ -85,8 +85,27 @@ function markerElement(name) {
   return el;
 }
 
-// Country borders and city names that appear as the view zooms in, and a pin for the selected
-// place. Returns `update(altitude)` to call as the camera moves and `setMarker(place)`.
+// A marker for an airport where wind puts the runways near or over the limits. The list in the
+// wind check panel is the accessible way to the same airports, so markers are hidden from
+// screen readers and keyboard focus.
+function airportElement(airport, status, onClick) {
+  const el = document.createElement('div');
+  el.className = `airport-marker status-${status}`;
+  el.setAttribute('aria-hidden', 'true');
+  el.title = airport.name;
+  const label = document.createElement('span');
+  label.textContent = airport.iata || airport.ident;
+  el.append(label);
+  el.addEventListener('click', (event) => {
+    event.stopPropagation();
+    onClick(airport);
+  });
+  return el;
+}
+
+// Country borders and city names that appear as the view zooms in, airports with wind trouble
+// and a pin for the selected place. Returns `update(altitude)` to call as the camera moves,
+// `setMarker(place)` and `setAirports(problems, onClick)`.
 export function setupMapFeatures(globe) {
   const elements = new Map(CITIES.map((city) => [city, labelElement(city)]));
   globe
@@ -106,12 +125,17 @@ export function setupMapFeatures(globe) {
 
   let tier = -1;
   let marker = null;
+  let airports = [];
+  // Airport markers by airport and status, reused while the status stays the same (the globe
+  // keeps an object on screen as long as the same datum is passed in).
+  let airportMarkers = new Map();
   let borders = null;
   let bordersShown = false;
 
   function refreshLabels() {
     const cities = CITIES.filter((city) => city.tier <= tier && !(marker && city.name === marker.name));
-    globe.htmlElementsData(marker ? [...cities, marker] : cities);
+    const shown = marker ? airports.filter((a) => a.lat !== marker.lat || a.lng !== marker.lng) : airports;
+    globe.htmlElementsData([...cities, ...shown, ...(marker ? [marker] : [])]);
   }
 
   async function loadBorders() {
@@ -128,7 +152,23 @@ export function setupMapFeatures(globe) {
     refreshLabels();
   }
 
+  // `problems`: [{ airport, status }], or [] to remove the markers.
+  function setAirports(problems, onClick) {
+    if (!problems.length && !airports.length) return;
+    const next = new Map();
+    airports = problems.map(({ airport, status }) => {
+      const key = `${airport.ident}:${status}`;
+      const datum = airportMarkers.get(key) ?? { lat: airport.lat, lng: airport.lng, el: airportElement(airport, status, onClick) };
+      next.set(key, datum);
+      return datum;
+    });
+    airportMarkers = next;
+    refreshLabels();
+  }
+
   function update(altitude) {
+    // Airport codes would pile up on top of each other on the whole globe; dots are enough there.
+    document.body.classList.toggle('globe-far', altitude >= MAP_ALTITUDE);
     const nextTier = labelTier(altitude);
     if (nextTier !== tier) {
       tier = nextTier;
@@ -151,5 +191,5 @@ export function setupMapFeatures(globe) {
     });
   }
 
-  return { update, setMarker };
+  return { update, setMarker, setAirports };
 }

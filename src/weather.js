@@ -135,9 +135,6 @@ function fetchJson(url) {
   return run;
 }
 
-// Any other Open-Meteo request (e.g. place search), in the same queue as the forecast.
-export const queuedJson = (url) => fetchJson(url);
-
 // Hourly forecasts for a list of points, in the same order. The API returns an array for
 // multiple coordinates and a single object for one. `onProgress(done, total)` reports chunks.
 export async function fetchHourly(points, { threeHourly = false, onProgress } = {}) {
@@ -157,6 +154,53 @@ export async function fetchHourly(points, { threeHourly = false, onProgress } = 
     results.push(...(Array.isArray(data) ? data : [data]).map((item) => item.hourly));
   }
   return results;
+}
+
+// Ground conditions at airports, as aviation weather reports them: wind in knots at 10 m (the
+// height of airport anemometers), temperature and dew point at 2 m, every hour.
+export const AIRPORT_VARIABLES = [
+  'temperature_2m',
+  'dew_point_2m',
+  'wind_speed_10m',
+  'wind_direction_10m',
+  'wind_gusts_10m',
+];
+const FEET = 0.3048;
+
+// The airport's own elevation lets Open-Meteo correct the temperature for its height.
+export function buildAirportUrl(airports) {
+  const params = new URLSearchParams({
+    latitude: airports.map((a) => a.lat).join(','),
+    longitude: airports.map((a) => a.lng).join(','),
+    elevation: airports.map((a) => Math.round(a.elevationFt * FEET)).join(','),
+    hourly: AIRPORT_VARIABLES.join(','),
+    wind_speed_unit: 'kn',
+    forecast_days: String(FORECAST_DAYS),
+    timezone: 'GMT',
+  });
+  return `${API_URL}?${params}`;
+}
+
+// Locations kept free for tapping on the map while a long airport list loads.
+export const AIRPORT_RESERVE = 20;
+const BUDGET_POLL_MS = 2000;
+
+// Hourly airport conditions, 100 airports per request. Long lists are paced to the free API's
+// limits rather than running into them: each request waits until the allowance has room for it
+// (`onWait(true)` while waiting). `onBatch(airports, hourly)` hands over each part as it arrives.
+export async function fetchAirportHourly(airports, { onProgress, onBatch, onWait } = {}) {
+  const parts = chunk(airports, CHUNK_SIZE);
+  for (const [i, part] of parts.entries()) {
+    if (apiBudget() < part.length + AIRPORT_RESERVE) {
+      onWait?.(true);
+      while (apiBudget() < part.length + AIRPORT_RESERVE) await sleep(BUDGET_POLL_MS);
+      onWait?.(false);
+    }
+    spend(part.length);
+    const data = await fetchJson(buildAirportUrl(part));
+    onBatch?.(part, (Array.isArray(data) ? data : [data]).map((item) => item.hourly));
+    onProgress?.(i + 1, parts.length);
+  }
 }
 
 const round1 = (v) => (v == null ? null : Math.round(v * 10) / 10);

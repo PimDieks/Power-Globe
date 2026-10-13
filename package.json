@@ -1,7 +1,7 @@
 {
   "name": "power-globe",
   "version": "0.1.0",
-  "description": "Open-source interactive globe visualizing temperature and other weather conditions.",
+  "description": "Open-source interactive globe visualizing the weather, with a runway wind check for airports.",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -9,7 +9,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "airports": "node scripts/build-airports.mjs"
   },
   "dependencies": {
     "globe.gl": "^2.46.2",

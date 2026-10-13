@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Power Globe</title>
-    <meta name="description" content="An open-source globe showing the weather forecast: temperature, wind, rain, clouds and humidity." />
+    <meta name="description" content="An open-source globe showing the weather forecast, with a runway wind check for airports: crosswind, headwind and gusts." />
     <link rel="stylesheet" href="/src/style.css" />
     <!-- Open connections early: weather loads at once, imagery as soon as you zoom. -->
     <link rel="preconnect" href="https://api.open-meteo.com" crossorigin />
@@ -13,25 +13,27 @@
   <body>
     <main id="globe" aria-label="Weather globe" aria-describedby="globe-help"></main>
 
-    <aside aria-label="Search, layers and display">
+    <aside aria-label="Airport search, layers and display">
       <p id="globe-help" class="visually-hidden">
         An interactive globe showing the weather forecast. Drag to turn it, pinch or scroll to zoom, and tap a spot to
-        see its forecast. Search for a place, choose what is shown with the controls, and pick a time on the timeline.
+        see its forecast. Search for an airport to see its ground conditions and the wind on each runway, or open the
+        wind check for a list of airports where wind and gusts are near or over the limits. Pick a time on the timeline.
       </p>
       <div class="panel" id="controls">
         <div class="panel-head">
           <h1>Power Globe</h1>
+          <button id="windcheck-open" type="button" aria-expanded="false" aria-controls="windcheck">Wind check</button>
           <button id="controls-toggle" class="icon-button" type="button" aria-expanded="true" aria-controls="controls-body">
             <span class="chevron" aria-hidden="true"></span><span class="visually-hidden">Layers and display options</span>
           </button>
         </div>
 
         <div class="search" role="search">
-          <label for="search-input" class="visually-hidden">Search for a city or place</label>
+          <label for="search-input" class="visually-hidden">Search for an airport by name, city or ICAO or IATA code</label>
           <input
             id="search-input"
             type="search"
-            placeholder="Search a city or place"
+            placeholder="Search an airport, e.g. EHAM or JFK"
             autocomplete="off"
             spellcheck="false"
             enterkeyhint="search"
@@ -40,7 +42,7 @@
             aria-expanded="false"
             aria-controls="search-results"
           />
-          <ul id="search-results" role="listbox" aria-label="Places" hidden></ul>
+          <ul id="search-results" role="listbox" aria-label="Airports" hidden></ul>
           <p id="search-status" class="search-status" aria-live="polite"></p>
         </div>
 
@@ -62,7 +64,10 @@
       </div>
     </aside>
 
-    <aside class="panel hidden" id="details" aria-labelledby="details-title">
+    <aside class="panel side-panel hidden" id="details" aria-labelledby="details-title">
+      <button id="details-back" class="back-button" type="button" hidden>
+        <span aria-hidden="true">‹</span> Wind check
+      </button>
       <div class="details-head">
         <h2 id="details-title"></h2>
         <button id="details-close" class="icon-button" type="button">
@@ -70,6 +75,41 @@
         </button>
       </div>
       <div id="details-body"></div>
+    </aside>
+
+    <aside class="panel side-panel keep-awake hidden" id="windcheck" aria-labelledby="windcheck-title">
+      <div class="details-head">
+        <h2 id="windcheck-title" tabindex="-1">Wind check</h2>
+        <button id="windcheck-close" class="icon-button" type="button">
+          <span aria-hidden="true">✕</span><span class="visually-hidden">Close wind check</span>
+        </button>
+      </div>
+      <p>
+        Major airports where wind and gusts put every runway near or over your limits, nearest first. Model forecast:
+        always check the METAR and TAF.
+      </p>
+      <details class="limits-box">
+        <summary><span id="limits-summary">Limits</span></summary>
+        <fieldset class="limits">
+          <legend>Limits in knots, gusts included</legend>
+          <label class="limit-preset">
+            <span>Aircraft</span>
+            <select id="limits-preset"></select>
+          </label>
+          <div class="limit-inputs">
+            <label><span>Crosswind</span><input id="limit-crosswind" type="number" min="0" max="99" step="1" inputmode="numeric" /></label>
+            <label><span>Tailwind</span><input id="limit-tailwind" type="number" min="0" max="99" step="1" inputmode="numeric" /></label>
+            <label><span>Headwind</span><input id="limit-headwind" type="number" min="0" max="99" step="1" inputmode="numeric" /></label>
+          </div>
+        </fieldset>
+        <label class="toggle"><input type="checkbox" id="windcheck-marginal" checked /> Show marginal (over 80% of a limit)</label>
+      </details>
+      <div class="status-row">
+        <span id="windcheck-status" role="status"></span>
+        <button id="windcheck-retry" type="button" hidden>Retry</button>
+      </div>
+      <h3 id="windcheck-summary"></h3>
+      <ul id="windcheck-list" class="problems" aria-labelledby="windcheck-summary"></ul>
     </aside>
 
     <section class="panel" id="timeline" aria-label="Forecast timeline">
@@ -89,7 +129,8 @@
       Weather by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> (CC BY 4.0) ·
       Imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics
       and the GIS User Community; NASA Blue Marble ·
-      Borders <a href="https://www.naturalearthdata.com/" target="_blank" rel="noopener">Natural Earth</a>
+      Borders <a href="https://www.naturalearthdata.com/" target="_blank" rel="noopener">Natural Earth</a> ·
+      Airports <a href="https://ourairports.com/" target="_blank" rel="noopener">OurAirports</a>
     </footer>
 
     <script type="module" src="/src/main.js"></script>
