@@ -1,17 +1,26 @@
 import Globe from 'globe.gl';
+import { Color } from 'three';
 import { LAYERS, getLayer, colorFor, normalize, describeWeatherCode } from './layers.js';
-import { FORECAST_DAYS, gridShape, loadForecast, loadPointForecast, parseTime, startIndex } from './weather.js';
+import { FORECAST_DAYS, GRID_STEP, gridShape, loadForecast, loadPointForecast, parseTime, startIndex } from './weather.js';
 import { FieldOverlay } from './field.js';
-import { HAZARDS, hazardRings, windStreaks } from './patterns.js';
+import { WindFlow, windGrids } from './flow.js';
+import { HAZARDS, hazardRings } from './patterns.js';
 
-const GRID_STEP = 10;
 // Timeline playback speed, in forecast steps (3 hours each) per second.
-const STEPS_PER_SECOND = 2;
+const STEPS_PER_SECOND = 1;
+// Seconds for the colour field to fade in after switching layers.
+const LAYER_FADE = 0.9;
+// Controls fade away after this long without interaction, leaving just the globe.
+const IDLE_MS = 4000;
 const IMAGE_BASE = `${import.meta.env.BASE_URL}img`;
 const MODES = [
   { key: 'field', label: 'Smooth field' },
   { key: 'bars', label: 'Bars' },
 ];
+
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const largeScreen = window.innerWidth * window.devicePixelRatio >= 1400;
+const narrowScreen = window.innerWidth < 640;
 
 const els = {
   globe: document.getElementById('globe'),
@@ -28,20 +37,29 @@ const els = {
   slider: document.getElementById('time-slider'),
   timeLabel: document.getElementById('time-label'),
   now: document.getElementById('now'),
+  caption: document.getElementById('caption'),
+  controls: document.getElementById('controls'),
 };
 
 const state = {
   layer: getLayer('temperature'),
   mode: 'field',
   forecast: null,
-  // Fractional index into forecast.times; the field blends between neighbouring steps.
+  winds: null,
+  // Fractional index into forecast.times; the field and wind blend between neighbouring steps.
   t: 0,
   playing: false,
-  // Step whose discrete layers (bars, wind, rings) are currently drawn.
+  // Step whose discrete layers (bars, rings) are currently drawn.
   drawnStep: -1,
   dirty: true,
+  // 0..1 progress of the colour field fading in after a layer change.
+  fieldFade: 0,
   detail: null,
 };
+
+if (reducedMotion) els.wind.checked = false;
+// On phones the controls start folded so the globe gets the screen.
+if (narrowScreen) els.controls.open = false;
 
 const fmt = (value, unit) => (value == null ? '–' : `${Math.round(value * 10) / 10} ${unit}`);
 
@@ -55,17 +73,19 @@ const formatTime = (time) =>
     timeZoneName: 'short',
   });
 
-const globe = new Globe(els.globe)
+const globe = new Globe(els.globe, { animateIn: !reducedMotion })
   .globeImageUrl(`${IMAGE_BASE}/earth-blue-marble.jpg`)
   .bumpImageUrl(`${IMAGE_BASE}/earth-topology.png`)
-  .backgroundImageUrl(`${IMAGE_BASE}/night-sky.png`)
+  .backgroundColor('rgba(0, 0, 0, 0)')
+  .atmosphereColor('#8ec5ff')
+  .atmosphereAltitude(0.22)
   // Bars
   .pointLat('lat')
   .pointLng('lng')
   .pointRadius(GRID_STEP * 0.18)
   .pointColor((d) => colorFor(state.layer.stops, d.value))
   .pointAltitude((d) => 0.005 + normalize(state.layer.stops, d.value) * 0.2)
-  .pointsTransitionDuration(400)
+  .pointsTransitionDuration(600)
   .pointLabel(
     (d) => `<div class="tooltip">
       <b>${d.lat}°, ${d.lng}°</b><br/>
@@ -74,29 +94,31 @@ const globe = new Globe(els.globe)
     </div>`,
   )
   .onPointClick((d) => showDetails(d.lat, d.lng))
-  // Wind flow
-  .pathPoints('points')
-  .pathPointLat('lat')
-  .pathPointLng('lng')
-  .pathPointAlt(0.006)
-  .pathResolution(1)
-  .pathStroke(0.6)
-  .pathColor((d) => ['rgba(255, 255, 255, 0)', `rgba(255, 255, 255, ${Math.min(0.95, 0.35 + d.speed / 60)})`])
-  .pathDashLength(0.35)
-  .pathDashGap(0.25)
-  .pathDashAnimateTime(1400)
-  .pathTransitionDuration(0)
-  // Severe weather
-  .ringColor((d) => (t) => `rgba(${HAZARDS[d.kind].rgb}, ${1 - t})`)
-  .ringMaxRadius(5)
-  .ringPropagationSpeed(3)
-  .ringRepeatPeriod(1100)
+  // Severe weather: slow, soft pulses
+  .ringColor((d) => (t) => `rgba(${HAZARDS[d.kind].rgb}, ${0.7 * (1 - t) ** 2})`)
+  .ringMaxRadius(4)
+  .ringPropagationSpeed(1.4)
+  .ringRepeatPeriod(2400)
+  // Above the colour field and wind layers.
+  .ringAltitude(0.006)
   .onGlobeClick(({ lat, lng }) => showDetails(lat, lng));
 
-globe.controls().autoRotate = true;
-globe.controls().autoRotateSpeed = 0.35;
+// Dim the daytime imagery so the weather glows on top of it.
+globe.globeMaterial().color = new Color('#6f7a90');
+globe.globeMaterial().shininess = 4;
+globe.pointOfView({ lat: 22, lng: -25, altitude: narrowScreen ? 3.6 : 2.4 });
+const controls = globe.controls();
+controls.autoRotate = !reducedMotion;
+controls.autoRotateSpeed = 0.22;
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
 
-const field = new FieldOverlay(globe, gridShape(GRID_STEP));
+const shape = gridShape(GRID_STEP);
+const field = new FieldOverlay(globe, shape);
+const flow = new WindFlow(globe, shape, {
+  count: largeScreen ? 4500 : 2200,
+  width: largeScreen ? 2048 : 1024,
+});
 
 window.addEventListener('resize', () => globe.width(window.innerWidth).height(window.innerHeight));
 
@@ -116,11 +138,14 @@ function radioButtons(container, items, activeKey, onSelect) {
 
 function renderControls() {
   radioButtons(els.layerButtons, LAYERS, state.layer.key, (key) => {
+    if (key === state.layer.key) return;
     state.layer = getLayer(key);
+    state.fieldFade = 0;
     invalidate();
   });
   radioButtons(els.modeButtons, MODES, state.mode, (key) => {
     state.mode = key;
+    state.fieldFade = 0;
     invalidate();
   });
 
@@ -133,19 +158,26 @@ function renderControls() {
     <div class="legend-labels"><span>${min} ${unit}</span><span>${max} ${unit}</span></div>`;
 
   const items = [];
-  if (els.wind.checked) items.push('<span class="swatch streak"></span>Wind, pointing downwind');
+  if (els.wind.checked) items.push('<span class="swatch streak"></span>Wind particles drift downwind');
   if (els.hazards.checked) {
     for (const { label, rgb } of Object.values(HAZARDS)) {
       items.push(`<span class="swatch ring" style="border-color: rgb(${rgb})"></span>${label}`);
     }
   }
   els.patternLegend.innerHTML = items.map((i) => `<div>${i}</div>`).join('');
+  renderCaption();
+}
+
+function renderCaption() {
+  const time = state.forecast?.times[Math.round(state.t)];
+  els.caption.textContent = time ? `${state.layer.label} · ${formatTime(time)}` : state.layer.label;
 }
 
 // Re-draw everything on the next frame, e.g. after a layer or display change.
 function invalidate() {
   state.drawnStep = -1;
   state.dirty = true;
+  flow.visible = els.wind.checked;
   renderControls();
 }
 
@@ -159,27 +191,32 @@ function drawStep(step) {
       ? points.map((p, i) => ({ ...p, value: layerValues[i], code: values.weather_code[step][i] }))
       : [],
   );
-  globe.pathsData(
-    els.wind.checked ? windStreaks(points, values.wind_speed_10m[step], values.wind_direction_10m[step]) : [],
-  );
   globe.ringsData(
     els.hazards.checked ? hazardRings(points, values.weather_code[step], values.precipitation[step]) : [],
   );
 
   els.slider.value = String(step);
   els.timeLabel.textContent = formatTime(times[step]);
+  renderCaption();
   renderDetails();
   state.drawnStep = step;
+}
+
+function blendIndices() {
+  const last = state.forecast.times.length - 1;
+  const i0 = Math.min(Math.floor(state.t), last);
+  return [i0, Math.min(i0 + 1, last), state.t - i0];
 }
 
 function drawField() {
   field.visible = state.mode === 'field';
   if (state.mode !== 'field') return;
   const series = state.forecast.values[state.layer.variable];
-  const i0 = Math.floor(state.t);
-  const i1 = Math.min(i0 + 1, series.length - 1);
-  field.render(series[i0], series[i1], state.t - i0, state.layer.stops);
+  const [i0, i1, t] = blendIndices();
+  field.render(series[i0], series[i1], t, state.layer);
 }
+
+const ease = (x) => 1 - (1 - x) ** 3;
 
 let lastFrame = performance.now();
 function tick(now) {
@@ -197,6 +234,15 @@ function tick(now) {
       if (step !== state.drawnStep) drawStep(step);
       drawField();
       state.dirty = false;
+    }
+    if (state.fieldFade < 1) {
+      state.fieldFade = Math.min(1, state.fieldFade + dt / LAYER_FADE);
+    }
+    field.strength = ease(state.fieldFade);
+    if (flow.visible) {
+      const [i0, i1, t] = blendIndices();
+      flow.setWind(state.winds[i0], state.winds[i1], t);
+      flow.step(dt);
     }
   }
   requestAnimationFrame(tick);
@@ -217,23 +263,31 @@ async function refresh(force = false) {
   els.status.textContent = 'Loading forecast…';
   els.refresh.disabled = true;
   try {
-    state.forecast = await loadForecast({ step: GRID_STEP, force });
+    state.forecast = await loadForecast({
+      force,
+      onProgress: (done, total) => {
+        els.status.textContent = `Loading forecast… ${Math.round((done / total) * 100)}%`;
+      },
+    });
+    state.winds = windGrids(state.forecast.values.wind_speed_10m, state.forecast.values.wind_direction_10m);
     const { times } = state.forecast;
     els.slider.max = String(times.length - 1);
     for (const el of [els.play, els.slider, els.now]) el.disabled = false;
     state.drawnStep = -1;
+    state.fieldFade = 0;
     seek(startIndex(times));
+    if (!reducedMotion) setPlaying(true);
     els.status.textContent = `${FORECAST_DAYS}-day forecast, every 3 hours`;
   } catch (err) {
     console.error(err);
-    els.status.textContent = 'Could not load weather data.';
+    els.status.textContent = `${err.message || 'Could not load weather data'}. Try Refresh.`;
   } finally {
     els.refresh.disabled = false;
   }
 }
 
 async function showDetails(lat, lng) {
-  globe.controls().autoRotate = false;
+  controls.autoRotate = false;
   const detail = { lat, lng, data: null };
   state.detail = detail;
   els.details.classList.remove('hidden');
@@ -288,6 +342,20 @@ function renderDetails() {
     ${sparkline(data.temperature_2m, index)}`;
 }
 
+// Fade the controls out when nobody is interacting, so the globe can be watched like a painting.
+let idleTimer;
+function wake() {
+  document.body.classList.remove('idle');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    if (document.querySelector('.panel:focus-within')) wake();
+    else document.body.classList.add('idle');
+  }, IDLE_MS);
+}
+for (const type of ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart']) {
+  window.addEventListener(type, wake, { passive: true });
+}
+
 els.refresh.addEventListener('click', () => refresh(true));
 els.play.addEventListener('click', () => setPlaying(!state.playing));
 els.slider.addEventListener('input', () => {
@@ -301,6 +369,8 @@ els.now.addEventListener('click', () => {
 els.wind.addEventListener('change', invalidate);
 els.hazards.addEventListener('change', invalidate);
 
+flow.visible = els.wind.checked;
 renderControls();
+wake();
 refresh();
 requestAnimationFrame(tick);

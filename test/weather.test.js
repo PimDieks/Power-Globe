@@ -10,6 +10,11 @@ describe('buildGrid', () => {
     expect(grid.at(-1)).toEqual({ lat: 80, lng: 170 });
   });
 
+  it('stays under the free API limit of 600 locations at the default step', () => {
+    expect(gridShape()).toEqual({ step: 12, lat0: -72, rows: 13, cols: 30 });
+    expect(buildGrid()).toHaveLength(390);
+  });
+
   it('matches gridShape', () => {
     const { rows, cols } = gridShape(10);
     expect(rows * cols).toBe(buildGrid(10).length);
@@ -32,6 +37,12 @@ describe('buildUrl', () => {
     const hourly = url.searchParams.get('hourly').split(',');
     for (const layer of LAYERS) expect(hourly).toContain(layer.variable);
     expect(hourly).toEqual(expect.arrayContaining(['weather_code', 'wind_direction_10m']));
+    expect(url.searchParams.has('temporal_resolution')).toBe(false);
+  });
+
+  it('can ask for 3-hourly aggregation', () => {
+    const url = new URL(buildUrl([{ lat: 1, lng: 2 }], { threeHourly: true }));
+    expect(url.searchParams.get('temporal_resolution')).toBe('hourly_3');
   });
 });
 
@@ -58,9 +69,45 @@ describe('fetchHourly', () => {
     expect(result[100].temperature_2m[0]).toBeCloseTo(points[100].lat + 0.04);
   });
 
-  it('throws on a failed response', async () => {
-    vi.stubGlobal('fetch', async () => ({ ok: false, status: 429 }));
-    await expect(fetchHourly([{ lat: 0, lng: 0 }])).rejects.toThrow('429');
+  it('reports progress per chunk', async () => {
+    vi.stubGlobal('fetch', async () => ({ ok: true, json: async () => ({ hourly: fakeHourly(1) }) }));
+    const progress = [];
+    await fetchHourly(buildGrid(10).slice(0, 250), { onProgress: (done, total) => progress.push([done, total]) });
+    expect(progress).toEqual([
+      [1, 3],
+      [2, 3],
+      [3, 3],
+    ]);
+  });
+
+  it('surfaces the API reason on a failed response', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: false,
+      status: 429,
+      json: async () => ({ error: true, reason: 'Minutely API request limit exceeded' }),
+    }));
+    await expect(fetchHourly([{ lat: 0, lng: 0 }])).rejects.toThrow(
+      'Open-Meteo: Minutely API request limit exceeded (429)',
+    );
+  });
+
+  it('reports network failures instead of hanging', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw Object.assign(new Error('timed out'), { name: 'TimeoutError' });
+    });
+    await expect(fetchHourly([{ lat: 0, lng: 0 }])).rejects.toThrow('did not respond in time');
+  });
+
+  it('falls back to hourly data if 3-hourly aggregation is rejected', async () => {
+    const fetchMock = vi.fn(async (url) =>
+      url.includes('temporal_resolution')
+        ? { ok: false, status: 400, json: async () => ({ error: true, reason: 'unknown parameter' }) }
+        : { ok: true, json: async () => ({ hourly: fakeHourly(1) }) },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await fetchHourly([{ lat: 0, lng: 0 }], { threeHourly: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toHaveLength(1);
   });
 });
 
@@ -78,6 +125,14 @@ describe('toForecast', () => {
       [6, 106],
     ]);
     expect(forecast.points).toBe(points);
+  });
+
+  it('keeps every step of data the API already aggregated to 3 hours', () => {
+    const hourly = {
+      ...fakeHourly(3),
+      time: ['2026-10-13T00:00', '2026-10-13T03:00', '2026-10-13T06:00'],
+    };
+    expect(toForecast([{ lat: 0, lng: 0 }], [hourly], 3).values.temperature_2m).toEqual([[0], [1], [2]]);
   });
 
   it('keeps missing values as null', () => {
@@ -113,9 +168,14 @@ describe('colour scales', () => {
     expect(colorFor(stops, null)).toBe('#868e96');
   });
 
-  it('builds a lookup table spanning the range', () => {
-    const lut = buildLut(stops, 3);
-    expect([...lut]).toEqual([0, 0, 0, 128, 128, 128, 255, 255, 255]);
+  it('builds an RGBA lookup table spanning the range', () => {
+    const lut = buildLut({ stops }, 3);
+    expect([...lut]).toEqual([0, 0, 0, 255, 128, 128, 128, 255, 255, 255, 255, 255]);
+  });
+
+  it('fades the lookup table in across the fade range', () => {
+    const alpha = [...buildLut({ stops, fade: [0, 10] }, 3)].filter((_, i) => i % 4 === 3);
+    expect(alpha).toEqual([0, 128, 255]);
   });
 
   it('normalizes within range', () => {

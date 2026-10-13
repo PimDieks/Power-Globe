@@ -1,34 +1,8 @@
-// Weather-pattern overlays: wind flow streaks and pulsing rings for severe weather.
-
-const toRad = (d) => (d * Math.PI) / 180;
-const toDeg = (r) => (r * 180) / Math.PI;
-
-// Point reached by travelling `distance` degrees of arc from lat/lng along compass `bearing`.
-export function destination(lat, lng, bearing, distance) {
-  const φ1 = toRad(lat);
-  const λ1 = toRad(lng);
-  const θ = toRad(bearing);
-  const δ = toRad(distance);
-  const φ2 = Math.asin(Math.sin(φ1) * Math.cos(δ) + Math.cos(φ1) * Math.sin(δ) * Math.cos(θ));
-  const λ2 = λ1 + Math.atan2(Math.sin(θ) * Math.sin(δ) * Math.cos(φ1), Math.cos(δ) - Math.sin(φ1) * Math.sin(φ2));
-  return { lat: toDeg(φ2), lng: ((toDeg(λ2) + 540) % 360) - 180 };
-}
-
-// Short streaks pointing downwind, longer for stronger wind. Open-Meteo's wind direction is
-// where the wind comes from, so streaks head the opposite way.
-export function windStreaks(points, speed, direction, { minSpeed = 3 } = {}) {
-  return points.flatMap((p, i) => {
-    const s = speed[i];
-    const d = direction[i];
-    if (s == null || d == null || s < minSpeed) return [];
-    const end = destination(p.lat, p.lng, (d + 180) % 360, Math.min(s / 5, 9));
-    return [{ points: [p, end], speed: s }];
-  });
-}
+// Severe-weather markers: soft pulses where storms, heavy rain or heavy snow are forecast.
 
 export const HAZARDS = {
-  storm: { label: 'Thunderstorm', rgb: '255, 107, 107' },
-  rain: { label: 'Heavy rain', rgb: '77, 171, 247' },
+  storm: { label: 'Thunderstorm', rgb: '255, 135, 135' },
+  rain: { label: 'Heavy rain', rgb: '116, 192, 252' },
   snow: { label: 'Heavy snow', rgb: '231, 245, 255' },
 };
 

@@ -2,11 +2,13 @@
 
 An open-source, interactive 3D globe that visualizes temperature and other weather conditions around the world.
 
-- **Layers:** temperature, wind speed, precipitation, cloud cover and humidity, each with its own colour scale and legend.
-- **Forecast timeline:** a 5-day forecast in 3-hour steps. Press play to animate it, or drag the slider to any time; **Now** jumps back to the present.
-- **Two display styles:** a *smooth field* that interpolates the grid into a continuous colour map (blended between time steps while playing), or 3D *bars* where taller means higher.
-- **Weather patterns:** animated wind-flow streaks that point downwind, and pulsing rings marking thunderstorms, heavy rain and heavy snow.
-- **Details on click:** click anywhere on the globe to see the forecast for that exact spot at the selected time, with a 5-day temperature chart.
+- **Wind as living brushstrokes:** thousands of glowing particles drift along the forecast wind, leaving fading trails, in the spirit of [earth.nullschool.net](https://earth.nullschool.net).
+- **Smooth colour fields:** temperature, wind speed, precipitation, cloud cover and humidity are painted as soft, bicubic-interpolated colour maps in muted palettes. Clear skies and dry areas fade to transparent so the Earth shows through.
+- **An animated 5-day forecast:** it plays on its own in 3-hour steps, blending smoothly between them. Pause, scrub or jump back to **Now** at any time.
+- **Made to be watched:** the camera turns slowly, and the controls fade away after a few seconds without interaction, leaving just the globe and a small caption.
+- **Severe weather:** soft pulses mark thunderstorms, heavy rain and heavy snow.
+- **Details on click:** the forecast for any spot at the selected time, with a 5-day temperature chart.
+- **Accessible defaults:** with *reduce motion* turned on in your system settings, nothing plays or rotates automatically and the wind particles start switched off.
 - **No API key needed:** weather data comes from the free [Open-Meteo](https://open-meteo.com/) API.
 
 ## Getting started
@@ -31,12 +33,13 @@ Every push to `main` builds the site and deploys it to GitHub Pages via
 
 | File | Purpose |
 | --- | --- |
-| `src/main.js` | Sets up the [globe.gl](https://github.com/vasturiano/globe.gl) scene, controls, timeline playback loop and the details panel. |
-| `src/weather.js` | Builds the 10° sample grid (612 points) and fetches the hourly forecast from Open-Meteo in batches of 100 locations, keeping every 3rd hour. Results are cached in `localStorage` for an hour. |
-| `src/field.js` | The smooth colour field: bilinear interpolation of the grid painted onto a translucent sphere just above the Earth. |
-| `src/patterns.js` | Wind-flow streaks and severe-weather classification for the pattern overlays. |
-| `src/layers.js` | Layer definitions (Open-Meteo variable, unit, colour stops) and WMO weather-code descriptions. |
-| `public/img/` | Earth texture, topology bump map and night-sky background. |
+| `src/main.js` | Sets up the [globe.gl](https://github.com/vasturiano/globe.gl) scene, controls, idle fade, timeline playback loop and the details panel. |
+| `src/weather.js` | Builds a 12° sample grid (390 locations, within the free API's per-minute limit) and fetches the 5-day forecast in 3-hour steps, 3 requests at a time with a timeout. Cached in `localStorage` for an hour. |
+| `src/field.js` | The colour field: bicubic interpolation of the grid painted onto a translucent sphere just above the Earth. |
+| `src/flow.js` | The wind particles: advected through the interpolated wind field and drawn with fading trails onto a glowing sphere. |
+| `src/patterns.js` | Severe-weather classification for the storm markers. |
+| `src/layers.js` | Layer definitions (Open-Meteo variable, unit, palette, opacity) and WMO weather-code descriptions. |
+| `public/img/` | Earth texture and topology bump map. |
 
 ### Adding a layer
 

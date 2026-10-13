@@ -1,30 +1,39 @@
 import { VARIABLES } from './layers.js';
 
 const API_URL = 'https://api.open-meteo.com/v1/forecast';
-// Open-Meteo accepts many coordinates per request; keep URLs a sensible length.
+// Open-Meteo accepts many coordinates per request; keep URLs and responses a sensible size.
 const CHUNK_SIZE = 100;
-const CACHE_KEY = 'power-globe:forecast:v1';
+// Requests in flight at once.
+const CONCURRENCY = 3;
+// Give up on a request after this long rather than leaving the page loading forever.
+const TIMEOUT_MS = 30_000;
+const CACHE_KEY = 'power-globe:forecast:v2';
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 export const FORECAST_DAYS = 5;
-// The global timeline keeps every 3rd hour to keep the download and cache small.
+// The global timeline uses 3-hour steps to keep the download and cache small.
 export const STEP_HOURS = 3;
+// 12° spacing gives 390 locations: under the free API's 600 locations per minute, while the
+// bicubic field and wind particles keep the result smooth.
+export const GRID_STEP = 12;
 
-// Evenly spaced sample points covering the globe, `step` degrees apart, ordered row by row
-// from south to north and west to east within a row.
-export function buildGrid(step = 10) {
+// Evenly spaced sample points covering the globe up to ±80°, `step` degrees apart, ordered
+// row by row from south to north and west to east within a row.
+export function buildGrid(step = GRID_STEP) {
+  const { lat0, rows, cols } = gridShape(step);
   const points = [];
-  for (let lat = -80; lat <= 80; lat += step) {
-    for (let lng = -180; lng < 180; lng += step) {
-      points.push({ lat, lng });
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      points.push({ lat: lat0 + r * step, lng: -180 + c * step });
     }
   }
   return points;
 }
 
 // Dimensions of buildGrid(step), for code that needs to index it as a 2D grid.
-export function gridShape(step = 10) {
-  return { step, lat0: -80, rows: Math.floor(160 / step) + 1, cols: Math.ceil(360 / step) };
+export function gridShape(step = GRID_STEP) {
+  const edge = Math.floor(80 / step) * step;
+  return { step, lat0: -edge, rows: (2 * edge) / step + 1, cols: Math.ceil(360 / step) };
 }
 
 export function chunk(items, size) {
@@ -33,7 +42,8 @@ export function chunk(items, size) {
   return out;
 }
 
-export function buildUrl(points) {
+// `threeHourly` asks Open-Meteo to aggregate to 3-hour steps, cutting the download ~3x.
+export function buildUrl(points, { threeHourly = false } = {}) {
   const params = new URLSearchParams({
     latitude: points.map((p) => p.lat).join(','),
     longitude: points.map((p) => p.lng).join(','),
@@ -41,36 +51,85 @@ export function buildUrl(points) {
     forecast_days: String(FORECAST_DAYS),
     timezone: 'GMT',
   });
+  if (threeHourly) params.set('temporal_resolution', 'hourly_3');
   return `${API_URL}?${params}`;
 }
 
+export class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function fetchJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Open-Meteo request failed (${res.status})`);
+  let res;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+  } catch (err) {
+    throw new ApiError(err.name === 'TimeoutError' ? 'Open-Meteo did not respond in time' : 'Could not reach Open-Meteo');
+  }
+  if (!res.ok) {
+    // Open-Meteo explains errors as { error: true, reason: "..." }.
+    const reason = await res.json().then((body) => body.reason, () => null);
+    throw new ApiError(`Open-Meteo: ${reason ?? res.statusText ?? 'request failed'} (${res.status})`, res.status);
+  }
   return res.json();
 }
 
-// Hourly forecasts for a list of points, in the same order. The API returns an array for
-// multiple coordinates and a single object for one.
-export async function fetchHourly(points) {
-  const results = [];
-  for (const part of chunk(points, CHUNK_SIZE)) {
-    const data = await fetchJson(buildUrl(part));
-    results.push(...(Array.isArray(data) ? data : [data]).map((item) => item.hourly));
-  }
+// Run `fn` over `items` with at most `limit` calls in flight, keeping result order.
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return results;
+}
+
+// Hourly forecasts for a list of points, in the same order. The API returns an array for
+// multiple coordinates and a single object for one. `onProgress(done, total)` reports chunks.
+export async function fetchHourly(points, { threeHourly = false, onProgress } = {}) {
+  const parts = chunk(points, CHUNK_SIZE);
+  let done = 0;
+  const responses = await mapLimit(parts, CONCURRENCY, async (part) => {
+    let data;
+    try {
+      data = await fetchJson(buildUrl(part, { threeHourly }));
+    } catch (err) {
+      // Fall back to plain hourly data if the API rejects the aggregation option.
+      if (!threeHourly || err.status !== 400) throw err;
+      data = await fetchJson(buildUrl(part));
+    }
+    onProgress?.(++done, parts.length);
+    return (Array.isArray(data) ? data : [data]).map((item) => item.hourly);
+  });
+  return responses.flat();
 }
 
 const round1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
 
-// Keep every `stepHours`-th hour and reshape into values[variable][timeIndex][pointIndex].
+// Indices of the times falling on a multiple of `stepHours` (00:00, 03:00, ... GMT), or all
+// of them when the API already aggregated the series to that step.
+function stepIndices(times, stepHours) {
+  const gapHours = times.length > 1 ? (parseTime(times[1]) - parseTime(times[0])) / 3_600_000 : 1;
+  if (gapHours >= stepHours) return times.map((_, i) => i);
+  return times.flatMap((t, i) => (Number(t.slice(11, 13)) % stepHours === 0 ? [i] : []));
+}
+
+// Reshape per-location series into values[variable][timeIndex][pointIndex] at `stepHours`.
 export function toForecast(points, hourly, stepHours = STEP_HOURS) {
-  const keep = hourly[0].time.map((_, i) => i).filter((i) => i % stepHours === 0);
+  const keep = hourly.map((h) => stepIndices(h.time, stepHours));
+  const times = keep[0].map((i) => hourly[0].time[i]);
   const values = {};
   for (const v of VARIABLES) {
-    values[v] = keep.map((t) => hourly.map((h) => round1(h[v]?.[t])));
+    values[v] = times.map((_, k) => hourly.map((h, p) => round1(h[v]?.[keep[p][k]])));
   }
-  return { times: keep.map((t) => hourly[0].time[t]), points, values };
+  return { times, points, values };
 }
 
 // Open-Meteo times are GMT ISO strings without a zone suffix.
@@ -105,14 +164,14 @@ function writeCache(key, data) {
 }
 
 // Global forecast grid, cached locally to stay within the free API's limits.
-export async function loadForecast({ step = 10, force = false } = {}) {
+export async function loadForecast({ step = GRID_STEP, force = false, onProgress } = {}) {
   const key = `${CACHE_KEY}:${step}`;
   if (!force) {
     const cached = readCache(key);
     if (cached) return cached;
   }
   const points = buildGrid(step);
-  const data = toForecast(points, await fetchHourly(points));
+  const data = toForecast(points, await fetchHourly(points, { threeHourly: true, onProgress }));
   writeCache(key, data);
   return data;
 }

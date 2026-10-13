@@ -1,9 +1,12 @@
 :root {
-  --panel-bg: rgba(15, 20, 30, 0.82);
-  --text: #e9ecef;
-  --muted: #adb5bd;
-  --accent: #4dabf7;
+  --panel-bg: rgba(12, 16, 28, 0.5);
+  --panel-border: rgba(255, 255, 255, 0.07);
+  --text: #e8ecf3;
+  --muted: #9aa5b8;
+  --accent: #9bd1ff;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-weight: 300;
   color: var(--text);
 }
 
@@ -11,9 +14,17 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  height: 100%;
+}
+
+html {
+  background: radial-gradient(ellipse at 50% 45%, #10213a 0%, #070c18 45%, #020306 100%) fixed #020306;
+}
+
 body {
   margin: 0;
-  background: #000;
   overflow: hidden;
 }
 
@@ -22,33 +33,90 @@ body {
   inset: 0;
 }
 
+/* Panels */
+
 .panel {
   position: fixed;
   background: var(--panel-bg);
-  backdrop-filter: blur(6px);
-  border-radius: 10px;
-  padding: 14px 16px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  padding: 16px 18px;
+  transition:
+    opacity 1.2s var(--ease),
+    transform 1.2s var(--ease);
+}
+
+/* When nobody is interacting the controls drift away and only the globe remains. */
+body.idle .panel,
+body.idle .attribution {
+  opacity: 0;
+  pointer-events: none;
+}
+
+body.idle #controls {
+  transform: translateX(-12px);
+}
+
+body.idle #timeline {
+  transform: translate(-50%, 12px);
+}
+
+body.idle #details {
+  transform: translateX(12px);
 }
 
 #controls {
-  top: 16px;
-  left: 16px;
-  width: min(320px, calc(100vw - 32px));
+  top: 20px;
+  left: 20px;
+  width: min(300px, calc(100vw - 40px));
+}
+
+#controls summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+#controls summary::-webkit-details-marker {
+  display: none;
+}
+
+#controls summary::after {
+  content: '';
+  position: absolute;
+  top: 22px;
+  right: 20px;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform 0.4s var(--ease);
+}
+
+#controls:not([open]) summary::after {
+  transform: rotate(-45deg);
+}
+
+#controls:not([open]) h1 {
+  margin: 0;
 }
 
 h1 {
-  margin: 0 0 10px;
-  font-size: 1.25rem;
-  letter-spacing: 0.02em;
+  margin: 0 0 14px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
 }
 
 h2 {
-  margin: 14px 0 6px;
-  font-size: 0.75rem;
-  font-weight: 600;
+  margin: 16px 0 8px;
+  font-size: 0.68rem;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.18em;
   color: var(--muted);
 }
 
@@ -60,40 +128,56 @@ h2 {
 
 button {
   font: inherit;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   color: var(--text);
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 6px;
-  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 5px 12px;
   cursor: pointer;
+  transition:
+    background 0.3s,
+    border-color 0.3s,
+    color 0.3s;
 }
 
 button:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 button[aria-checked='true'] {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #0b1320;
+  background: rgba(155, 209, 255, 0.16);
+  border-color: rgba(155, 209, 255, 0.55);
+  color: #fff;
+}
+
+button:disabled,
+input:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 #legend {
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .legend-bar {
-  height: 10px;
-  border-radius: 5px;
+  height: 6px;
+  border-radius: 3px;
 }
 
 .legend-labels {
   display: flex;
   justify-content: space-between;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   color: var(--muted);
-  margin-top: 4px;
+  margin-top: 5px;
 }
 
 .toggle {
@@ -101,7 +185,7 @@ button[aria-checked='true'] {
   align-items: center;
   gap: 8px;
   margin-top: 8px;
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   cursor: pointer;
 }
 
@@ -111,27 +195,28 @@ button[aria-checked='true'] {
 
 #pattern-legend {
   margin-top: 8px;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   color: var(--muted);
-  line-height: 1.6;
+  line-height: 1.7;
 }
 
 .swatch {
   display: inline-block;
   vertical-align: middle;
-  margin-right: 6px;
+  margin-right: 8px;
 }
 
 .swatch.streak {
   width: 16px;
   height: 2px;
+  border-radius: 1px;
   background: linear-gradient(to right, transparent, #fff);
 }
 
 .swatch.ring {
   width: 8px;
   height: 8px;
-  border: 2px solid;
+  border: 1.5px solid;
   border-radius: 50%;
 }
 
@@ -140,21 +225,33 @@ button[aria-checked='true'] {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-top: 12px;
-  font-size: 0.8rem;
+  margin-top: 14px;
+  font-size: 0.72rem;
   color: var(--muted);
 }
 
+/* Details */
+
 #details {
-  top: 16px;
-  right: 16px;
-  width: min(280px, calc(100vw - 32px));
-  font-size: 0.9rem;
+  top: 20px;
+  right: 20px;
+  width: min(280px, calc(100vw - 40px));
+  font-size: 0.85rem;
 }
 
 #details h2 {
-  margin: 0 0 8px;
-  font-size: 1rem;
+  margin: 0 0 4px;
+  font-size: 0.95rem;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--text);
+}
+
+#details p {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 
 #details dl {
@@ -171,45 +268,46 @@ button[aria-checked='true'] {
 #details dd {
   margin: 0;
   text-align: right;
-}
-
-#details p {
-  margin: 0 0 8px;
-  color: var(--muted);
-  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .sparkline {
   display: block;
   width: 100%;
   height: 56px;
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .sparkline path {
   fill: none;
   stroke: var(--accent);
-  stroke-width: 2;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
 }
 
 .sparkline line {
-  stroke: var(--text);
-  stroke-dasharray: 3 3;
+  stroke: rgba(255, 255, 255, 0.6);
+  stroke-dasharray: 2 3;
 }
 
+/* Timeline */
+
 #timeline {
-  bottom: 28px;
+  bottom: 32px;
   left: 50%;
   transform: translateX(-50%);
-  width: min(640px, calc(100vw - 32px));
+  width: min(620px, calc(100vw - 40px));
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
+  gap: 14px;
+  padding: 10px 16px;
+  border-radius: 999px;
 }
 
 #play {
-  width: 36px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
   flex: none;
 }
 
@@ -222,14 +320,26 @@ button[aria-checked='true'] {
 #time-label {
   flex: none;
   min-width: 11ch;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   font-variant-numeric: tabular-nums;
 }
 
-button:disabled,
-input:disabled {
-  opacity: 0.5;
-  cursor: default;
+/* Caption: stays visible like a label beside a painting. */
+
+#caption {
+  position: fixed;
+  left: 24px;
+  bottom: 22px;
+  font-size: 0.7rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(232, 236, 243, 0.55);
+  pointer-events: none;
+  transition: opacity 1.2s var(--ease);
+}
+
+body:not(.idle) #caption {
+  opacity: 0;
 }
 
 .hidden {
@@ -239,9 +349,10 @@ input:disabled {
 .attribution {
   position: fixed;
   bottom: 8px;
-  right: 12px;
-  font-size: 0.7rem;
+  right: 14px;
+  font-size: 0.65rem;
   color: var(--muted);
+  transition: opacity 1.2s var(--ease);
 }
 
 .attribution a {
@@ -256,16 +367,24 @@ input:disabled {
 @media (max-width: 640px) {
   #details {
     top: auto;
-    bottom: 120px;
-    right: 16px;
+    bottom: 130px;
   }
 
   #timeline {
     flex-wrap: wrap;
+    border-radius: 18px;
   }
 
   #time-slider {
     order: 3;
     flex-basis: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel,
+  #caption,
+  .attribution {
+    transition: none;
   }
 }
