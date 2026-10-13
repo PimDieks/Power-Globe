@@ -1,0 +1,20 @@
+# Runs the Power Globe flight relay at startup, and again if it stops: relay.mjs from
+# /opt/power-globe-relay, with its key from /etc/power-globe-relay.env (RELAY_KEY=...). Goes in
+# /etc/systemd/system; see "Flight relay" in the README for the steps.
+[Unit]
+Description=Power Globe flight relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/node /opt/power-globe-relay/relay.mjs
+EnvironmentFile=/etc/power-globe-relay.env
+Restart=always
+RestartSec=10
+# A user of its own that can change nothing on the machine.
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
