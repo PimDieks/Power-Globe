@@ -240,11 +240,6 @@ body.idle:has(.keep-awake:not(.hidden)) #timeline {
   margin-top: 14px;
 }
 
-.control-group > .button-row + .button-row,
-#legend + .button-row {
-  margin-top: 12px;
-}
-
 /* Search */
 
 .search {
@@ -1262,11 +1257,6 @@ body:not(.idle) #caption {
 .city-label.tier-1 {
   font-size: 12px;
   font-weight: 600;
-}
-
-.tooltip {
-  font-size: 0.85rem;
-  line-height: 1.4;
 }
 
 /* Phones: one column. The timeline sits at the bottom above the credits; the controls and the

@@ -136,14 +136,6 @@ export function buildLut({ stops, fade }, size = 256) {
   return lut;
 }
 
-// 0..1 position of `value` within the layer's range, used for bar height on the globe.
-export function normalize(stops, value) {
-  const min = stops[0][0];
-  const max = stops[stops.length - 1][0];
-  if (value == null || Number.isNaN(value)) return 0;
-  return Math.min(1, Math.max(0, (value - min) / (max - min)));
-}
-
 // WMO weather interpretation codes, as used by Open-Meteo.
 const WEATHER_CODES = {
   0: 'Clear sky',

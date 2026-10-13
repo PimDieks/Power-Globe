@@ -1,5 +1,5 @@
 import Globe from 'globe.gl';
-import { LAYERS, getLayer, colorFor, normalize, describeWeatherCode } from './layers.js';
+import { LAYERS, getLayer, describeWeatherCode } from './layers.js';
 import {
   FORECAST_DAYS,
   GRID_STEP,
@@ -54,10 +54,6 @@ const REGION_FOLLOW_MS = 400;
 const REGION_FADE = 0.8;
 const IMAGE_BASE = `${import.meta.env.BASE_URL}img`;
 const NO_OVERLAY = { key: 'none', label: 'None' };
-const MODES = [
-  { key: 'field', label: 'Smooth field' },
-  { key: 'bars', label: 'Bars' },
-];
 
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const largeScreen = window.innerWidth * window.devicePixelRatio >= 1400;
@@ -68,7 +64,6 @@ const phoneLayout = window.matchMedia('(max-width: 640px)');
 const els = {
   globe: document.getElementById('globe'),
   layerButtons: document.getElementById('layer-buttons'),
-  modeButtons: document.getElementById('mode-buttons'),
   basemapButtons: document.getElementById('basemap-buttons'),
   basemapCredit: document.getElementById('credit-basemap'),
   legend: document.getElementById('legend'),
@@ -134,13 +129,12 @@ const state = {
   // Whether the weather layer is drawn at all, or just the map. It starts as just the map
   // ("None"); picking a layer turns it on.
   overlay: false,
-  mode: 'field',
   forecast: null,
   winds: null,
   // Fractional index into forecast.times; the field and wind blend between neighbouring steps.
   t: 0,
   playing: false,
-  // Step whose discrete layers (bars, rings) are currently drawn.
+  // Step whose discrete layers (the storm rings) are currently drawn.
   drawnStep: -1,
   dirty: true,
   // 0..1 progress of the colour field fading in after a layer change.
@@ -173,21 +167,6 @@ const globe = new Globe(els.globe, { animateIn: !reducedMotion })
   .backgroundColor('rgba(0, 0, 0, 0)')
   .atmosphereColor('#8ec5ff')
   .atmosphereAltitude(0.22)
-  // Bars
-  .pointLat('lat')
-  .pointLng('lng')
-  .pointRadius(GRID_STEP * 0.18)
-  .pointColor((d) => colorFor(state.layer.stops, d.value))
-  .pointAltitude((d) => 0.005 + normalize(state.layer.stops, d.value) * 0.2)
-  .pointsTransitionDuration(600)
-  .pointLabel(
-    (d) => `<div class="tooltip">
-      <b>${d.lat}°, ${d.lng}°</b><br/>
-      ${state.layer.label}: ${fmt(d.value, state.layer.unit)}<br/>
-      ${describeWeatherCode(d.code)}
-    </div>`,
-  )
-  .onPointClick((d) => !pickedTraffic() && showDetails(d.lat, d.lng))
   // Severe weather: slow, soft pulses
   .ringColor((d) => (t) => `rgba(${HAZARDS[d.kind].rgb}, ${0.7 * (1 - t) ** 2})`)
   .ringMaxRadius(4)
@@ -312,7 +291,7 @@ function radioButtons(container, items, activeKey, onSelect) {
 }
 
 function renderControls() {
-  // "None" leaves just the map: no colour field or bars (wind and storms have their own toggles).
+  // "None" leaves just the map: no colour field (wind and storms have their own toggles).
   radioButtons(els.layerButtons, [...LAYERS, NO_OVERLAY], state.overlay ? state.layer.key : NO_OVERLAY.key, (key) => {
     if (key === NO_OVERLAY.key) {
       if (!state.overlay) return;
@@ -340,12 +319,6 @@ function renderControls() {
       renderControls();
     },
   );
-  radioButtons(els.modeButtons, MODES, state.mode, (key) => {
-    state.mode = key;
-    state.fieldFade = 0;
-    invalidate();
-  });
-  els.modeButtons.hidden = !state.overlay;
   els.legend.hidden = !state.overlay;
 
   const { stops, unit } = state.layer;
@@ -404,13 +377,7 @@ function invalidate() {
 // Discrete layers only change when the timeline reaches a new step.
 function drawStep(step) {
   const { points, values, times } = state.forecast;
-  const layerValues = values[state.layer.variable][step];
 
-  globe.pointsData(
-    state.overlay && state.mode === 'bars'
-      ? points.map((p, i) => ({ ...p, value: layerValues[i], code: values.weather_code[step][i] }))
-      : [],
-  );
   globe.ringsData(
     els.hazards.checked ? hazardRings(points, values.weather_code[step], values.precipitation[step]) : [],
   );
@@ -442,7 +409,7 @@ function regionIndices(i0, i1) {
 }
 
 function drawField() {
-  const show = state.overlay && state.mode === 'field';
+  const show = state.overlay;
   field.visible = show;
   const [i0, i1, t] = blendIndices();
   const ri = show && regionIndices(i0, i1);
