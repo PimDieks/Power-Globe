@@ -18,12 +18,13 @@ import { WindFlow, windGrids } from './flow.js';
 import { ScreenFlow } from './screenflow.js';
 import { HAZARDS, hazardRings } from './patterns.js';
 import { DETAIL_ALTITUDE, needsNewRegion, regionFor, viewBounds } from './detail.js';
-import { setupBasemap, setupMapFeatures } from './map.js';
+import { BASEMAPS, setupBasemap, setupMapFeatures } from './map.js';
 import { setupSearch } from './search.js';
 import { airportWeather, conditionsAt, loadAirports, searchAirports } from './airports.js';
 import { airportDetailsHtml, airportPlace, verdictText } from './airportview.js';
 import { setupWindCheck } from './windcheck.js';
 import { STATUS, assessAirport } from './runways.js';
+import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 
 // Timeline playback speed, in forecast steps (3 hours each) per second.
 const STEPS_PER_SECOND = 1;
@@ -44,6 +45,7 @@ const REGION_FOLLOW_MS = 400;
 // Seconds for zoomed-in detail to fade in once it arrives.
 const REGION_FADE = 0.8;
 const IMAGE_BASE = `${import.meta.env.BASE_URL}img`;
+const NO_OVERLAY = { key: 'none', label: 'None' };
 const MODES = [
   { key: 'field', label: 'Smooth field' },
   { key: 'bars', label: 'Bars' },
@@ -59,6 +61,8 @@ const els = {
   globe: document.getElementById('globe'),
   layerButtons: document.getElementById('layer-buttons'),
   modeButtons: document.getElementById('mode-buttons'),
+  basemapButtons: document.getElementById('basemap-buttons'),
+  basemapCredit: document.getElementById('credit-basemap'),
   legend: document.getElementById('legend'),
   patternLegend: document.getElementById('pattern-legend'),
   wind: document.getElementById('toggle-wind'),
@@ -86,6 +90,20 @@ const els = {
   searchResults: document.getElementById('search-results'),
   searchStatus: document.getElementById('search-status'),
   detailsBack: document.getElementById('details-back'),
+  traffic: {
+    flights: document.getElementById('toggle-flights'),
+    military: document.getElementById('toggle-military'),
+    satellites: document.getElementById('toggle-satellites'),
+    group: document.getElementById('satellite-group'),
+    groupRow: document.getElementById('satellite-group-row'),
+    status: document.getElementById('traffic-status'),
+    legend: document.getElementById('traffic-legend'),
+    credits: {
+      flights: document.getElementById('credit-flights'),
+      satellites: document.getElementById('credit-satellites'),
+      adsbName: document.getElementById('credit-adsb'),
+    },
+  },
   windCheckOpen: document.getElementById('windcheck-open'),
   windCheckClose: document.getElementById('windcheck-close'),
   windCheck: {
@@ -105,6 +123,8 @@ const els = {
 
 const state = {
   layer: getLayer('temperature'),
+  // Whether the weather layer is drawn at all, or just the map.
+  overlay: true,
   mode: 'field',
   forecast: null,
   winds: null,
@@ -159,7 +179,7 @@ const globe = new Globe(els.globe, { animateIn: !reducedMotion })
       ${describeWeatherCode(d.code)}
     </div>`,
   )
-  .onPointClick((d) => showDetails(d.lat, d.lng))
+  .onPointClick((d) => !pickedTraffic() && showDetails(d.lat, d.lng))
   // Severe weather: slow, soft pulses
   .ringColor((d) => (t) => `rgba(${HAZARDS[d.kind].rgb}, ${0.7 * (1 - t) ** 2})`)
   .ringMaxRadius(4)
@@ -167,10 +187,35 @@ const globe = new Globe(els.globe, { animateIn: !reducedMotion })
   .ringRepeatPeriod(2400)
   // Drawn after the colour field and wind layers, which do not write depth, so they show on top.
   .ringAltitude(0.0008)
-  .onGlobeClick(({ lat, lng }) => showDetails(lat, lng));
+  .onGlobeClick(({ lat, lng }) => !pickedTraffic() && showDetails(lat, lng));
 
-const setMapBrightness = setupBasemap(globe, `${IMAGE_BASE}/earth-blue-marble.jpg`);
+const BASEMAP_KEY = 'power-globe:basemap';
+state.basemap = (() => {
+  try {
+    const saved = localStorage.getItem(BASEMAP_KEY);
+    return BASEMAPS[saved] ? saved : 'satellite';
+  } catch {
+    return 'satellite';
+  }
+})();
+const basemap = setupBasemap(globe, `${IMAGE_BASE}/earth-blue-marble.jpg`, {
+  initial: state.basemap,
+  onCredit: (html) => {
+    els.basemapCredit.innerHTML = html;
+  },
+});
 const mapFeatures = setupMapFeatures(globe);
+const traffic = setupTraffic({
+  globe,
+  els: els.traffic,
+  onSelect: (item, title) => showTraffic(item, title),
+  onDeselect: () => {
+    if (!state.detail?.traffic) return;
+    state.detail = null;
+    els.details.classList.add('hidden');
+  },
+  announce: (message) => announce(message),
+});
 const windCheck = setupWindCheck({
   els: els.windCheck,
   getTime: () => currentTime(),
@@ -218,6 +263,8 @@ detailFlow.visible = false;
 window.addEventListener('resize', () => globe.width(window.innerWidth).height(window.innerHeight));
 
 function radioButtons(container, items, activeKey, onSelect) {
+  // The buttons are redrawn on every change; keep keyboard focus on the same one.
+  const focused = [...container.children].indexOf(document.activeElement);
   container.replaceChildren(
     ...items.map((item) => {
       const btn = document.createElement('button');
@@ -229,20 +276,45 @@ function radioButtons(container, items, activeKey, onSelect) {
       return btn;
     }),
   );
+  if (focused >= 0) container.children[focused]?.focus();
 }
 
 function renderControls() {
-  radioButtons(els.layerButtons, LAYERS, state.layer.key, (key) => {
-    if (key === state.layer.key) return;
-    state.layer = getLayer(key);
-    state.fieldFade = 0;
+  // "None" leaves just the map: no colour field or bars (wind and storms have their own toggles).
+  radioButtons(els.layerButtons, [...LAYERS, NO_OVERLAY], state.overlay ? state.layer.key : NO_OVERLAY.key, (key) => {
+    if (key === NO_OVERLAY.key) {
+      if (!state.overlay) return;
+      state.overlay = false;
+    } else {
+      if (state.overlay && key === state.layer.key) return;
+      state.overlay = true;
+      state.layer = getLayer(key);
+      state.fieldFade = 0;
+    }
     invalidate();
   });
+  radioButtons(
+    els.basemapButtons,
+    Object.entries(BASEMAPS).map(([key, { label }]) => ({ key, label })),
+    state.basemap,
+    (key) => {
+      state.basemap = key;
+      basemap.setStyle(key);
+      try {
+        localStorage.setItem(BASEMAP_KEY, key);
+      } catch {
+        // Remembering the map is only a convenience.
+      }
+      renderControls();
+    },
+  );
   radioButtons(els.modeButtons, MODES, state.mode, (key) => {
     state.mode = key;
     state.fieldFade = 0;
     invalidate();
   });
+  els.modeButtons.hidden = !state.overlay;
+  els.legend.hidden = !state.overlay;
 
   const { stops, unit } = state.layer;
   const min = stops[0][0];
@@ -263,9 +335,28 @@ function renderControls() {
   renderCaption();
 }
 
+// Swatches for the live traffic layers that are switched on.
+function renderTrafficLegend() {
+  const on = { Flight: els.traffic.flights.checked, 'Military flight': els.traffic.military.checked };
+  const items = TRAFFIC_LEGEND.filter(([kind, , label]) => (kind === 'plane' ? on[label] : els.traffic.satellites.checked));
+  els.traffic.legend.innerHTML = items
+    .map(([kind, rgb, label]) => {
+      const color = `rgb(${rgb.map((c) => Math.round(c * 255)).join(' ')})`;
+      const swatch =
+        kind === 'plane'
+          ? `<svg class="swatch plane" viewBox="-28 -28 56 56" aria-hidden="true"><path fill="${color}" stroke="#000" stroke-width="3" d="M0-28 3.5-22V-8L27 5v5L3.5 4v12l7.5 6v4L0 23l-11 3v-4l7.5-6V4L-27 10V5L-3.5-8v-14z"/></svg>`
+          : `<span class="swatch sat" style="background: ${color}"></span>`;
+      return `<div>${swatch}${label}</div>`;
+    })
+    .join('');
+}
+for (const el of [els.traffic.flights, els.traffic.military, els.traffic.satellites]) el.addEventListener('change', renderTrafficLegend);
+renderTrafficLegend();
+
 function renderCaption() {
   const time = state.forecast?.times[Math.round(state.t)];
-  els.caption.textContent = time ? `${state.layer.label} · ${formatTime(time)}` : state.layer.label;
+  const label = state.overlay ? state.layer.label : 'Map';
+  els.caption.textContent = time ? `${label} · ${formatTime(time)}` : label;
 }
 
 // Re-draw everything on the next frame, e.g. after a layer or display change.
@@ -283,7 +374,7 @@ function drawStep(step) {
   const layerValues = values[state.layer.variable][step];
 
   globe.pointsData(
-    state.mode === 'bars'
+    state.overlay && state.mode === 'bars'
       ? points.map((p, i) => ({ ...p, value: layerValues[i], code: values.weather_code[step][i] }))
       : [],
   );
@@ -317,7 +408,7 @@ function regionIndices(i0, i1) {
 }
 
 function drawField() {
-  const show = state.mode === 'field';
+  const show = state.overlay && state.mode === 'field';
   field.visible = show;
   const [i0, i1, t] = blendIndices();
   const ri = show && regionIndices(i0, i1);
@@ -382,6 +473,7 @@ function stepWind(dt) {
 const ease = (x) => 1 - (1 - x) ** 3;
 
 let lastFrame = performance.now();
+let lastTrafficRender = 0;
 function tick(now) {
   const dt = Math.min(0.1, (now - lastFrame) / 1000);
   lastFrame = now;
@@ -407,6 +499,17 @@ function tick(now) {
     }
     detailField.strength = ease(state.fieldFade) * ease(state.region?.fade ?? 0);
     stepWind(dt);
+  }
+  // Live traffic is extra: a problem with it must not stop the globe.
+  try {
+    traffic.frame(now, globe.pointOfView());
+  } catch (err) {
+    console.error(err);
+  }
+  // Live positions change all the time; refresh the open aircraft or satellite every second.
+  if (state.detail?.traffic && now - lastTrafficRender > 1000) {
+    lastTrafficRender = now;
+    renderDetails();
   }
   requestAnimationFrame(tick);
 }
@@ -510,7 +613,7 @@ async function fetchRegion(region) {
 
 let regionTimer;
 function onView(pov) {
-  setMapBrightness(pov.altitude);
+  basemap.setAltitude(pov.altitude);
   mapFeatures.update(pov.altitude);
   const zoomedIn = pov.altitude < DETAIL_ALTITUDE;
   controls.autoRotate = state.autoRotate && !zoomedIn;
@@ -558,10 +661,51 @@ function setControlsOpen(open) {
 
 // The details panel and the wind check share one place on screen, so opening one closes the
 // other. On phones they also share it with the controls.
-function openSidePanel() {
+function openSidePanel({ keepTraffic = false } = {}) {
   state.autoRotate = false;
   controls.autoRotate = false;
+  if (!keepTraffic) traffic.deselect();
   if (phoneLayout.matches) setControlsOpen(false);
+}
+
+// A tapped aircraft or satellite: live details, refreshed every second, with a ring around it.
+function showTraffic(item, title) {
+  openSidePanel({ keepTraffic: true });
+  windCheck.close();
+  syncWindCheckButton();
+  state.detail = { traffic: item };
+  mapFeatures.setMarker(null);
+  els.details.classList.remove('hidden');
+  els.details.classList.add('keep-awake');
+  els.detailsBack.hidden = true;
+  els.detailsTitle.textContent = title;
+  renderDetails();
+  announce(`${item.kind === 'aircraft' ? 'Flight' : 'Satellite'} ${title} selected.`);
+}
+
+// Taps that select an aircraft or satellite should not also open the weather where they landed.
+let pickedAt = -Infinity;
+const pickedTraffic = () => performance.now() - pickedAt < 500;
+{
+  let down = null;
+  els.globe.addEventListener(
+    'pointerdown',
+    (event) => {
+      down = { x: event.clientX, y: event.clientY };
+    },
+    { capture: true, passive: true },
+  );
+  els.globe.addEventListener(
+    'pointerup',
+    (event) => {
+      if (!down || event.button !== 0 || Math.hypot(event.clientX - down.x, event.clientY - down.y) > 6) return;
+      const hit = traffic.pick(event.clientX, event.clientY);
+      if (!hit) return;
+      pickedAt = performance.now();
+      traffic.select(hit);
+    },
+    { capture: true, passive: true },
+  );
 }
 
 // `name` titles the panel, e.g. a searched place (tapped spots show coordinates); `pinLabel`
@@ -635,7 +779,9 @@ async function showAirport(airport, { fromList = false } = {}) {
 }
 
 function closeDetails() {
+  const tracked = state.detail?.traffic;
   state.detail = null;
+  if (tracked) traffic.deselect();
   els.details.classList.add('hidden');
   els.details.classList.remove('keep-awake');
   mapFeatures.setMarker(null);
@@ -693,8 +839,22 @@ function goToAirport(airport, options) {
     const shift = (window.innerHeight / 2 - (top + bottom) / 2) / window.innerHeight;
     lat = Math.max(-85, Math.min(85, lat - shift * LAT_SPAN_PER_ALTITUDE * AIRPORT_ALTITUDE));
   }
-  globe.pointOfView({ lat, lng: airport.lng, altitude: AIRPORT_ALTITUDE }, reducedMotion ? 0 : 2200);
+  // Stop turning first: the camera controls keep the turn's momentum, which would otherwise carry
+  // the view on past the airport after the flight.
+  state.autoRotate = false;
+  controls.autoRotate = false;
+  stopCameraDrift();
+  const duration = reducedMotion ? 0 : 2200;
+  globe.pointOfView({ lat, lng: airport.lng, altitude: AIRPORT_ALTITUDE }, duration);
+  setTimeout(stopCameraDrift, duration + 50);
   showAirport(airport, options);
+}
+
+// Drop any momentum left in the camera controls (damping eases movement out over many frames).
+function stopCameraDrift() {
+  controls.enableDamping = false;
+  controls.update();
+  controls.enableDamping = true;
 }
 
 // The timeline's time, or the current hour before the forecast has loaded.
@@ -733,6 +893,10 @@ function detailIndex(data) {
 // Updates only the panel's body, so the heading and close button keep their focus.
 function renderDetails() {
   const detail = state.detail;
+  if (detail?.traffic) {
+    els.detailsBody.innerHTML = traffic.detailsHtml() ?? '<p>No longer in view.</p>';
+    return;
+  }
   if (detail?.airport) {
     if (!detail.hourly) return;
     els.detailsBody.innerHTML = airportDetailsHtml({

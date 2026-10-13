@@ -45,6 +45,11 @@
   box-sizing: border-box;
 }
 
+/* The hidden attribute wins over display rules such as flex rows. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
@@ -428,6 +433,82 @@ input:disabled {
   height: 10px;
   border: 2px solid;
   border-radius: 50%;
+}
+
+/* Live traffic */
+
+.select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.select-row select {
+  min-width: 0;
+  max-width: 220px;
+  min-height: var(--touch);
+  padding: 4px 8px;
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+}
+
+.select-row select option {
+  color: #000;
+}
+
+#traffic-legend {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  line-height: 1.8;
+}
+
+.swatch.plane {
+  width: 14px;
+  height: 14px;
+}
+
+.swatch.sat {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-left: 3px;
+  margin-right: 12px;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.traffic-status {
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.traffic-status p {
+  margin: 2px 0;
+}
+
+.badge {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #0a0e18;
+}
+
+.badge.military {
+  background: #6ef2c2;
+}
+
+.badge.emergency {
+  background: var(--nogo);
 }
 
 .status-row {

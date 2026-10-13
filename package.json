@@ -10,10 +10,12 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "airports": "node scripts/build-airports.mjs"
+    "airports": "node scripts/build-airports.mjs",
+    "satellites": "node scripts/fetch-satellites.mjs"
   },
   "dependencies": {
     "globe.gl": "^2.46.2",
+    "satellite.js": "^7.1.0",
     "three": "^0.186.1",
     "topojson-client": "^3.1.0",
     "world-atlas": "^2.0.2"

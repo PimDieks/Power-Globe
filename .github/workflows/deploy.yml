@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # Rebuild every six hours so the bundled satellite elements stay fresh.
+  schedule:
+    - cron: '23 */6 * * *'
 
 permissions:
   contents: read
@@ -24,6 +27,9 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # A fallback copy of the satellite elements; the site works without it.
+      - run: npm run satellites
+        continue-on-error: true
       - run: npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

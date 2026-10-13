@@ -18,6 +18,7 @@
         An interactive globe showing the weather forecast. Drag to turn it, pinch or scroll to zoom, and tap a spot to
         see its forecast. Search for an airport to see its ground conditions and the wind on each runway, or open the
         wind check for a list of airports where wind and gusts are near or over the limits. Pick a time on the timeline.
+        Live flights, military flights and satellites can be switched on under Live traffic; tap one for its details.
       </p>
       <div class="panel" id="controls">
         <div class="panel-head">
@@ -50,11 +51,25 @@
           <div class="button-row" id="layer-buttons" role="radiogroup" aria-label="Weather layer"></div>
           <div id="legend"></div>
 
+          <h2>Earth</h2>
+          <div class="button-row" id="basemap-buttons" role="radiogroup" aria-label="Map of the Earth"></div>
+
           <h2>Display</h2>
           <div class="button-row" id="mode-buttons" role="radiogroup" aria-label="Display style"></div>
           <label class="toggle"><input type="checkbox" id="toggle-wind" checked /> Wind flow</label>
           <label class="toggle"><input type="checkbox" id="toggle-hazards" checked /> Storms &amp; heavy precipitation</label>
           <div id="pattern-legend"></div>
+
+          <h2>Live traffic</h2>
+          <label class="toggle"><input type="checkbox" id="toggle-flights" /> Flights</label>
+          <label class="toggle"><input type="checkbox" id="toggle-military" /> Military flights</label>
+          <label class="toggle"><input type="checkbox" id="toggle-satellites" /> Satellites</label>
+          <label class="select-row" id="satellite-group-row" hidden>
+            <span>Show</span>
+            <select id="satellite-group"></select>
+          </label>
+          <div id="traffic-legend"></div>
+          <div id="traffic-status" class="traffic-status"></div>
 
           <div class="status-row">
             <span id="status" role="status">Loading forecast…</span>
@@ -133,11 +148,14 @@
 
     <footer class="attribution">
       Weather by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> (CC BY 4.0) ·
-      Imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics
-      and the GIS User Community; NASA Blue Marble ·
+      <span id="credit-basemap">Imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar,
+      Earthstar Geographics and the GIS User Community; NASA Blue Marble</span> ·
       Borders <a href="https://www.naturalearthdata.com/" target="_blank" rel="noopener">Natural Earth</a> ·
       Airports <a href="https://ourairports.com/" target="_blank" rel="noopener">OurAirports</a>, routes
-      <a href="https://openflights.org/data.php" target="_blank" rel="noopener">OpenFlights</a> (ODbL)
+      <a href="https://openflights.org/data.php" target="_blank" rel="noopener">OpenFlights</a> (ODbL)<span id="credit-flights" hidden>
+        · Flights <a href="https://opensky-network.org/" target="_blank" rel="noopener">The OpenSky Network</a>,
+        <span id="credit-adsb">adsb.lol</span> (ODbL)</span><span id="credit-satellites" hidden>
+        · Satellites <a href="https://celestrak.org/" target="_blank" rel="noopener">CelesTrak</a></span>
     </footer>
 
     <script type="module" src="/src/main.js"></script>
