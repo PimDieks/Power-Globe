@@ -9,6 +9,7 @@ import { AircraftStore, estimatePosition, fromAdsb, fromOpenSky } from './aircra
 import { aircraftLayer, orbitLine, satelliteLayer, selectionRing } from './trafficlayer.js';
 import { EARTH_RADIUS_KM, orbitClass, orbitPath, parseTle, periodMinutes, satellitePosition, toGeodetic, toSatrec, tleEpoch } from './orbits.js';
 import { aircraftDetailsHtml, aircraftName, satelliteDetailsHtml } from './trafficview.js';
+import { PROXY_URL, explain } from './api.js';
 
 const OPENSKY_URL = 'https://opensky-network.org/api/states/all?extended=1';
 export const ADSB_PROVIDERS = [
@@ -152,7 +153,8 @@ async function loadElements(group) {
 }
 
 async function liveElements(group) {
-  const url = CELESTRAK_URL(group);
+  // Through the Power Globe API when there is one, else straight from CelesTrak.
+  const url = PROXY_URL ? `${PROXY_URL}/satellites/${group}` : CELESTRAK_URL(group);
   let cache = null;
   try {
     cache = await caches.open('power-globe-satellites');
@@ -207,7 +209,16 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   let worker = null;
 
   // ADS-B Exchange style feeds: the one that worked last, else the next.
-  async function fromProviders(urlFor) {
+  async function fromProviders(urlFor, proxyPath) {
+    // The Power Globe API asks the feeds server-side; most feeds do not answer web pages.
+    if (PROXY_URL) {
+      try {
+        const { source, data } = await fetchJson(`${PROXY_URL}${proxyPath}`);
+        return { data, name: source };
+      } catch (err) {
+        console.error(err);
+      }
+    }
     let lastError;
     for (let k = 0; k < ADSB_PROVIDERS.length; k++) {
       const i = (provider + k) % ADSB_PROVIDERS.length;
@@ -243,10 +254,21 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
 
   const timeText = () => new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 
+  async function openSky() {
+    if (PROXY_URL) {
+      try {
+        return (await fetchJson(`${PROXY_URL}/flights/global`)).data;
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    return fetchJson(OPENSKY_URL);
+  }
+
   function loadGlobal() {
     return once('global', async () => {
       try {
-        const list = fromOpenSky(await fetchJson(OPENSKY_URL));
+        const list = fromOpenSky(await openSky());
         addAircraft(list, 'OpenSky Network');
         nextGlobal = Date.now() + GLOBAL_MS;
         status.flights = `Worldwide from OpenSky Network, ${timeText()}`;
@@ -260,7 +282,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
         nextGlobal = Date.now() + (limited ? GLOBAL_LIMIT_PAUSE_MS : GLOBAL_RETRY_MS);
         status.flights = limited
           ? "OpenSky's free daily allowance is used up for now; zoom in to see flights near you."
-          : `Worldwide flights unavailable (${err.message}); zoom in to see flights near you.`;
+          : `Worldwide flights unavailable (${explain(err)}); zoom in to see flights near you.`;
       }
     });
   }
@@ -270,14 +292,14 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     const nm = areaRadiusNm(pov.altitude);
     return once('area', async () => {
       try {
-        const { data, name } = await fromProviders((p) => p.area(center.lat, center.lng, nm));
+        const { data, name } = await fromProviders((p) => p.area(center.lat, center.lng, nm), `/flights/area?lat=${center.lat}&lon=${center.lng}&nm=${nm}`);
         addAircraft(fromAdsb(data), name);
         lastArea = { ...center, nm };
         status.area = `In view from ${name}, ${timeText()}`;
         nextArea = Date.now() + AREA_MS;
       } catch (err) {
         console.error(err);
-        status.area = `Flights in view unavailable (${err.message})`;
+        status.area = `Flights in view unavailable (${explain(err)})`;
         nextArea = Date.now() + FEED_RETRY_MS;
       }
     });
@@ -286,13 +308,13 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   function loadMilitary() {
     return once('military', async () => {
       try {
-        const { data, name } = await fromProviders((p) => p.military);
+        const { data, name } = await fromProviders((p) => p.military, '/flights/military');
         addAircraft(fromAdsb(data, { military: true }), name);
         status.military = `Worldwide from ${name}, ${timeText()}`;
         nextMilitary = Date.now() + MILITARY_MS;
       } catch (err) {
         console.error(err);
-        status.military = `Military flights unavailable (${err.message})`;
+        status.military = `Military flights unavailable (${explain(err)})`;
         nextMilitary = Date.now() + FEED_RETRY_MS;
       }
     });
@@ -341,7 +363,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
       })
       .catch((err) => {
         console.error(err);
-        if (satellites === current) status.satellites = `Satellites unavailable (${err.message})`;
+        if (satellites === current) status.satellites = `Satellites unavailable (${explain(err)})`;
       })
       .finally(() => {
         current.loading = null;

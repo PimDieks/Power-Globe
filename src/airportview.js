@@ -1,7 +1,8 @@
 // What the airport panels show: ground conditions, runway wind components and the wind check
 // list, as HTML. Pure functions of the data, so they can be tested without a browser.
 import { conditionsAt } from './airports.js';
-import { STATUS, assessAirport, describeReasons, formatWind } from './runways.js';
+import { STATUS, assessAirport, assessRunwayEnd, describeReasons, formatWind } from './runways.js';
+import { FLIGHT_CATEGORIES } from './metar.js';
 
 // Hours ahead covered by the outlook strip, and its step.
 export const OUTLOOK_HOURS = 24;
@@ -66,11 +67,67 @@ export function verdictText({ status, best, ends }) {
 export const limitsText = (limits) =>
   `crosswind ${limits.crosswind} kt, tailwind ${limits.tailwind} kt`;
 
-// The airport details panel at `time`: conditions, verdict, every runway end and the outlook.
-export function airportDetailsHtml({ airport, hourly, time, limits, limitsLabel, formatTime, formatHour }) {
+// Variable wind can come from any direction, so judge every runway as if it were all crosswind
+// and all tailwind at once.
+export function assessVariable(airport, wind, limits) {
+  const cross = assessRunwayEnd(0, { ...wind, direction: 90 }, limits);
+  const tail = assessRunwayEnd(0, { ...wind, direction: 180 }, limits);
+  const worst = STATUS[tail.status].rank > STATUS[cross.status].rank ? tail : cross;
+  return { status: worst.status, reasons: [...new Set([...cross.reasons, ...tail.reasons])] };
+}
+
+const minutesAgo = (t, now) => Math.max(0, Math.round((now - t) / 60_000));
+
+// The latest METAR: what is observed now, and whether the runways can be used in that wind.
+export function observationHtml(airport, observation, limits, now = Date.now()) {
+  if (observation === undefined) return '<section class="observation"><h3>Observed now</h3><p>Loading the latest METAR…</p></section>';
+  if (observation?.error) {
+    return `<section class="observation"><h3>Observed now</h3><p>The official observation (METAR) could not be loaded here (${escapeHtml(observation.error)}).</p></section>`;
+  }
+  if (!observation) return '<section class="observation"><h3>Observed now</h3><p>No METAR from this airport in the last three hours.</p></section>';
+  const o = observation;
+  const age = o.time ? `${minutesAgo(o.time, now)} min ago` : '';
+  let verdict;
+  if (o.speed == null) verdict = { status: 'unknown', text: 'No wind reported' };
+  else if (o.variable || o.direction == null) {
+    const v = assessVariable(airport, o, limits);
+    verdict = {
+      status: v.status,
+      text: `Variable ${Math.round(o.speed)} kt${o.gust ? ` gusting ${Math.round(o.gust)}` : ''}: ${
+        v.status === 'ok' ? 'within limits on every runway' : `${describeReasons(v).toLowerCase()} could exceed the limit`
+      }`,
+    };
+  } else {
+    const result = assessAirport(airport, o, limits);
+    verdict = { status: result.status, text: `${formatWind(o)}: ${verdictText(result)}` };
+  }
+  const category = FLIGHT_CATEGORIES[o.category];
+  const details = [
+    o.visibility != null ? `visibility ${o.visibility >= 10 ? '10+' : o.visibility} mi` : '',
+    o.ceiling != null ? `ceiling ${o.ceiling.toLocaleString()} ft` : 'no ceiling',
+    o.temperature != null ? `${o.temperature} °C / dew point ${o.dewPoint ?? '–'} °C` : '',
+  ].filter(Boolean);
+  return `<section class="observation">
+      <h3>Observed now <span class="observation-age">METAR, ${escapeHtml(age)}</span></h3>
+      <div class="verdict status-${verdict.status}">
+        <span class="status-icon" aria-hidden="true">${STATUS[verdict.status].icon}</span>
+        <span><b>${STATUS[verdict.status].label}</b><br />${escapeHtml(verdict.text)}</span>
+      </div>
+      ${
+        category
+          ? `<p><span class="badge category-${o.category.toLowerCase()}" title="${escapeHtml(category.description)}">${category.label}</span>${escapeHtml(details.join(' · '))}</p>`
+          : ''
+      }
+      <p class="raw-metar"><code>${escapeHtml(o.raw)}</code></p>
+    </section>`;
+}
+
+// The airport details panel at `time`: the latest observation, then the forecast: conditions,
+// verdict, every runway end and the outlook.
+export function airportDetailsHtml({ airport, hourly, time, limits, limitsLabel, formatTime, formatHour, observation }) {
   const now = conditionsAt(hourly, time);
   const routes = airport.routes ? ` · routes to ${airport.routes} airports` : '';
-  const head = `<p class="airport-place">${escapeHtml(airportPlace(airport))} · ${Math.round(airport.elevationFt)} ft${routes}</p>`;
+  const head = `<p class="airport-place">${escapeHtml(airportPlace(airport))} · ${Math.round(airport.elevationFt)} ft${routes}</p>${observationHtml(airport, observation, limits)}<h3>Forecast</h3>`;
   if (!now) {
     return `${head}<p>No forecast for ${escapeHtml(formatTime(time))} here yet.</p>`;
   }

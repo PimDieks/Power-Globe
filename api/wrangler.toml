@@ -1,0 +1,9 @@
+# Power Globe API (see worker.js). Deployed by .github/workflows/api.yml, or by hand with
+#   npx wrangler deploy
+name = "power-globe-api"
+main = "worker.js"
+compatibility_date = "2025-06-01"
+
+[vars]
+# Sites allowed to use the API, comma-separated ("*" for any).
+ALLOWED_ORIGINS = "https://pimdieks.github.io,http://localhost:5173,http://localhost:4173"
