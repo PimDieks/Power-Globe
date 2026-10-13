@@ -1,0 +1,20 @@
+# Runs the Power Globe flight relay for the API at startup, and again if it stops: api-relay.mjs
+# from /opt/power-globe-api-relay, with its key from /etc/power-globe-api-relay.env
+# (RELAY_KEY=...). Goes in /etc/systemd/system; see "Flight relay for the API" in the README.
+[Unit]
+Description=Power Globe flight relay for the API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/node /opt/power-globe-api-relay/api-relay.mjs
+EnvironmentFile=/etc/power-globe-api-relay.env
+Restart=always
+RestartSec=10
+# A user of its own that can change nothing on the machine.
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

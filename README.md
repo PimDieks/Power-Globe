@@ -75,15 +75,33 @@ To set it up once:
 
 Optionally, with a free OpenSky Network account, create an API client on its account page and add its `clientId` and `clientSecret` as the repository secrets `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET`; the workflow hands them to the Worker (or run `npx wrangler secret put OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` in `api/`). The worldwide flights then refresh every 2 minutes instead of 5, within the account's daily allowance. For the Aviation map, add a free [openAIP](https://www.openaip.net/) API key as the repository secret `OPENAIP_API_KEY`; the Worker serves the chart tiles with it, cached for a day, so the key never reaches the page. Without the proxy everything else works; live flights and METARs then show why they are unavailable.
 
-## Flight relay on your own computer
+### Flight relay for the API
 
-The free flight feeds (OpenSky, adsb.lol, airplanes.live, adsb.fi) refuse requests from cloud servers, the Power Globe API's included, but answer a home connection. The flight relay runs the API's flight routes on your computer:
+The flight feeds limit or refuse Cloudflare's servers, whose addresses many sites share: OpenSky does not answer them, adsb.lol answers 429 and airplanes.live and adsb.fi answer 403. OpenSky, adsb.lol and adsb.fi do answer other connections (airplanes.live asks those who ask from a server to email them first). `relay/api-relay.mjs` is a small relay for them, run on a machine of your own: a Raspberry Pi at home, a home server, or a small virtual server with its own address (not another serverless platform, whose shared addresses the feeds treat the same way). The API then asks the flight feeds through it, so every visitor gets flights, and still caches every answer, so the relay is only asked as often as the feeds were before. The relay asks only the flight feeds, only for requests carrying its key, each feed at most once a second, and compresses its answers: about 30 MB an hour up the home connection while someone is watching flights, nothing when nobody is.
 
-1. With [Node.js](https://nodejs.org/) 18 or newer, in this folder: `npm run relay` (nothing to install). It listens on `http://localhost:8787`.
-2. Optionally, for an OpenSky account's larger allowance, put the API client's `credentials.json` from your OpenSky account page in `relay/` (it is never committed), or set `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET`.
-3. On the site, under **Live traffic**, open **Flight relay on this computer** and choose **Use**. Chrome may ask to allow access to devices on your local network.
+On the Pi (Raspberry Pi OS; any Linux with systemd works the same):
 
-The relay serves only the browser on the same computer, and only while it runs; the site remembers it and falls back to the Power Globe API when it is not running. Like the API, it shares each answer while it is fresh and keeps the last good one for when a feed fails.
+1. Install Node.js and the relay, and give it a key:
+   ```sh
+   sudo apt install -y nodejs
+   sudo mkdir -p /opt/power-globe-api-relay
+   sudo curl -fsSL -o /opt/power-globe-api-relay/api-relay.mjs https://raw.githubusercontent.com/PimDieks/Power-Globe/main/relay/api-relay.mjs
+   sudo curl -fsSL -o /etc/systemd/system/power-globe-api-relay.service https://raw.githubusercontent.com/PimDieks/Power-Globe/main/relay/power-globe-api-relay.service
+   echo "RELAY_KEY=$(openssl rand -hex 32)" | sudo tee /etc/power-globe-api-relay.env >/dev/null
+   sudo chmod 600 /etc/power-globe-api-relay.env
+   sudo systemctl enable --now power-globe-api-relay
+   ```
+   It listens on `http://127.0.0.1:8788`, on the Pi only; `curl localhost:8788` answers with its name.
+2. Give it a public HTTPS address without opening a port on the router, for example with [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) (free):
+   ```sh
+   curl -fsSL https://tailscale.com/install.sh | sh
+   sudo tailscale up
+   sudo tailscale funnel --bg 8788
+   ```
+   The first time, it gives a link to allow Funnel for your tailnet. It then prints the address, like `https://raspberrypi.tail1234.ts.net`, and keeps it across restarts. (A [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) to `http://localhost:8788` works as well, with a domain of your own on Cloudflare.)
+3. In this repository's **Settings → Secrets and variables → Actions**, add the secrets `FLIGHT_RELAY_URL` (that address) and `FLIGHT_RELAY_KEY` (the key, shown by `sudo cat /etc/power-globe-api-relay.env`, without `RELAY_KEY=`), and run the **Deploy the Power Globe API** workflow. Its check step should show `"relay":"on"` and flights answering 200.
+
+When the relay cannot be reached, the API says so ("… through the relay") and serves its last answers for up to 6 hours. The relay's own answers: 401, the key does not match; 429, a feed is being asked too often; 504, the feed did not answer the relay. `journalctl -u power-globe-api-relay` shows what went wrong. To update it, download `api-relay.mjs` again and `sudo systemctl restart power-globe-api-relay`.
 
 ## Deployment
 
@@ -113,6 +131,7 @@ Every push to `main` builds the site and deploys it to GitHub Pages via
 | `src/api.js` | Where the site's own data and the live proxy are. |
 | `scripts/build-data.mjs` | Builds the site's own data API (forecast and airport weather). |
 | `api/worker.js` | The Power Globe API: the live data proxy (Cloudflare Worker). |
+| `relay/api-relay.mjs` | The flight relay for the API: asks the flight feeds for it from a machine of your own (see Flight relay for the API). |
 | `src/search.js` | The search box, as an accessible combobox. |
 | `src/airports.js` | The airport list, airport search, and hourly ground conditions at airports (cached for an hour). |
 | `src/runways.js` | Headwind, tailwind and crosswind on each runway end, and the limit presets. Limits are checked against the stronger of the mean wind and the gusts. |

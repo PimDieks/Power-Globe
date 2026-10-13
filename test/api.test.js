@@ -55,6 +55,30 @@ describe('Power Globe API (worker)', () => {
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=10');
   });
 
+  it('asks the flight feeds through the relay when there is one, and nothing else', async () => {
+    const env = { FLIGHT_RELAY_URL: 'https://relay.example/', FLIGHT_RELAY_KEY: 'relay-secret-123456' };
+    const fetchFn = vi.fn(async (url) => (url.includes('aviationweather') ? reply('[]') : reply({ ac: [] })));
+    const area = await (await route(new URL('https://api.example/flights/area?lat=52.31&lon=4.76&nm=40'), env, fetchFn)).json();
+    expect(area.source).toBe('adsb.lol');
+    const [url, init] = fetchFn.mock.calls[0];
+    expect(url).toBe('https://relay.example/api.adsb.lol/v2/point/52.25/4.75/50');
+    expect(init.headers['X-Relay-Key']).toBe('relay-secret-123456');
+    await route(new URL('https://api.example/metar?ids=EHAM'), env, fetchFn);
+    expect(fetchFn.mock.calls[1][0]).toMatch(/^https:\/\/aviationweather\.gov\//);
+    expect(fetchFn.mock.calls[1][1].headers['X-Relay-Key']).toBeUndefined();
+    expect((await (await route(new URL('https://api.example/'), env, fetchFn)).json()).relay).toBe('on');
+    expect((await (await route(new URL('https://api.example/'), {}, fetchFn)).json()).relay).toBe('off');
+
+    const down = vi.fn(async () => reply('Bad gateway', { status: 502 }));
+    await expect(route(new URL('https://api.example/flights/military'), env, down)).rejects.toThrow('api.adsb.lol answered 502 through the relay');
+  });
+
+  it('passes the worldwide answer on as OpenSky gave it', async () => {
+    const res = await route(new URL('https://api.example/flights/global'), {}, async () => reply('{"time":1,"states":[["abc"]]}'));
+    expect(await res.json()).toMatchObject({ source: 'OpenSky Network', data: { time: 1, states: [['abc']] } });
+    await expect(route(new URL('https://api.example/flights/global'), {}, async () => reply('<html>busy</html>'))).rejects.toMatchObject({ status: 502 });
+  });
+
   it('serves METARs and satellites, and checks what it is asked', async () => {
     const fetchFn = vi.fn(async (url) => (url.includes('aviationweather') ? reply('[{"icaoId":"EHAM"}]') : reply('ISS\n1 25544U\n2 25544\n')));
     expect(await (await route(new URL('https://api.example/metar?ids=eham'), {}, fetchFn)).json()).toEqual([{ icaoId: 'EHAM' }]);

@@ -12,6 +12,10 @@
 //   GET /tiles/openaip/<z>/<x>/<y>.png  aeronautical chart tiles (openAIP: airspaces, airports,
 //                                 navaids), cached 1 day; needs OPENAIP_API_KEY
 //
+// The flight feeds limit or refuse Cloudflare's servers, whose addresses many sites share. With
+// a flight relay (relay/api-relay.mjs) running on a machine of one's own, such as a Raspberry Pi at
+// home, they are asked through that instead.
+//
 // Nothing upstream is ever asked more than its cache allows: every answer is cached at the edge
 // and shared by all visitors, a backup of it is kept for 6 hours and served if the service
 // fails or limits us (rather than asking again), and each visitor may make at most
@@ -19,7 +23,9 @@
 //
 // Settings (wrangler.toml [vars] or secrets): ALLOWED_ORIGINS, a comma-separated list of sites
 // allowed to use it ("*" for any); OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET (optional) for an
-// OpenSky account's larger allowance; OPENAIP_API_KEY (optional) for the aeronautical chart.
+// OpenSky account's larger allowance; OPENAIP_API_KEY (optional) for the aeronautical chart;
+// FLIGHT_RELAY_URL and FLIGHT_RELAY_KEY (optional) for the flight relay: its public address and
+// the secret it was started with.
 
 const USER_AGENT = 'power-globe-api (https://github.com/PimDieks/Power-Globe)';
 const DEFAULT_ORIGINS = 'https://pimdieks.github.io,http://localhost:5173,http://localhost:4173';
@@ -31,6 +37,8 @@ const BACKUP_SECONDS = 6 * 3600;
 // Give up on a service after this long, and remember a failure for a while so that neither the
 // service nor visitors are kept waiting on it again straight away.
 const UPSTREAM_TIMEOUT_MS = 10_000;
+// Through the relay there is one more hop, the last of it up a home connection.
+const RELAY_TIMEOUT_MS = 20_000;
 const FAILURE_SECONDS = 120;
 // Requests a minute per visitor (counted per Worker instance, so roughly). Map tiles come many
 // at a time as the view moves, so they have their own, larger allowance.
@@ -45,6 +53,10 @@ export const ADSB_FEEDS = [
   { name: 'adsb.fi', military: 'https://opendata.adsb.fi/api/v2/mil', area: (lat, lon, nm) => `https://opendata.adsb.fi/api/v2/lat/${lat}/lon/${lon}/dist/${nm}` },
 ];
 
+// Asked through the flight relay when there is one; the same hosts as in relay/api-relay.mjs.
+export const RELAYED_HOSTS = ['opensky-network.org', 'auth.opensky-network.org', 'api.adsb.lol', 'api.airplanes.live', 'opendata.adsb.fi'];
+const relayOn = (env) => Boolean(env.FLIGHT_RELAY_URL && env.FLIGHT_RELAY_KEY);
+
 class HttpError extends Error {
   constructor(status, message) {
     super(message);
@@ -52,23 +64,31 @@ class HttpError extends Error {
   }
 }
 
-async function upstream(fetchFn, url, init = {}) {
+async function upstream(fetchFn, url, init = {}, env = {}) {
+  const { host, pathname, search } = new URL(url);
+  const relayed = relayOn(env) && RELAYED_HOSTS.includes(host);
+  const target = relayed ? `${env.FLIGHT_RELAY_URL.replace(/\/+$/, '')}/${host}${pathname}${search}` : url;
+  const via = relayed ? ' through the relay' : '';
   let res;
   try {
-    res = await fetchFn(url, { ...init, headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/plain, */*', ...init.headers }, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
+    res = await fetchFn(target, {
+      ...init,
+      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/plain, */*', ...init.headers, ...(relayed && { 'X-Relay-Key': env.FLIGHT_RELAY_KEY }) },
+      signal: AbortSignal.timeout(relayed ? RELAY_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS),
+    });
   } catch (err) {
-    throw new HttpError(502, `${new URL(url).host} unreachable (${err.message})`);
+    throw new HttpError(502, `${host} unreachable${via} (${err.message})`);
   }
-  if (!res.ok) throw new HttpError(res.status === 429 ? 429 : 502, `${new URL(url).host} answered ${res.status}`);
+  if (!res.ok) throw new HttpError(res.status === 429 ? 429 : 502, `${host} answered ${res.status}${via}`);
   return res;
 }
 
 // The first ADS-B feed that answers; if none does, an error saying what each one answered.
-async function fromFeeds(fetchFn, urlFor) {
+async function fromFeeds(fetchFn, urlFor, env) {
   const failures = [];
   for (const feed of ADSB_FEEDS) {
     try {
-      const res = await upstream(fetchFn, urlFor(feed));
+      const res = await upstream(fetchFn, urlFor(feed), {}, env);
       return { source: feed.name, data: await res.json() };
     } catch (err) {
       failures.push(err.message);
@@ -88,7 +108,7 @@ async function openskyHeaders(fetchFn, env) {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ grant_type: 'client_credentials', client_id: env.OPENSKY_CLIENT_ID, client_secret: env.OPENSKY_CLIENT_SECRET }),
-      });
+      }, env);
       const { access_token, expires_in } = await res.json();
       openskyToken = { value: access_token, expires: Date.now() + expires_in * 1000 };
     } catch (err) {
@@ -124,23 +144,30 @@ export async function route(url, env = {}, fetchFn = fetch) {
         routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/metar?ids=', '/satellites/<group>', '/forecast?', '/tiles/openaip/<z>/<x>/<y>.png'],
         opensky: openskyAccount(env) ? 'account' : 'anonymous',
         chart: env.OPENAIP_API_KEY ? 'openAIP' : 'no key',
+        relay: relayOn(env) ? 'on' : 'off',
       },
       300,
     );
   }
   if (path === '/flights/global') {
-    const res = await upstream(fetchFn, 'https://opensky-network.org/api/states/all?extended=1', { headers: await openskyHeaders(fetchFn, env) });
-    return json({ source: 'OpenSky Network', fetched: Date.now(), data: await res.json() }, openskySeconds(env));
+    const res = await upstream(fetchFn, 'https://opensky-network.org/api/states/all?extended=1', { headers: await openskyHeaders(fetchFn, env) }, env);
+    // Passed on unread: reading and rewriting the worldwide answer (over 1 MB) takes longer than
+    // the free plan's 10 ms of processing time per request.
+    const data = (await res.text()).trim();
+    if (!data.startsWith('{')) throw new HttpError(502, 'OpenSky answered without flights');
+    return new Response(`{"source":"OpenSky Network","fetched":${Date.now()},"data":${data}}`, {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${openskySeconds(env)}` },
+    });
   }
   if (path === '/flights/area') {
     // Snapped so nearby views share cached answers.
     const lat = Math.round(number(url.searchParams.get('lat'), -90, 90) * 4) / 4;
     const lon = Math.round(number(url.searchParams.get('lon'), -180, 180) * 4) / 4;
     const nm = Math.min(250, Math.ceil(number(url.searchParams.get('nm'), 1, 1000) / 25) * 25);
-    return json({ fetched: Date.now(), ...(await fromFeeds(fetchFn, (f) => f.area(lat, lon, nm))) }, 10);
+    return json({ fetched: Date.now(), ...(await fromFeeds(fetchFn, (f) => f.area(lat, lon, nm), env)) }, 10);
   }
   if (path === '/flights/military') {
-    return json({ fetched: Date.now(), ...(await fromFeeds(fetchFn, (f) => f.military)) }, 30);
+    return json({ fetched: Date.now(), ...(await fromFeeds(fetchFn, (f) => f.military, env)) }, 30);
   }
   if (path === '/metar') {
     const ids = (url.searchParams.get('ids') ?? '').toUpperCase();
