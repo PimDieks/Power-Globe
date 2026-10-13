@@ -1,7 +1,7 @@
 // Airports and their runways (from OurAirports, see scripts/build-airports.mjs), airport search,
 // and hourly ground conditions at airports from Open-Meteo.
 import { AIRPORT_VARIABLES, fetchAirportHourly, openMeteoOpen, parseTime } from './weather.js';
-import { SNAPSHOT_FRESH_MS, fetchSnapshot, withTimeout } from './api.js';
+import { SNAPSHOT_FRESH_MS, SNAPSHOT_TIMEOUT_MS, fetchSnapshot, withTimeout } from './api.js';
 
 // Case- and accent-insensitive form for matching, so "sao" finds "São Paulo".
 export const fold = (text) =>
@@ -117,37 +117,48 @@ const CACHE_MS = 60 * 60 * 1000;
 const weatherCache = new Map();
 
 // The site's own airport weather (major airports, every three hours, see build-data.mjs):
-// { built, end, get(ident) → series like Open-Meteo's hourly }, or null.
+// { built, end, get(ident) → series like Open-Meteo's hourly }, or null. A series says when the
+// copy was built (`builtAt`, in ms), so that what is shown can say how old it is.
 export function snapshotSeries(snapshot) {
   if (!snapshot?.times?.length || !snapshot.airports) return null;
   const variables = snapshot.variables ?? AIRPORT_VARIABLES;
+  const built = Date.parse(snapshot.built);
   return {
-    built: Date.parse(snapshot.built),
+    built,
     end: parseTime(snapshot.times.at(-1)),
     get(ident) {
       const rows = snapshot.airports[ident];
       if (!rows) return null;
-      return Object.fromEntries([['time', snapshot.times], ...variables.map((v, i) => [v, rows[i]])]);
+      return Object.fromEntries([['time', snapshot.times], ...variables.map((v, i) => [v, rows[i]]), ['builtAt', built]]);
     },
   };
 }
 
+// A copy that could not be had is not asked for again for this long.
+const SNAPSHOT_MISS_MS = 60_000;
 let snapshotPromise = null;
-// Only a copy that was found is kept: a failed fetch is tried again the next time.
+let snapshotMissedAt = -Infinity;
+// Only a copy that was found is kept. One that was not is asked for again after a minute, not on
+// every call.
 function airportSnapshot() {
-  snapshotPromise ??= fetchSnapshot('api/airport-weather.json')
-    .then(snapshotSeries)
-    .then((snapshot) => {
-      if (!snapshot) snapshotPromise = null;
-      return snapshot;
-    });
+  if (!snapshotPromise) {
+    if (Date.now() - snapshotMissedAt < SNAPSHOT_MISS_MS) return Promise.resolve(null);
+    snapshotPromise = fetchSnapshot('api/airport-weather.json')
+      .then(snapshotSeries)
+      .then((snapshot) => {
+        if (!snapshot) {
+          snapshotPromise = null;
+          snapshotMissedAt = Date.now();
+        }
+        return snapshot;
+      });
+  }
   return snapshotPromise;
 }
 
-// Fills `result` from the site's own data, if it is no older than `maxAge` and still reaches the
-// present; resolves to the airports in `list` it did not have.
-async function fromSnapshot(list, result, maxAge, now = Date.now()) {
-  const snapshot = await airportSnapshot();
+// Fills `result` from the site's own data (`snapshot`, see airportSnapshot), if it is no older than
+// `maxAge` and still reaches the present; returns the airports in `list` it did not have.
+function fromSnapshot(snapshot, list, result, maxAge, now = Date.now()) {
   if (!snapshot || now - snapshot.built > maxAge || snapshot.end < now) return list;
   return list.filter((a) => {
     const series = snapshot.get(a.ident);
@@ -158,8 +169,8 @@ async function fromSnapshot(list, result, maxAge, now = Date.now()) {
 
 // Hourly ground conditions for `airports`, fetching only those not cached: from the site's own
 // data while it is recent, else Open-Meteo (through the Power Globe API when Open-Meteo refuses),
-// else the site's data however old. When Open-Meteo cannot be asked at all, a list takes the
-// site's data however old first and sends only the airports it lacks to the Power Globe API.
+// else the site's data however old. When Open-Meteo cannot be asked for all of them, a list takes
+// the site's data however old first and sends only the airports it lacks on.
 // `preferLive` asks Open-Meteo first, and does not wait for the pacing but goes to the Power Globe
 // API (for the one airport being looked at, see fetchAirportHourly). `onData(map)` is called as
 // each batch arrives, so a long list can fill in progressively.
@@ -172,9 +183,12 @@ export async function airportWeather(airports, { onData, onProgress, onWait, pre
     if (cached && now - cached.at < CACHE_MS) result.set(a.ident, cached.hourly);
     else missing.push(a);
   }
+  // The site's copy, fetched at most once in this call.
+  let copy;
+  const snapshot = () => (copy ??= airportSnapshot());
   if (missing.length && !preferLive) {
-    missing = await fromSnapshot(missing, result, SNAPSHOT_FRESH_MS, now);
-    if (missing.length && !openMeteoOpen(missing.length)) missing = await fromSnapshot(missing, result, Infinity, now);
+    missing = fromSnapshot(await snapshot(), missing, result, SNAPSHOT_FRESH_MS, now);
+    if (missing.length && !openMeteoOpen(missing.length)) missing = fromSnapshot(await snapshot(), missing, result, Infinity, now);
   }
   if (result.size) onData?.(result);
   if (!missing.length) return result;
@@ -193,7 +207,7 @@ export async function airportWeather(airports, { onData, onProgress, onWait, pre
     });
   } catch (err) {
     const before = result.size;
-    await fromSnapshot(missing.filter((a) => !result.has(a.ident)), result, Infinity, now);
+    fromSnapshot(await snapshot(), missing.filter((a) => !result.has(a.ident)), result, Infinity, now);
     if (result.size === before) throw err;
     onData?.(result);
   }
@@ -204,7 +218,9 @@ export async function airportWeather(airports, { onData, onProgress, onWait, pre
 // Open-Meteo request shares one queue, so this one can sit behind slower ones, and one request can
 // take a while to be refused and passed on. After `timeoutMs` the site's own data, however old,
 // answers instead (once), while the request carries on; its answer, if it comes in the end, goes
-// to `onLate(hourly)`. Throws with the reason when there is nothing to show.
+// to `onLate(hourly)`, or answers in place of the site's data if it comes while that is being
+// fetched, which is itself given up on after SNAPSHOT_TIMEOUT_MS. Throws with the reason when there
+// is nothing to show.
 export async function airportPanelWeather(airport, { timeoutMs, onLate } = {}) {
   const request = airportWeather([airport], { preferLive: true }).then((weather) => weather.get(airport.ident));
   let hourly;
@@ -214,15 +230,24 @@ export async function airportPanelWeather(airport, { timeoutMs, onLate } = {}) {
     if (err.name !== 'TimeoutError') throw err;
     let late;
     let returned = false;
+    let arrived;
+    const lateAnswer = new Promise((resolve) => (arrived = resolve));
     request.then(
       (answer) => {
+        if (!answer) return;
         late = answer;
-        if (returned && answer) onLate?.(answer);
+        arrived();
+        if (returned) onLate?.(answer);
       },
       () => {},
     );
     const copy = new Map();
-    await fromSnapshot([airport], copy, Infinity);
+    const fromCopy = withTimeout(
+      airportSnapshot().then((snapshot) => fromSnapshot(snapshot, [airport], copy, Infinity)),
+      SNAPSHOT_TIMEOUT_MS,
+      'no copy in time',
+    ).catch(() => {});
+    await Promise.race([fromCopy, lateAnswer]);
     returned = true;
     hourly = late ?? copy.get(airport.ident);
     if (!hourly) throw err;

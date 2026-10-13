@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { assessAirport, assessRunwayEnd, formatWind, windComponents } from '../src/runways.js';
 import { conditionsAt, fold, searchAirports, toAirport } from '../src/airports.js';
-import { addHours, airportDetailsHtml, alongText, acrossText, escapeHtml, verdictText, windProblems } from '../src/airportview.js';
+import { addHours, airportDetailsHtml, alongText, acrossText, copyNote, escapeHtml, listCopyNote, panelStays, verdictText, windProblems } from '../src/airportview.js';
+import { SNAPSHOT_FRESH_MS, SNAPSHOT_TIMEOUT_MS } from '../src/api.js';
 import { presetFor, readLimits } from '../src/windcheck.js';
 import { buildAirportUrl, fetchAirportHourly, resetApiBudget } from '../src/weather.js';
 import { buildAirports, parseCsv, routeCounts } from '../scripts/build-airports.mjs';
@@ -189,6 +190,37 @@ describe('airport panels', () => {
     expect(html).not.toContain('No forecast for');
   });
 
+  it("says when the conditions come from an old copy of the site's data, and only then", () => {
+    const asOf = Date.parse('2026-10-13T12:00:00Z');
+    const copy = (hoursOld) => ({ ...hourly, builtAt: asOf - hoursOld * 3_600_000 });
+    const show = (data) =>
+      airportDetailsHtml({ airport: SINGLE, hourly: data, time, limits: LIMITS, limitsLabel: 'Regional', formatTime: (t) => `at ${t}`, formatHour: (t) => t.slice(11), asOf });
+    expect(show(copy(30))).toContain("From the site&#39;s own copy, built at 2026-10-12T06:00, as live data was not available.");
+    // Live data, and a copy recent enough to be used instead of asking, say nothing.
+    expect(show(hourly)).not.toContain('own copy');
+    expect(show(copy(2))).not.toContain('own copy');
+    expect(show({ ...hourly, builtAt: asOf - SNAPSHOT_FRESH_MS })).not.toContain('own copy');
+    expect(show({ ...hourly, builtAt: asOf - SNAPSHOT_FRESH_MS - 1 })).toContain('own copy');
+  });
+
+  it('gives the wind check the age of the oldest old copy among its airports', () => {
+    const asOf = Date.parse('2026-10-13T12:00:00Z');
+    const copy = (hoursOld) => ({ ...hourly, builtAt: asOf - hoursOld * 3_600_000 });
+    const formatTime = (t) => `at ${t}`;
+    expect(listCopyNote([hourly, copy(2), copy(30), copy(50)], formatTime, asOf)).toBe(
+      "Some are from the site's own copy, built at 2026-10-11T10:00, as live data was not available.",
+    );
+    expect(listCopyNote([hourly, copy(2)].values(), formatTime, asOf)).toBe('');
+    expect(copyNote(copy(2), formatTime, asOf)).toBe('');
+  });
+
+  it("leaves the panel alone when an open airport's label is tapped, unless it is showing an error", () => {
+    expect(panelStays({ airport: SINGLE, error: null }, SINGLE)).toBe(true);
+    expect(panelStays({ airport: SINGLE, error: 'no answer in time' }, SINGLE)).toBe(false);
+    expect(panelStays({ airport: SCHIPHOL, error: null }, SINGLE)).toBe(false);
+    expect(panelStays(null, SINGLE)).toBe(false);
+  });
+
   it('describes components with gusts in brackets', () => {
     const end = assessRunwayEnd(270, { direction: 300, speed: 20, gust: 30 }, LIMITS);
     expect(alongText(end)).toBe('H 17 (26)');
@@ -259,6 +291,14 @@ describe('airport weather requests', () => {
   });
 });
 
+// A time of day far from 00:00 GMT, so that tests which compute the day or the end of a copy of the
+// data from the clock, and then advance the fake timers, cannot run across a change of day.
+const NOW = Date.parse('2026-10-13T12:00:00Z');
+const useClock = () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
+};
+
 describe('airport weather when Open-Meteo refuses', () => {
   const DAILY_LIMIT = 'Daily API request limit exceeded. Please try again tomorrow.';
   const OPEN_METEO = 'https://api.open-meteo.com/';
@@ -289,10 +329,14 @@ describe('airport weather when Open-Meteo refuses', () => {
       if (url.includes('airport-weather.json')) return snapshot ? { ok: true, json: async () => snapshot } : missing;
       throw new Error(`unexpected request ${url}`);
     });
+  const locationsIn = (url) => new URL(url).searchParams.get('latitude').split(',').length;
   const askedOpenMeteo = (fetchMock) => fetchMock.mock.calls.filter(([url]) => String(url).startsWith(OPEN_METEO)).length;
+  // The locations asked of Open-Meteo, one number per request.
+  const askedOpenMeteoFor = (fetchMock) => fetchMock.mock.calls.filter(([url]) => String(url).startsWith(OPEN_METEO)).map(([url]) => locationsIn(url));
   // The locations asked of the Power Globe API, one number per request.
   const askedProxy = (fetchMock) =>
-    fetchMock.mock.calls.filter(([url]) => !String(url).startsWith(OPEN_METEO) && String(url).includes('/forecast?')).map(([url]) => new URL(url).searchParams.get('latitude').split(',').length);
+    fetchMock.mock.calls.filter(([url]) => !String(url).startsWith(OPEN_METEO) && String(url).includes('/forecast?')).map(([url]) => locationsIn(url));
+  const copyRequests = (fetchMock) => fetchMock.mock.calls.filter(([url]) => String(url).includes('airport-weather.json')).length;
   // This browser has used `used` of its share of the day; returns what gets written back.
   const shareUsed = (used) => {
     const day = new Date().toISOString().slice(0, 10);
@@ -322,13 +366,13 @@ describe('airport weather when Open-Meteo refuses', () => {
     return settled;
   };
 
+  beforeEach(useClock);
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
   it('asks the Power Globe API for the next airport instead of waiting for the limit to reset', async () => {
-    vi.useFakeTimers();
     const fetchMock = services();
     vi.stubGlobal('fetch', fetchMock);
     const { airportWeather } = await fresh();
@@ -341,7 +385,6 @@ describe('airport weather when Open-Meteo refuses', () => {
   });
 
   it('does the same for long lists, without pacing them', async () => {
-    vi.useFakeTimers();
     const fetchMock = services();
     vi.stubGlobal('fetch', fetchMock);
     const { airportWeather } = await fresh();
@@ -355,7 +398,6 @@ describe('airport weather when Open-Meteo refuses', () => {
   });
 
   it('does not wait for the rest of the day once this browser has used its share', async () => {
-    vi.useFakeTimers();
     const day = new Date().toISOString().slice(0, 10);
     vi.stubGlobal('localStorage', { getItem: () => JSON.stringify({ day, used: 4_990 }), setItem: () => {} });
     vi.stubGlobal('fetch', services({ openMeteo: true }));
@@ -364,7 +406,6 @@ describe('airport weather when Open-Meteo refuses', () => {
   });
 
   it('still paces a list to the per-minute allowance, but not the airport being looked at', async () => {
-    vi.useFakeTimers();
     vi.stubGlobal('fetch', services({ openMeteo: true }));
     const { airportWeather, fetchHourly, buildGrid } = await fresh();
     // 590 of the 600 locations a minute are spent.
@@ -400,7 +441,6 @@ describe('airport weather when Open-Meteo refuses', () => {
   });
 
   it('sends the airport being looked at to the Power Globe API, not Open-Meteo, when the minute is used up', async () => {
-    vi.useFakeTimers();
     const fetchMock = services({ openMeteo: true });
     vi.stubGlobal('fetch', fetchMock);
     const { airportWeather, fetchHourly, buildGrid } = await fresh();
@@ -414,7 +454,6 @@ describe('airport weather when Open-Meteo refuses', () => {
   });
 
   it('lets the airport being looked at use the locations a list leaves free', async () => {
-    vi.useFakeTimers();
     const fetchMock = services({ openMeteo: true });
     vi.stubGlobal('fetch', fetchMock);
     const { airportWeather, fetchHourly, buildGrid } = await fresh();
@@ -427,7 +466,6 @@ describe('airport weather when Open-Meteo refuses', () => {
   });
 
   it("does not ask Open-Meteo for a list the rest of the day's share cannot cover, nor pace it", async () => {
-    vi.useFakeTimers();
     const writes = shareUsed(4_900);
     const fetchMock = services({ openMeteo: true });
     vi.stubGlobal('fetch', fetchMock);
@@ -444,7 +482,6 @@ describe('airport weather when Open-Meteo refuses', () => {
   });
 
   it("keeps the day's last 20 locations for the airport being looked at", async () => {
-    vi.useFakeTimers();
     shareUsed(4_985);
     const fetchMock = services({ openMeteo: true });
     vi.stubGlobal('fetch', fetchMock);
@@ -457,7 +494,6 @@ describe('airport weather when Open-Meteo refuses', () => {
   });
 
   it("takes the site's copy however old before the Power Globe API, which only gets the airports it lacks", async () => {
-    vi.useFakeTimers();
     const fetchMock = services({ snapshot: oldSnapshot(['XAK1', 'XAK2', 'XAK3']) });
     vi.stubGlobal('fetch', fetchMock);
     const { airportWeather } = await fresh();
@@ -472,15 +508,76 @@ describe('airport weather when Open-Meteo refuses', () => {
     expect(askedOpenMeteo(fetchMock)).toBe(1);
   });
 
-  it("asks for the site's copy again after it could not be had, instead of remembering the failure", async () => {
+  it("takes the site's copy first for the whole of a long list once Open-Meteo cannot be asked for all of it", async () => {
+    // 150 locations are left of the day: the first 100 could be asked, but the last 100 of 250 could not.
+    shareUsed(4_850);
+    const ids = Array.from({ length: 250 }, (_, i) => `XAN${i}`);
+    const fetchMock = services({ openMeteo: true, snapshot: oldSnapshot(ids) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { airportWeather } = await fresh();
+    const weather = await airportWeather(ids.map(field));
+    expect(weather.size).toBe(250);
+    expect(askedOpenMeteo(fetchMock)).toBe(0);
+    expect(askedProxy(fetchMock)).toEqual([]);
+  });
+
+  it("sends on only the airports the site's copy lacks, to Open-Meteo while the day's share covers them", async () => {
+    shareUsed(4_850);
+    const ids = Array.from({ length: 250 }, (_, i) => `XAO${i}`);
+    const fetchMock = services({ openMeteo: true, snapshot: oldSnapshot(ids.slice(0, 200)) });
+    vi.stubGlobal('fetch', fetchMock);
+    const { airportWeather } = await fresh();
+    expect((await airportWeather(ids.map(field))).size).toBe(250);
+    expect(askedOpenMeteoFor(fetchMock)).toEqual([50]);
+    expect(askedProxy(fetchMock)).toEqual([]);
+  });
+
+  it("remembers for a minute that the site's copy could not be had, then asks for it again", async () => {
     let snapshot = null;
     const fetchMock = services({ proxy: false });
-    vi.stubGlobal('fetch', async (url) => (String(url).includes('airport-weather.json') && snapshot ? { ok: true, json: async () => snapshot } : fetchMock(url)));
+    const stub = vi.fn(async (url) => (String(url).includes('airport-weather.json') && snapshot ? { ok: true, json: async () => snapshot } : fetchMock(url)));
+    vi.stubGlobal('fetch', stub);
     const { airportWeather } = await fresh();
     await expect(airportWeather([field('XAL1')], { preferLive: true })).rejects.toThrow();
+    expect(copyRequests(stub)).toBe(1);
+    // It is there now, but not asked for again yet.
     snapshot = oldSnapshot(['XAL1']);
+    await expect(airportWeather([field('XAL1')], { preferLive: true })).rejects.toThrow();
+    expect(copyRequests(stub)).toBe(1);
+    await vi.advanceTimersByTimeAsync(61_000);
     const weather = await airportWeather([field('XAL1')], { preferLive: true });
+    expect(copyRequests(stub)).toBe(2);
     expect(weather.get('XAL1').wind_speed_10m).toEqual([7]);
+  });
+
+  it("asks for a missing site copy once for a list, though the list looks at it three times", async () => {
+    const fetchMock = services({ proxy: false });
+    vi.stubGlobal('fetch', fetchMock);
+    const { airportWeather } = await fresh();
+    // The first request finds out the limit is reached.
+    await expect(airportWeather([field('XAM0')], { preferLive: true })).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(61_000);
+    const before = copyRequests(fetchMock);
+    // The list looks for recent data, then for data of any age, then again after the Power Globe API fails.
+    await expect(airportWeather([field('XAM1')])).rejects.toThrow();
+    expect(copyRequests(fetchMock) - before).toBe(1);
+  });
+
+  it('does not make a request that skips Open-Meteo wait behind the ones queued for it', async () => {
+    let stalled = false;
+    const fetchMock = services({ openMeteo: true });
+    vi.stubGlobal('fetch', (url) => (stalled && String(url).startsWith(OPEN_METEO) ? new Promise(() => {}) : fetchMock(url)));
+    const { fetchAirportHourly, fetchHourly, buildGrid } = await fresh();
+    // The minute's allowance is used up, so the airport being looked at skips Open-Meteo.
+    await fetchHourly(buildGrid(10).slice(0, 600));
+    stalled = true;
+    fetchHourly([{ lat: 1, lng: 2 }]);
+    fetchHourly([{ lat: 3, lng: 4 }]);
+    const batches = [];
+    const request = fetchAirportHourly([field('XAP1')], { preferLive: true, onBatch: (part) => batches.push(part.length) });
+    expect(await settlesWithin(request, 1_000)).toBe(true);
+    expect(batches).toEqual([1]);
+    expect(askedProxy(fetchMock)).toEqual([1]);
   });
 });
 
@@ -488,10 +585,13 @@ describe('the airport panel never waits for ever', () => {
   const OPEN_METEO = 'https://api.open-meteo.com/';
   const field = (id) => toAirport([id, '', `Field ${id}`, 'Nowhere', 'GB', 51, 0, 10, 0, 1, [['09', 90, '27', 270, 6000, 'ASP']]]);
   const live = { time: ['2026-10-13T00:00'], temperature_2m: [9], dew_point_2m: [8], wind_speed_10m: [5], wind_direction_10m: [270], wind_gusts_10m: [8] };
-  // Open-Meteo answers only when `release()` is called; the site's copy, if any, at once.
-  const setup = async (copy) => {
+  // Open-Meteo answers only when `release()` is called. The site's copy, if any, comes at once, or
+  // when `releaseCopy()` is called with `holds`, or never with `stalls`.
+  const setup = async (copy, { holds = false, stalls = false } = {}) => {
     let release;
+    let releaseCopy;
     const held = new Promise((resolve) => (release = resolve));
+    const heldCopy = new Promise((resolve) => (releaseCopy = resolve));
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url) => {
@@ -500,27 +600,47 @@ describe('the airport panel never waits for ever', () => {
           await held;
           return { ok: true, json: async () => ({ hourly: live }) };
         }
-        if (url.includes('airport-weather.json') && copy) return { ok: true, json: async () => copy };
+        if (url.includes('airport-weather.json')) {
+          if (stalls) return new Promise(() => {});
+          if (holds) await heldCopy;
+          if (copy) return { ok: true, json: async () => copy };
+        }
         return { ok: false, status: 404, json: async () => ({}) };
       }),
     );
     vi.resetModules();
-    return { ...(await import('../src/airports.js')), release };
+    return { ...(await import('../src/airports.js')), release, releaseCopy };
+  };
+  const oldCopy = (ident) => {
+    const end = new Date(Date.now() + 86_400_000).toISOString().slice(0, 16);
+    return { built: '2026-10-01T00:00Z', times: [end], airports: { [ident]: [[9], [8], [7], [270], [8]] } };
+  };
+  // Whether `promise` has settled after `ms` of fake time.
+  const settlesWithin = async (promise, ms) => {
+    let settled = false;
+    promise.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    await vi.advanceTimersByTimeAsync(ms);
+    return settled;
   };
 
+  beforeEach(useClock);
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
   it("shows the site's copy when the request does not answer in time, and the real answer if it comes later", async () => {
-    vi.useFakeTimers();
-    const end = new Date(Date.now() + 86_400_000).toISOString().slice(0, 16);
-    const { airportPanelWeather, release } = await setup({ built: '2026-10-01T00:00Z', times: [end], airports: { XPA1: [[9], [8], [7], [270], [8]] } });
+    const { airportPanelWeather, release } = await setup(oldCopy('XPA1'));
     const onLate = vi.fn();
     const panel = airportPanelWeather(field('XPA1'), { timeoutMs: 45_000, onLate });
     await vi.advanceTimersByTimeAsync(45_000);
-    expect((await panel).wind_speed_10m).toEqual([7]);
+    const shown = await panel;
+    expect(shown.wind_speed_10m).toEqual([7]);
+    // The panel can tell how old the copy is.
+    expect(shown.builtAt).toBe(Date.parse('2026-10-01T00:00Z'));
     expect(onLate).not.toHaveBeenCalled();
     release();
     await vi.advanceTimersByTimeAsync(0);
@@ -529,7 +649,6 @@ describe('the airport panel never waits for ever', () => {
   });
 
   it('says it had no answer when there is no copy either, but still hands over a late answer', async () => {
-    vi.useFakeTimers();
     const { airportPanelWeather, release } = await setup(null);
     const onLate = vi.fn();
     const panel = airportPanelWeather(field('XPB1'), { timeoutMs: 45_000, onLate });
@@ -539,6 +658,33 @@ describe('the airport panel never waits for ever', () => {
     release();
     await vi.advanceTimersByTimeAsync(0);
     expect(onLate.mock.calls[0][0].wind_speed_10m).toEqual([5]);
+  });
+
+  it('gives up on a site copy that does not come, and still hands over a late answer', async () => {
+    const { airportPanelWeather, release } = await setup(null, { stalls: true });
+    const onLate = vi.fn();
+    const panel = airportPanelWeather(field('XPC1'), { timeoutMs: 45_000, onLate });
+    // The copy is given up on after SNAPSHOT_TIMEOUT_MS, even if the download itself never ends.
+    expect(await settlesWithin(panel, 45_000 + SNAPSHOT_TIMEOUT_MS)).toBe(true);
+    await expect(panel).rejects.toThrow('no answer in time');
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onLate).toHaveBeenCalledTimes(1);
+    expect(onLate.mock.calls[0][0].wind_speed_10m).toEqual([5]);
+  });
+
+  it('shows the real answer when it comes while the site copy is being fetched', async () => {
+    const { airportPanelWeather, release, releaseCopy } = await setup(oldCopy('XPD1'), { holds: true });
+    const onLate = vi.fn();
+    const panel = airportPanelWeather(field('XPD1'), { timeoutMs: 45_000, onLate });
+    expect(await settlesWithin(panel, 45_000)).toBe(false);
+    release();
+    expect(await settlesWithin(panel, 0)).toBe(true);
+    expect((await panel).wind_speed_10m).toEqual([5]);
+    // The copy arriving after that changes nothing, and the answer is not handed over twice.
+    releaseCopy();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onLate).not.toHaveBeenCalled();
   });
 });
 
