@@ -5,6 +5,7 @@ const FT_PER_M = 3.28084;
 const KT_PER_MS = 1.943844;
 const FPM_PER_MS = 196.8504;
 const EARTH_RADIUS_M = 6_371_000;
+const M_PER_FT = 0.3048;
 const RAD = Math.PI / 180;
 // Positions are moved along the aircraft's track for at most this long after the last report.
 const MAX_ESTIMATE_S = 600;
@@ -114,6 +115,15 @@ export function estimatePosition(ac, now) {
   const lat2 = Math.asin(Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(bearing));
   const lng2 = lng1 + Math.atan2(Math.sin(bearing) * Math.sin(d) * Math.cos(lat1), Math.cos(d) - Math.sin(lat1) * Math.sin(lat2));
   return { lat: lat2 / RAD, lng: ((((lng2 / RAD + 180) % 360) + 360) % 360) - 180 };
+}
+
+// How far above the surface an aircraft is drawn, in globe radii. Its true height, so nothing
+// jumps at take-off or touchdown. On the ground it is at the surface whatever its barometric
+// altitude says (that is not a height above the map), and an altitude that is negative or
+// missing never puts it below the surface.
+export function drawnAltitude(ac) {
+  if (ac.onGround || !Number.isFinite(ac.altitudeFt)) return 0;
+  return (Math.max(0, ac.altitudeFt) * M_PER_FT) / EARTH_RADIUS_M;
 }
 
 // Every aircraft heard from any feed, by ICAO 24-bit address. Each report replaces an older one;

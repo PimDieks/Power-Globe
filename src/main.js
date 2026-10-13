@@ -700,6 +700,7 @@ function showTraffic(item, title) {
   syncWindCheckButton();
   state.detail = { traffic: item };
   mapFeatures.setMarker(null);
+  airportMap.select(null);
   els.details.classList.remove('hidden');
   els.details.classList.add('keep-awake');
   els.detailsBack.hidden = true;
@@ -743,6 +744,7 @@ async function showDetails(lat, lng, name, pinLabel = name) {
   state.detail = detail;
   const title = name ?? coords(lat, lng);
   mapFeatures.setMarker({ lat, lng, name: pinLabel });
+  airportMap.select(null);
   els.details.classList.remove('hidden', 'keep-awake');
   els.detailsBack.hidden = true;
   els.detailsTitle.textContent = title;
@@ -801,7 +803,9 @@ async function showAirport(airport, { fromList = false } = {}) {
   // no forecast, once it is known.
   const detail = { airport, hourly: null, fromList, observation: undefined, error: null };
   state.detail = detail;
-  mapFeatures.setMarker({ lat: airport.lat, lng: airport.lng, name: airport.iata || airport.ident });
+  // The airport's own label on the map shows it is open (see airportmap.js): no pin of its own.
+  mapFeatures.setMarker(null);
+  airportMap.select(airport);
   els.details.classList.remove('hidden');
   // A tool to read, so it stays on screen rather than fading with the other controls.
   els.details.classList.add('keep-awake');
@@ -850,6 +854,7 @@ function closeDetails() {
   els.details.classList.add('hidden');
   els.details.classList.remove('keep-awake');
   mapFeatures.setMarker(null);
+  airportMap.select(null);
 }
 
 // Airport tools show the present rather than wherever the autoplay happened to be.
