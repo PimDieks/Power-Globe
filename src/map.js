@@ -157,6 +157,8 @@ function setupChartLayer(globe) {
     return engine;
   };
   globe.scene().add(engine);
+  let scheduledAt = 0;
+  let movingSince = 0;
   let settle = null;
   // Counts the times the chart was cleared, so tiles still being retried for the old one stop.
   let version = 0;
@@ -182,6 +184,12 @@ function setupChartLayer(globe) {
     // zooming: far fewer requests to the chart's service.
     update() {
       if (!engine.visible) return;
+      // A view that never settles (the camera following an aircraft) still updates about once a
+      // second: once the update has been put off that long, the pending one is left to run.
+      const now = performance.now();
+      if (now - scheduledAt > 250) movingSince = now;
+      if (now - movingSince > 1000) return;
+      scheduledAt = now;
       clearTimeout(settle);
       settle = setTimeout(() => {
         withRetries(() => engine.updatePov(globe.camera()));

@@ -21,6 +21,9 @@ const MAX_AIRPORTS = 60;
 // Airports whose weather is looked up at a time, nearest to the middle of the view first.
 const MAX_WEATHER = 25;
 const SETTLE_MS = 350;
+// A camera that keeps moving (one following an aircraft) never settles; the map updates this
+// often meanwhile.
+const MOVING_UPDATE_MS = 1000;
 // After the weather could not be had for an airport, no new lookup for it for this long, so that
 // every view change does not send the same failing request again. It is asked again by itself
 // when this is over.
@@ -96,6 +99,8 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
   let labelled = [];
   let pov = null;
   let timer = null;
+  // Updates the map even if the camera does not settle (see MOVING_UPDATE_MS).
+  let moving = null;
   let active = false;
   // Airports whose weather is being looked up, and those it could not be had for, until when.
   const looking = new Set();
@@ -114,11 +119,14 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     clearTimeout(timer);
     timer = null;
     if (next.altitude >= AIRPORT_LABEL_ALTITUDE) {
+      clearTimeout(moving);
+      moving = null;
       if (active) clear();
       else showAlone();
       return;
     }
     timer = setTimeout(update, SETTLE_MS);
+    moving ??= setTimeout(update, MOVING_UPDATE_MS);
   }
 
   // Updates again by itself when the first airport in view that is waiting to be asked again may
@@ -181,7 +189,10 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
   }
 
   async function update() {
+    clearTimeout(timer);
     timer = null;
+    clearTimeout(moving);
+    moving = null;
     if (!pov || pov.altitude >= AIRPORT_LABEL_ALTITUDE) return;
     airports ??= await loadAirports().catch(() => null);
     if (!airports) return;
