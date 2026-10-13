@@ -3,6 +3,7 @@ import SlippyMap from 'three-slippy-map-globe';
 import { PROXY_URL } from './api.js';
 import { CITIES, labelTier } from './cities.js';
 import { STATUS } from './runways.js';
+import { retryingTextureLoad, withLoad } from './tileretry.js';
 
 // Daily cloud imagery is used up to this tile level (about 300 m per pixel).
 const CLOUDS_MAX_LEVEL = 9;
@@ -174,6 +175,23 @@ function seeThroughNoData(engine, active) {
   };
 }
 
+let blankImage = null;
+// A transparent pixel, for a tile that cannot be had.
+function blank() {
+  if (!blankImage) {
+    blankImage = document.createElement('canvas');
+    blankImage.width = blankImage.height = 1;
+  }
+  return blankImage;
+}
+
+// Runs `fn`, a call into a tile engine, with the tile loads it starts retried when they fail (see
+// tileretry.js). The engine loads its tiles with a TextureLoader of its own, out of reach.
+function withTileRetries(fn, isStale) {
+  const load = retryingTextureLoad({ ImageLoader: THREE.ImageLoader, Texture: THREE.Texture, blank, isStale });
+  withLoad(THREE.TextureLoader.prototype, load, fn);
+}
+
 // A layer of transparent map tiles over the globe's own (three-globe has room for one).
 // `set({ url, maxLevel })` shows a chart, `set(null)` removes it; call `update()` as the camera
 // moves.
@@ -200,16 +218,25 @@ function setupChartLayer(globe) {
   };
   globe.scene().add(engine);
   let settle = null;
+  // Counts the times the chart was cleared, so tiles still being retried for the old one stop.
+  let version = 0;
+  const withRetries = (fn) => {
+    const mine = version;
+    withTileRetries(fn, () => version !== mine);
+  };
 
   return {
     engine,
     set(chart) {
+      version++;
       engine.clearTiles();
       engine.visible = Boolean(chart);
       if (!chart) return;
       engine.maxLevel = chart.maxLevel;
-      engine.tileUrl = chart.url;
-      engine.updatePov(globe.camera());
+      withRetries(() => {
+        engine.tileUrl = chart.url;
+        engine.updatePov(globe.camera());
+      });
     },
     // Tiles are asked for once the view settles, not for every level passed on the way while
     // zooming: far fewer requests to the chart's service.
@@ -217,7 +244,7 @@ function setupChartLayer(globe) {
       if (!engine.visible) return;
       clearTimeout(settle);
       settle = setTimeout(() => {
-        engine.updatePov(globe.camera());
+        withRetries(() => engine.updatePov(globe.camera()));
         showLevel();
       }, 250);
     },
