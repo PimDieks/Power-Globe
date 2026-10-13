@@ -28,9 +28,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # A fallback copy of the satellite elements; the site works without it.
+      - id: pages
+        uses: actions/configure-pages@v5
+      # The satellite elements. CelesTrak answers each group once every two hours at most, so
+      # this reuses the copy already published at the site's address (a fork's own) while it is
+      # that young, and keeps a group's published file when CelesTrak refuses. The site works
+      # without it.
       - run: npm run satellites
         continue-on-error: true
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
       # The site's own data API (forecast and airport weather); the site works without it.
       - run: npm run data
         continue-on-error: true
@@ -39,7 +46,6 @@ jobs:
           # The Power Globe API (api/worker.js): this site's is built in (src/api.js); a fork
           # sets the repository variable API_URL to its own, e.g. https://power-globe-api.<account>.workers.dev
           VITE_API_URL: ${{ vars.API_URL }}
-      - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
