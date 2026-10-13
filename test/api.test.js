@@ -5,7 +5,7 @@ import { bearingBetween, destination, placeLabels, runwayEnds, runwayStatus } fr
 import { conditionsAt, snapshotSeries, toAirport } from '../src/airports.js';
 import { assessVariable, observationHtml } from '../src/airportview.js';
 import { airportsInView, metresPerPixel } from '../src/airportmap.js';
-import { withTimeout } from '../src/api.js';
+import { SNAPSHOT_TIMEOUT_MS, fetchSnapshot, withTimeout } from '../src/api.js';
 
 const LIMITS = { crosswind: 25, tailwind: 10 };
 const SCHIPHOL = toAirport([
@@ -221,6 +221,30 @@ describe('never loading for ever', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("the site's own data", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('gives up on a download that does not finish, and says there is no copy', async () => {
+    // The timeout is a real one (AbortSignal.timeout), so stand in for it to see what it does.
+    const timeout = new AbortController();
+    const spy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(timeout.signal);
+    vi.stubGlobal('fetch', (url, init) => new Promise((resolve, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal.reason))));
+    const download = fetchSnapshot('api/airport-weather.json');
+    expect(spy).toHaveBeenCalledWith(SNAPSHOT_TIMEOUT_MS);
+    timeout.abort(new DOMException('The operation timed out', 'TimeoutError'));
+    expect(await download).toBeNull();
+  });
+
+  it('gives the file when it is there, and null when it is not', async () => {
+    vi.stubGlobal('fetch', async (url) => (url.endsWith('/there.json') ? { ok: true, json: async () => ({ built: 'now' }) } : { ok: false, status: 404 }));
+    expect(await fetchSnapshot('api/there.json')).toEqual({ built: 'now' });
+    expect(await fetchSnapshot('api/missing.json')).toBeNull();
   });
 });
 

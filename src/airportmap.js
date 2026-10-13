@@ -21,8 +21,9 @@ const MAX_AIRPORTS = 60;
 // Airports whose weather is looked up at a time, nearest to the middle of the view first.
 const MAX_WEATHER = 25;
 const SETTLE_MS = 350;
-// After the weather could not be had for the airports in view, no new lookup for this long, so
-// that every view change does not send the same failing request again.
+// After the weather could not be had for an airport, no new lookup for it for this long, so that
+// every view change does not send the same failing request again. It is asked again by itself
+// when this is over.
 export const WEATHER_RETRY_MS = 30_000;
 
 const DEG = Math.PI / 180;
@@ -86,9 +87,10 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
   let labelled = [];
   let pov = null;
   let timer = null;
-  let request = 0;
   let active = false;
-  let retryAt = 0;
+  // Airports whose weather is being looked up, and those it could not be had for, until when.
+  const looking = new Set();
+  const retryAt = new Map();
 
   function aspect() {
     return window.innerWidth / window.innerHeight;
@@ -98,11 +100,21 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
   function view(next) {
     pov = next;
     clearTimeout(timer);
+    timer = null;
     if (next.altitude >= AIRPORT_LABEL_ALTITUDE) {
       if (active) clear();
       return;
     }
     timer = setTimeout(update, SETTLE_MS);
+  }
+
+  // Updates again by itself when the first airport in view that is waiting to be asked again may
+  // be, unless an update is already coming (the camera moving schedules its own).
+  function retryWhenDue() {
+    if (timer) return;
+    const now = Date.now();
+    const due = shown.filter((a) => !weather.has(a.ident) && retryAt.get(a.ident) > now).map((a) => retryAt.get(a.ident));
+    if (due.length) timer = setTimeout(update, Math.min(...due) - now);
   }
 
   function clear() {
@@ -114,6 +126,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
   }
 
   async function update() {
+    timer = null;
     if (!pov || pov.altitude >= AIRPORT_LABEL_ALTITUDE) return;
     airports ??= await loadAirports().catch(() => null);
     if (!airports) return;
@@ -121,21 +134,29 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     labelled = airportsToLabel(airports, pov, aspect());
     shown = pov.altitude < RUNWAY_ALTITUDE ? airportsInView(airports, pov, aspect()) : [];
     render();
-    // Weather for the nearest airports with runways shown and not looked up yet: the site's
-    // own data where it has them, else Open-Meteo.
-    const missing = shown.filter((a) => !weather.has(a.ident)).slice(0, MAX_WEATHER);
-    if (!missing.length || Date.now() < retryAt) return;
-    const id = ++request;
+    // Weather for the nearest airports with runways shown and not looked up yet (and not being
+    // looked up, or waiting to be asked again): the site's own data where it has them, else
+    // Open-Meteo.
+    const now = Date.now();
+    const missing = shown
+      .filter((a) => !weather.has(a.ident) && !looking.has(a.ident) && !(retryAt.get(a.ident) > now))
+      .slice(0, MAX_WEATHER);
+    retryWhenDue();
+    if (!missing.length) return;
+    for (const a of missing) looking.add(a.ident);
     try {
       await airportWeather(missing, {
         onData: (data) => {
           for (const [ident, hourly] of data) weather.set(ident, hourly);
-          if (id === request) render();
+          render();
         },
       });
     } catch (err) {
-      retryAt = Date.now() + WEATHER_RETRY_MS;
+      for (const a of missing) if (!weather.has(a.ident)) retryAt.set(a.ident, Date.now() + WEATHER_RETRY_MS);
+      retryWhenDue();
       console.error('Could not load weather for runways', err);
+    } finally {
+      for (const a of missing) looking.delete(a.ident);
     }
   }
 

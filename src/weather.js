@@ -272,14 +272,16 @@ export const AIRPORT_RESERVE = 20;
 export const AIRPORT_SNAPSHOT_STEP = 3;
 const BUDGET_POLL_MS = 2000;
 
-// Whether Open-Meteo may be asked at all for the next part of `count` airports. It may not while it
-// has asked us to stop (a minute for the per-minute limit, an hour or until the next day for the
-// others) or while this browser's share of the day cannot cover the part: waiting does not help
-// then, and the Power Globe API answers instead. A list also leaves the reserve free for the
-// airport someone is looking at (`preferLive`, which may use it). The per-minute and per-hour
-// allowances are a separate matter: they refill, so a list waits for them.
+// Whether Open-Meteo may be asked at all for `count` airports, which are sent a part at a time. It
+// may not while it has asked us to stop (a minute for the per-minute limit, an hour or until the
+// next day for the others) or while this browser's share of the day cannot cover them: waiting
+// does not help then, and the Power Globe API answers instead. The share shrinks as the parts go
+// out, so the last part is the first to find it closed, and the whole count is what counts. A list
+// also leaves the reserve free for the airport someone is looking at (`preferLive`, which may use
+// it). The per-minute and per-hour allowances are a separate matter: they refill, so a list waits
+// for them.
 export function openMeteoOpen(count, { preferLive = false } = {}, now = Date.now()) {
-  const room = Math.min(count, CHUNK_SIZE) + (preferLive ? 0 : AIRPORT_RESERVE);
+  const room = count + (preferLive ? 0 : AIRPORT_RESERVE);
   return now >= pausedUntil && DAILY_BUDGET - usedToday(now) >= room;
 }
 
