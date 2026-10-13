@@ -5,6 +5,12 @@ An open-source, interactive 3D globe that visualizes temperature and other weath
 - **Airport conditions:** search any of about 5,000 airports by name, city or ICAO/IATA code (`EHAM`, `JFK`) to fly down to its runways and see the ground conditions at the time on the timeline: temperature, dew point (with the spread, and a fog hint when it is small), wind speed, direction and gusts in knots. Every runway end gets its headwind or tailwind and crosswind, gusts included, with crosswind and tailwind checked against your limits (headwind is shown but not limited), plus an outlook for the next 24 hours.
 - **Wind check:** a list of the major airports (about 1,150 large airports with scheduled flights) where wind and gusts put every runway marginal or over the crosswind and tailwind limits, worst first, and marked on the globe. Pick limits for light aircraft, regional or airliner operations or set your own; they are remembered. The list follows the timeline. All airports take a few minutes to load on the free weather API, so choose which come first: those **nearest to the view** (the airports around where you are looking come in at once, and moving the globe while it loads moves the check along) or the **most connected** (airports with routes to the most other airports, where most flights go).
 
+- **Live traffic, each behind its own toggle:**
+  - **Flights:** every aircraft broadcasting ADS-B, worldwide from the [OpenSky Network](https://opensky-network.org/) every five minutes (its free anonymous allowance is about 100 worldwide requests a day), and, zoomed in, the area in view every 15 seconds from [adsb.lol](https://adsb.lol/) (falling back to [airplanes.live](https://airplanes.live/) and [adsb.fi](https://adsb.fi/)). Between reports each aircraft moves along its track at its ground speed, drawn as a plane pointing where it is heading.
+  - **Military flights:** the worldwide military feed from the same ADS-B networks, in their own colour. Only aircraft that broadcast ADS-B are included.
+  - **Satellites:** all active satellites, or just space stations, Starlink, navigation, weather or military satellites, from [CelesTrak](https://celestrak.org/)'s orbital elements, computed live with SGP4 ([satellite.js](https://github.com/shashwatak/satellite-js)) in a background worker, at their real height: low orbits close in, the geostationary belt far out.
+  - Tap an aircraft for its altitude, speed, track, climb or descent, squawk (emergencies stand out), registration, type and operator; tap a satellite for its altitude, speed, orbit, period and inclination, with its next orbit drawn.
+- **Four views of the Earth:** satellite imagery, streets, topographic, or night lights (NASA Black Marble). Choose **None** among the weather layers for just the map.
 - **Wind as living brushstrokes:** thousands of glowing particles drift along the forecast wind, leaving fading trails, in the spirit of [earth.nullschool.net](https://earth.nullschool.net).
 - **Smooth colour fields:** temperature, wind speed, precipitation, cloud cover and humidity are painted as soft, bicubic-interpolated colour maps in muted palettes. Clear skies and dry areas fade to transparent so the Earth shows through.
 - **An animated 5-day forecast:** it plays on its own in 3-hour steps, blending smoothly between them. Pause, scrub or jump back to **Now** at any time.
@@ -26,6 +32,7 @@ npm test         # run unit tests
 npm run build    # production build in dist/
 npm run preview  # serve the production build locally
 npm run airports # rebuild public/data/airports.json from the latest OurAirports data
+npm run satellites # save CelesTrak's satellite elements into public/data/satellites/ (optional)
 ```
 
 ## Deployment
@@ -44,7 +51,13 @@ Every push to `main` builds the site and deploys it to GitHub Pages via
 | `src/screenflow.js` | Zoomed-in wind particles, drawn straight onto a screen-sized canvas so they stay crisp at any zoom. |
 | `src/flow.js` | The wind particles: advected through the interpolated wind field and drawn with fading trails onto a glowing sphere. |
 | `src/detail.js` | Works out the area in view when zoomed in and the finer grid to fetch for it (at most 150 locations per request, snapped so nearby views share data, and held back when the free API allowance runs low). |
-| `src/map.js` | Satellite tiles over a whole-Earth backdrop, lighting that brightens as you zoom in, and on-demand country borders and city labels. |
+| `src/map.js` | The four Earth views (map tiles over a whole-Earth backdrop), lighting that brightens as you zoom in, and on-demand country borders and city labels. |
+| `src/aircraft.js` | Reads the OpenSky and ADS-B Exchange style flight feeds into one shape, merges them and estimates each aircraft's position between reports. |
+| `src/orbits.js`, `src/satworker.js` | Satellite positions from orbital elements (SGP4), worked out in a worker a second apart and blended on the GPU. |
+| `src/traffic.js` | The live traffic layers: feeds and their timing, toggles, drawing, and tapping an aircraft or satellite. |
+| `src/trafficlayer.js` | Aircraft and satellites as GPU point sprites, the selection ring and the orbit line. |
+| `src/trafficview.js` | The details panel for an aircraft or satellite. |
+| `scripts/fetch-satellites.mjs` | Saves a copy of CelesTrak's elements into the site at deploy time (every six hours), used while CelesTrak is not needed or cannot be reached. |
 | `src/search.js` | The search box, as an accessible combobox. |
 | `src/airports.js` | The airport list, airport search, and hourly ground conditions at airports (cached for an hour). |
 | `src/runways.js` | Headwind, tailwind and crosswind on each runway end, and the limit presets. Limits are checked against the stronger of the mean wind and the gusts. |
@@ -69,6 +82,10 @@ and the UI pick it up automatically.
 Precipitation is shown as a rate, mm per hour averaged over the 3 hours up to the time shown, on the map, in the storm markers and in the details panel alike.
 
 - Weather data: [Open-Meteo.com](https://open-meteo.com/), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The free API is for non-commercial use, with a fair-use limit of about 10,000 calls per day.
+- Live flights: [The OpenSky Network](https://opensky-network.org/) (free for non-commercial use), [adsb.lol](https://adsb.lol/) (Open Database License), [airplanes.live](https://airplanes.live/) and [adsb.fi](https://adsb.fi/) (free for non-commercial use).
+- Satellites: orbital elements from [CelesTrak](https://celestrak.org/); positions computed with [satellite.js](https://github.com/shashwatak/satellite-js) (MIT).
+- Street and topographic maps: [Esri](https://www.esri.com/) World Street Map and World Topo Map (Esri, HERE, Garmin, USGS, OpenStreetMap contributors and the GIS User Community), under [Esri's terms of use](https://www.esri.com/en-us/legal/terms/full-master-agreement).
+- Night lights: [NASA Black Marble](https://earthobservatory.nasa.gov/features/NightLights) (public domain), via [NASA GIBS](https://www.earthdata.nasa.gov/engage/open-data-services-software/earthdata-developer-portal/gibs-api).
 - Satellite tiles: [Esri World Imagery](https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9) (Esri, Maxar, Earthstar Geographics and the GIS User Community), used under [Esri's terms of use](https://www.esri.com/en-us/legal/terms/full-master-agreement).
 - Backdrop image: NASA Blue Marble (public domain), via the [three-globe](https://github.com/vasturiano/three-globe) examples (MIT).
 - Airports and runways: [OurAirports](https://ourairports.com/data/) (public domain).

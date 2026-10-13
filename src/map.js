@@ -1,19 +1,54 @@
 import * as THREE from 'three';
 import { CITIES, labelTier } from './cities.js';
 
-// Esri World Imagery: satellite and aerial imagery down to sub-metre detail in many places,
-// as Web Mercator map tiles.
-const TILE_URL = (x, y, level) =>
-  `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${level}/${y}/${x}`;
-const MAX_TILE_LEVEL = 17;
+const esri = (service) => (x, y, level) =>
+  `https://server.arcgisonline.com/ArcGIS/rest/services/${service}/MapServer/tile/${level}/${y}/${x}`;
+
+// Ways to show the Earth itself, all as Web Mercator map tiles. `light` scales the scene lighting.
+export const BASEMAPS = {
+  // Satellite and aerial imagery down to sub-metre detail in many places.
+  satellite: {
+    label: 'Satellite',
+    url: esri('World_Imagery'),
+    maxLevel: 17,
+    light: 1,
+    credit: 'Imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics and the GIS User Community; NASA Blue Marble',
+  },
+  streets: {
+    label: 'Streets',
+    url: esri('World_Street_Map'),
+    maxLevel: 18,
+    light: 1.1,
+    credit: 'Map <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, HERE, Garmin, USGS, OpenStreetMap contributors and the GIS User Community',
+  },
+  topo: {
+    label: 'Topographic',
+    url: esri('World_Topo_Map'),
+    maxLevel: 18,
+    light: 1.1,
+    credit: 'Map <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, HERE, Garmin, FAO, NOAA, USGS, OpenStreetMap contributors and the GIS User Community',
+  },
+  // City lights seen from space at night (NASA Black Marble, public domain), via NASA GIBS.
+  night: {
+    label: 'Night lights',
+    url: (x, y, level) =>
+      `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/${level}/${y}/${x}.png`,
+    maxLevel: 8,
+    light: 1.6,
+    dark: true,
+    credit: 'Night lights <a href="https://earthobservatory.nasa.gov/features/NightLights" target="_blank" rel="noopener">NASA Black Marble</a> via GIBS',
+  },
+};
 // Below this altitude the view reads as a map: brighter imagery, borders and city names.
 const MAP_ALTITUDE = 1.3;
 
 // Satellite imagery that sharpens as you zoom in, over a whole-Earth image just beneath it.
 // The image shows wherever tiles are missing: the poles (beyond Web Mercator), while tiles
 // load, or if the tile server cannot be reached.
-export function setupBasemap(globe, backdropUrl) {
-  globe.globeTileEngineUrl(TILE_URL).globeTileEngineMaxLevel(MAX_TILE_LEVEL);
+// Returns { setAltitude(altitude), setStyle(key) }.
+export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCredit } = {}) {
+  let style = BASEMAPS[initial] ?? BASEMAPS.satellite;
+  globe.globeTileEngineUrl(style.url).globeTileEngineMaxLevel(style.maxLevel);
   let tilesTuned = false;
   window.addEventListener('resize', () => {
     tilesTuned = matchTileDetailToScreen(globe);
@@ -21,9 +56,12 @@ export function setupBasemap(globe, backdropUrl) {
 
   const texture = new THREE.TextureLoader().load(backdropUrl);
   texture.colorSpace = THREE.SRGBColorSpace;
+  const dayMaterial = new THREE.MeshLambertMaterial({ map: texture });
+  // Behind the night lights, where tiles are missing, the Earth is simply dark.
+  const nightMaterial = new THREE.MeshBasicMaterial({ color: 0x04060c });
   const backdrop = new THREE.Mesh(
     new THREE.SphereGeometry(globe.getGlobeRadius() * 0.995, 96, 64),
-    new THREE.MeshLambertMaterial({ map: texture }),
+    style.dark ? nightMaterial : dayMaterial,
   );
   // three-globe rotates its globe mesh this way so equirectangular textures line up.
   backdrop.rotation.y = -Math.PI / 2;
@@ -33,14 +71,32 @@ export function setupBasemap(globe, backdropUrl) {
   // Dim the lights when looking at the whole globe, so the weather glows on top of it, and
   // brighten them when zoomed in to a map.
   const lights = globe.lights().map((light) => ({ light, intensity: light.intensity }));
-  return (altitude) => {
+  let altitude = 2.5;
+
+  function setAltitude(value) {
+    altitude = value;
     // The tile engine joins the scene only once the globe has initialised, so keep trying.
     tilesTuned ||= matchTileDetailToScreen(globe);
     const t = Math.min(1, Math.max(0, (altitude - 0.4) / (MAP_ALTITUDE + 0.6 - 0.4)));
     // Not full brightness even zoomed in, so white wind trails and labels keep their contrast.
-    const brightness = 0.85 - 0.3 * t;
+    const brightness = (0.85 - 0.3 * t) * style.light;
     for (const { light, intensity } of lights) light.intensity = intensity * brightness;
-  };
+  }
+
+  function setStyle(key) {
+    const next = BASEMAPS[key] ?? BASEMAPS.satellite;
+    if (next === style) return;
+    style = next;
+    // Drop the old map's tiles; the new URL then loads tiles for the current view.
+    globe.globeTileEngineClearCache();
+    globe.globeTileEngineMaxLevel(style.maxLevel).globeTileEngineUrl(style.url);
+    backdrop.material = style.dark ? nightMaterial : dayMaterial;
+    setAltitude(altitude);
+    onCredit?.(style.credit);
+  }
+
+  onCredit?.(style.credit);
+  return { setAltitude, setStyle };
 }
 
 // three-globe picks a tile level from the camera's altitude alone (level L from 8 / 2^L globe
