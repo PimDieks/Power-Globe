@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { cubicWeights, renderField, sampleGrid, sampleGridCubic, samplingTables } from '../src/field.js';
+import { covers, cubicWeights, renderField, sampleGrid, sampleGridCubic, samplingTables } from '../src/field.js';
 import { advect, windComponents, windGrids } from '../src/flow.js';
 import { classifyHazard, hazardRings } from '../src/patterns.js';
 
 describe('sampleGrid', () => {
   // 2 rows (lat 0 and 10) x 4 columns (lng -180, -90, 0, 90).
-  const shape = { rows: 2, cols: 4, lat0: 0, step: 90 };
-  const tall = { rows: 2, cols: 4, lat0: 0, step: 10 };
+  const shape = { rows: 2, cols: 4, lat0: 0, lng0: -180, step: 90, wrap: true };
+  const tall = { rows: 2, cols: 4, lat0: 0, lng0: -180, step: 10, wrap: true };
   const values = [0, 10, 20, 30, 100, 110, 120, 130];
 
   it('returns grid values at grid points', () => {
@@ -31,8 +31,37 @@ describe('sampleGrid', () => {
   });
 });
 
+describe('regional grids', () => {
+  // 3 x 3 points from 40°N, 170°E eastwards across the date line, 5° apart.
+  const region = { rows: 3, cols: 3, lat0: 40, lng0: 170, step: 5, wrap: false };
+  const values = [0, 1, 2, 10, 11, 12, 20, 21, 22];
+
+  it('knows which points it covers, across the date line', () => {
+    expect(covers(region, 45, 175)).toBe(true);
+    expect(covers(region, 45, -180)).toBe(true);
+    expect(covers(region, 45, -175)).toBe(false);
+    expect(covers(region, 35, 175)).toBe(false);
+    expect(covers({ wrap: true }, 0, 0)).toBe(true);
+  });
+
+  it('samples across the date line without wrapping around the grid', () => {
+    expect(sampleGrid(values, region, 45, -180)).toBe(12);
+    expect(sampleGrid(values, region, 42.5, 172.5)).toBe(5.5);
+    expect(sampleGrid(values, region, 42.5, 177.5)).toBe(6.5);
+    // Clamped at the eastern edge rather than wrapping back to the west.
+    expect(sampleGrid(values, region, 40, -170)).toBe(2);
+  });
+
+  it('feathers the edges of a regional image', () => {
+    const tables = samplingTables(region, 10, 10, { south: 40, north: 50, west: 170, span: 10 }, 0.2);
+    expect(tables.colFade[0]).toBeLessThan(0.2);
+    expect(tables.colFade[5]).toBe(1);
+    expect(tables.rowFade[9]).toBeLessThan(0.2);
+  });
+});
+
 describe('bicubic field', () => {
-  const shape = { rows: 4, cols: 8, lat0: -60, step: 40 };
+  const shape = { rows: 4, cols: 8, lat0: -60, lng0: -180, step: 40, wrap: true };
   const values = Float32Array.from({ length: 32 }, (_, i) => Math.sin(i) * 20);
 
   it('has weights that sum to one and hit grid points exactly', () => {
@@ -56,7 +85,8 @@ describe('bicubic field', () => {
     ]) {
       const v = sampleGridCubic(values, shape, 90 - ((py + 0.5) * 180) / height, -180 + ((px + 0.5) * 360) / width);
       const expected = Math.round(Math.min(255, Math.max(0, ((v + 20) * 255) / 40)));
-      expect(out[(py * width + px) * 4]).toBe(expected);
+      // Within one colour step: rendering dithers to avoid banding.
+      expect(Math.abs(out[(py * width + px) * 4] - expected)).toBeLessThanOrEqual(1);
     }
   });
 

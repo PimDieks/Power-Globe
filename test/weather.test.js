@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { buildGrid, buildUrl, chunk, fetchHourly, gridShape, startIndex, toForecast } from '../src/weather.js';
+import { buildGrid, buildUrl, chunk, fetchHourly, gridShape, shapePoints, startIndex, toForecast } from '../src/weather.js';
 import { LAYERS, VARIABLES, buildLut, colorFor, normalize, describeWeatherCode } from '../src/layers.js';
 
 describe('buildGrid', () => {
@@ -11,7 +11,7 @@ describe('buildGrid', () => {
   });
 
   it('stays under the free API limit of 600 locations at the default step', () => {
-    expect(gridShape()).toEqual({ step: 12, lat0: -72, rows: 13, cols: 30 });
+    expect(gridShape()).toEqual({ step: 12, lat0: -72, lng0: -180, rows: 13, cols: 30, wrap: true });
     expect(buildGrid()).toHaveLength(390);
   });
 
@@ -19,6 +19,13 @@ describe('buildGrid', () => {
     const { rows, cols } = gridShape(10);
     expect(rows * cols).toBe(buildGrid(10).length);
     expect(buildGrid(10)[cols]).toEqual({ lat: -70, lng: -180 });
+  });
+});
+
+describe('shapePoints', () => {
+  it('normalizes longitudes for regions crossing the date line', () => {
+    const points = shapePoints({ step: 5, lat0: 40, lng0: 170, rows: 1, cols: 3 });
+    expect(points.map((p) => p.lng)).toEqual([170, 175, -180]);
   });
 });
 

@@ -1,10 +1,21 @@
 import Globe from 'globe.gl';
-import { Color } from 'three';
 import { LAYERS, getLayer, colorFor, normalize, describeWeatherCode } from './layers.js';
-import { FORECAST_DAYS, GRID_STEP, gridShape, loadForecast, loadPointForecast, parseTime, startIndex } from './weather.js';
-import { FieldOverlay } from './field.js';
+import {
+  FORECAST_DAYS,
+  GRID_STEP,
+  gridShape,
+  isRegionCached,
+  loadForecast,
+  loadPointForecast,
+  loadRegion,
+  parseTime,
+  startIndex,
+} from './weather.js';
+import { FieldOverlay, covers, sampleGrid } from './field.js';
 import { WindFlow, windGrids } from './flow.js';
 import { HAZARDS, hazardRings } from './patterns.js';
+import { DETAIL_ALTITUDE, needsNewRegion, regionFor, viewBounds } from './detail.js';
+import { setupBasemap, setupMapFeatures } from './map.js';
 
 // Timeline playback speed, in forecast steps (3 hours each) per second.
 const STEPS_PER_SECOND = 1;
@@ -12,6 +23,12 @@ const STEPS_PER_SECOND = 1;
 const LAYER_FADE = 0.9;
 // Controls fade away after this long without interaction, leaving just the globe.
 const IDLE_MS = 4000;
+// Minimum gap between fetches of zoomed-in detail, to stay within the free API's limits.
+const REGION_FETCH_INTERVAL_MS = 4000;
+// How often the zoomed-in detail follows a moving camera.
+const REGION_FOLLOW_MS = 400;
+// Seconds for zoomed-in detail to fade in once it arrives.
+const REGION_FADE = 0.8;
 const IMAGE_BASE = `${import.meta.env.BASE_URL}img`;
 const MODES = [
   { key: 'field', label: 'Smooth field' },
@@ -55,6 +72,9 @@ const state = {
   // 0..1 progress of the colour field fading in after a layer change.
   fieldFade: 0,
   detail: null,
+  // Zoomed-in area with finer data: { shape, bounds, data, winds, times, fade }, or null.
+  region: null,
+  autoRotate: !reducedMotion,
 };
 
 if (reducedMotion) els.wind.checked = false;
@@ -74,8 +94,6 @@ const formatTime = (time) =>
   });
 
 const globe = new Globe(els.globe, { animateIn: !reducedMotion })
-  .globeImageUrl(`${IMAGE_BASE}/earth-blue-marble.jpg`)
-  .bumpImageUrl(`${IMAGE_BASE}/earth-topology.png`)
   .backgroundColor('rgba(0, 0, 0, 0)')
   .atmosphereColor('#8ec5ff')
   .atmosphereAltitude(0.22)
@@ -103,22 +121,46 @@ const globe = new Globe(els.globe, { animateIn: !reducedMotion })
   .ringAltitude(0.006)
   .onGlobeClick(({ lat, lng }) => showDetails(lat, lng));
 
-// Dim the daytime imagery so the weather glows on top of it.
-globe.globeMaterial().color = new Color('#6f7a90');
-globe.globeMaterial().shininess = 4;
+const setMapBrightness = setupBasemap(globe, `${IMAGE_BASE}/earth-blue-marble.jpg`);
+const updateMapFeatures = setupMapFeatures(globe);
 globe.pointOfView({ lat: 22, lng: -25, altitude: narrowScreen ? 3.6 : 2.4 });
 const controls = globe.controls();
 controls.autoRotate = !reducedMotion;
 controls.autoRotateSpeed = 0.22;
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
+// Stop about 100 km above the ground: the imagery has no finer detail to show.
+controls.minDistance = globe.getGlobeRadius() * 1.015;
 
 const shape = gridShape(GRID_STEP);
-const field = new FieldOverlay(globe, shape);
-const flow = new WindFlow(globe, shape, {
+const field = new FieldOverlay(globe, { shape });
+const flow = new WindFlow(globe, {
   count: largeScreen ? 4500 : 2200,
   width: largeScreen ? 2048 : 1024,
+  lineWidth: largeScreen ? 1.3 : 1,
 });
+// Zoomed in, the area in view gets its own sharper layers on top of the global ones.
+const initialRegion = regionFor(viewBounds({ lat: 0, lng: 0, altitude: 0.5 }));
+const detailField = new FieldOverlay(globe, {
+  shape: initialRegion.shape,
+  bounds: initialRegion.bounds,
+  width: 256,
+  height: 256,
+  altitude: 0.0025,
+  depthBias: 3,
+  feather: 0.12,
+  renderOrder: -2,
+});
+const detailFlow = new WindFlow(globe, {
+  bounds: initialRegion.bounds,
+  count: largeScreen ? 2200 : 1200,
+  width: 1024,
+  height: 1024,
+  lineWidth: 1.2,
+  altitude: 0.0045,
+});
+detailField.visible = false;
+detailFlow.visible = false;
 
 window.addEventListener('resize', () => globe.width(window.innerWidth).height(window.innerHeight));
 
@@ -177,7 +219,8 @@ function renderCaption() {
 function invalidate() {
   state.drawnStep = -1;
   state.dirty = true;
-  flow.visible = els.wind.checked;
+  flow.visible = els.wind.checked && !state.region;
+  detailFlow.visible = els.wind.checked && !!state.region;
   renderControls();
 }
 
@@ -208,12 +251,69 @@ function blendIndices() {
   return [i0, Math.min(i0 + 1, last), state.t - i0];
 }
 
+// Indices into the zoomed-in region's data matching global steps i0 and i1, or null if the
+// region has no data for them (e.g. it was fetched after the forecast rolled over a day).
+function regionIndices(i0, i1) {
+  const region = state.region;
+  if (!region?.data) return null;
+  const r0 = region.times.get(state.forecast.times[i0]);
+  const r1 = region.times.get(state.forecast.times[i1]);
+  return r0 == null || r1 == null ? null : [r0, r1];
+}
+
 function drawField() {
-  field.visible = state.mode === 'field';
-  if (state.mode !== 'field') return;
-  const series = state.forecast.values[state.layer.variable];
+  const show = state.mode === 'field';
+  field.visible = show;
   const [i0, i1, t] = blendIndices();
+  const ri = show && regionIndices(i0, i1);
+  detailField.visible = !!ri;
+  if (!show) return;
+  const series = state.forecast.values[state.layer.variable];
   field.render(series[i0], series[i1], t, state.layer);
+  if (ri) {
+    const regional = state.region.data.values[state.layer.variable];
+    detailField.render(regional[ri[0]], regional[ri[1]], t, state.layer);
+  }
+}
+
+// Wind for the current moment, blended between steps: global, and regional when zoomed in.
+const globalWind = { u: new Float32Array(shape.rows * shape.cols), v: new Float32Array(shape.rows * shape.cols) };
+let regionWind = null;
+
+function blendWind(steps, a, b, t, out) {
+  for (let i = 0; i < out.u.length; i++) {
+    out.u[i] = steps[a].u[i] + (steps[b].u[i] - steps[a].u[i]) * t;
+    out.v[i] = steps[a].v[i] + (steps[b].v[i] - steps[a].v[i]) * t;
+  }
+}
+
+// Wind at a point from the sharpest data available there.
+function sampleWind(lat, lng, out) {
+  const regionShape = regionWind && state.region.data.shape;
+  if (regionShape && covers(regionShape, lat, lng)) {
+    out[0] = sampleGrid(regionWind.u, regionShape, lat, lng);
+    out[1] = sampleGrid(regionWind.v, regionShape, lat, lng);
+  } else {
+    out[0] = sampleGrid(globalWind.u, shape, lat, lng);
+    out[1] = sampleGrid(globalWind.v, shape, lat, lng);
+  }
+  return true;
+}
+
+function stepWind(dt) {
+  const active = state.region ? detailFlow : flow;
+  if (!active.visible) return;
+  const [i0, i1, t] = blendIndices();
+  blendWind(state.winds, i0, i1, t, globalWind);
+  const ri = regionIndices(i0, i1);
+  if (ri) {
+    const size = state.region.winds[0].u.length;
+    if (regionWind?.u.length !== size) regionWind = { u: new Float32Array(size), v: new Float32Array(size) };
+    blendWind(state.region.winds, ri[0], ri[1], t, regionWind);
+  } else {
+    regionWind = null;
+  }
+  active.step(dt, sampleWind);
 }
 
 const ease = (x) => 1 - (1 - x) ** 3;
@@ -239,11 +339,11 @@ function tick(now) {
       state.fieldFade = Math.min(1, state.fieldFade + dt / LAYER_FADE);
     }
     field.strength = ease(state.fieldFade);
-    if (flow.visible) {
-      const [i0, i1, t] = blendIndices();
-      flow.setWind(state.winds[i0], state.winds[i1], t);
-      flow.step(dt);
+    if (state.region?.data && state.region.fade < 1) {
+      state.region.fade = Math.min(1, state.region.fade + dt / REGION_FADE);
     }
+    detailField.strength = ease(state.fieldFade) * ease(state.region?.fade ?? 0);
+    stepWind(dt);
   }
   requestAnimationFrame(tick);
 }
@@ -286,7 +386,81 @@ async function refresh(force = false) {
   }
 }
 
+// Zoomed in past DETAIL_ALTITUDE the view behaves like a map: it stops turning, and the area
+// in view gets finer weather data and its own sharper wind layer.
+function aspect() {
+  return window.innerWidth / window.innerHeight;
+}
+
+function enterRegion(pov) {
+  const region = { ...regionFor(viewBounds(pov, aspect())), data: null, winds: null, times: null, fade: 0 };
+  state.region = region;
+  detailFlow.setBounds(region.bounds);
+  flow.visible = false;
+  detailFlow.visible = els.wind.checked;
+  detailField.visible = false;
+  state.dirty = true;
+  fetchRegion(region);
+}
+
+function leaveRegion() {
+  state.region = null;
+  regionWind = null;
+  detailField.visible = false;
+  detailFlow.visible = false;
+  flow.visible = els.wind.checked;
+  state.dirty = true;
+}
+
+let lastRegionFetch = 0;
+async function fetchRegion(region) {
+  if (!isRegionCached(region.shape)) {
+    const wait = lastRegionFetch + REGION_FETCH_INTERVAL_MS - Date.now();
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    // The view may have moved on while waiting.
+    if (state.region !== region) return;
+    lastRegionFetch = Date.now();
+  }
+  try {
+    const data = await loadRegion(region.shape);
+    if (state.region !== region) return;
+    region.winds = windGrids(data.values.wind_speed_10m, data.values.wind_direction_10m);
+    region.times = new Map(data.times.map((time, i) => [time, i]));
+    region.data = data;
+    detailField.setRegion(data.shape, region.bounds);
+    state.dirty = true;
+  } catch (err) {
+    // Keep showing the global data; zoomed-in detail is a bonus.
+    console.error('Could not load detail for this area', err);
+  }
+}
+
+let regionTimer;
+function onView(pov) {
+  setMapBrightness(pov.altitude);
+  updateMapFeatures(pov.altitude);
+  const zoomedIn = pov.altitude < DETAIL_ALTITUDE;
+  controls.autoRotate = state.autoRotate && !zoomedIn;
+  if (!zoomedIn) {
+    clearTimeout(regionTimer);
+    regionTimer = null;
+    if (state.region) leaveRegion();
+    return;
+  }
+  // Follow the camera at most every REGION_FOLLOW_MS while it moves, rather than waiting for
+  // it to settle: its damped motion can take seconds to come to rest.
+  if (!regionTimer && needsNewRegion(state.region, pov, aspect())) {
+    regionTimer = setTimeout(() => {
+      regionTimer = null;
+      const now = globe.pointOfView();
+      if (now.altitude < DETAIL_ALTITUDE && needsNewRegion(state.region, now, aspect())) enterRegion(now);
+    }, REGION_FOLLOW_MS);
+  }
+}
+globe.onZoom(onView);
+
 async function showDetails(lat, lng) {
+  state.autoRotate = false;
   controls.autoRotate = false;
   const detail = { lat, lng, data: null };
   state.detail = detail;
@@ -370,6 +544,7 @@ els.wind.addEventListener('change', invalidate);
 els.hazards.addEventListener('change', invalidate);
 
 flow.visible = els.wind.checked;
+onView(globe.pointOfView());
 renderControls();
 wake();
 refresh();

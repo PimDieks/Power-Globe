@@ -17,23 +17,30 @@ export const STEP_HOURS = 3;
 // bicubic field and wind particles keep the result smooth.
 export const GRID_STEP = 12;
 
-// Evenly spaced sample points covering the globe up to ±80°, `step` degrees apart, ordered
-// row by row from south to north and west to east within a row.
+// Evenly spaced sample points covering the globe up to ±80°, `step` degrees apart.
 export function buildGrid(step = GRID_STEP) {
-  const { lat0, rows, cols } = gridShape(step);
+  return shapePoints(gridShape(step));
+}
+
+// Grid layout used throughout: `rows` x `cols` points `step` degrees apart, starting at
+// (lat0, lng0), ordered row by row from south to north and west to east within a row.
+// A global grid wraps around in longitude; a regional one does not.
+export function gridShape(step = GRID_STEP) {
+  const edge = Math.floor(80 / step) * step;
+  return { step, lat0: -edge, lng0: -180, rows: (2 * edge) / step + 1, cols: Math.ceil(360 / step), wrap: true };
+}
+
+const normalizeLng = (lng) => ((((lng + 180) % 360) + 360) % 360) - 180;
+
+export function shapePoints({ step, lat0, lng0, rows, cols }) {
   const points = [];
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      points.push({ lat: lat0 + r * step, lng: -180 + c * step });
+      // Rounded so that floating-point noise does not leak into URLs or labels.
+      points.push({ lat: +(lat0 + r * step).toFixed(3), lng: +normalizeLng(lng0 + c * step).toFixed(3) });
     }
   }
   return points;
-}
-
-// Dimensions of buildGrid(step), for code that needs to index it as a 2D grid.
-export function gridShape(step = GRID_STEP) {
-  const edge = Math.floor(80 / step) * step;
-  return { step, lat0: -edge, rows: (2 * edge) / step + 1, cols: Math.ceil(360 / step) };
 }
 
 export function chunk(items, size) {
@@ -174,6 +181,28 @@ export async function loadForecast({ step = GRID_STEP, force = false, onProgress
   const data = toForecast(points, await fetchHourly(points, { threeHourly: true, onProgress }));
   writeCache(key, data);
   return data;
+}
+
+// Finer forecast for one region of the globe, for when the view is zoomed in. Kept in
+// memory only, as regions change with every pan.
+const regionCache = new Map();
+const REGION_CACHE_SIZE = 8;
+
+export const isRegionCached = (shape) => regionCache.has(JSON.stringify(shape));
+
+export async function loadRegion(shape) {
+  const key = JSON.stringify(shape);
+  if (!regionCache.has(key)) {
+    const points = shapePoints(shape);
+    const request = fetchHourly(points, { threeHourly: true }).then((hourly) => ({
+      ...toForecast(points, hourly),
+      shape,
+    }));
+    regionCache.set(key, request);
+    request.catch(() => regionCache.delete(key));
+    if (regionCache.size > REGION_CACHE_SIZE) regionCache.delete(regionCache.keys().next().value);
+  }
+  return regionCache.get(key);
 }
 
 // Full hourly forecast for one location: { time: [...], temperature_2m: [...], ... }.
