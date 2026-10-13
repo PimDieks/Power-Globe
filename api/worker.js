@@ -26,6 +26,10 @@ const FORECAST_PARAMS = new Set(['latitude', 'longitude', 'elevation', 'hourly',
 const MAX_FORECAST_PLACES = 100;
 // Answers kept to serve when a service fails or limits us.
 const BACKUP_SECONDS = 6 * 3600;
+// Give up on a service after this long, and remember a failure for a while so that neither the
+// service nor visitors are kept waiting on it again straight away.
+const UPSTREAM_TIMEOUT_MS = 10_000;
+const FAILURE_SECONDS = 120;
 // Requests a minute per visitor (counted per Worker instance, so roughly).
 export const RATE_LIMIT = 120;
 
@@ -45,7 +49,7 @@ class HttpError extends Error {
 async function upstream(fetchFn, url, init = {}) {
   let res;
   try {
-    res = await fetchFn(url, { ...init, headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/plain, */*', ...init.headers }, signal: AbortSignal.timeout(20_000) });
+    res = await fetchFn(url, { ...init, headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/plain, */*', ...init.headers }, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
   } catch (err) {
     throw new HttpError(502, `${new URL(url).host} unreachable (${err.message})`);
   }
@@ -192,7 +196,12 @@ export default {
           res.headers.set('X-Power-Globe-Backup', '1');
           res.headers.set('Cache-Control', 'public, max-age=60');
         } else {
-          res = new Response(JSON.stringify({ error: err.message }), { status: err.status ?? 502, headers: { 'Content-Type': 'application/json' } });
+          res = new Response(JSON.stringify({ error: err.message }), {
+            status: err.status ?? 502,
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${FAILURE_SECONDS}` },
+          });
+          // Bad requests are the visitor's; failures upstream are remembered briefly.
+          if (cache && (err.status ?? 502) >= 429) ctx?.waitUntil(cache.put(key, res.clone()));
         }
       }
     }
