@@ -43,23 +43,28 @@ class HttpError extends Error {
 }
 
 async function upstream(fetchFn, url, init = {}) {
-  const res = await fetchFn(url, { ...init, headers: { 'User-Agent': USER_AGENT, ...init.headers }, signal: AbortSignal.timeout(20_000) });
+  let res;
+  try {
+    res = await fetchFn(url, { ...init, headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/plain, */*', ...init.headers }, signal: AbortSignal.timeout(20_000) });
+  } catch (err) {
+    throw new HttpError(502, `${new URL(url).host} unreachable (${err.message})`);
+  }
   if (!res.ok) throw new HttpError(res.status === 429 ? 429 : 502, `${new URL(url).host} answered ${res.status}`);
   return res;
 }
 
-// The first ADS-B feed that answers.
+// The first ADS-B feed that answers; if none does, an error saying what each one answered.
 async function fromFeeds(fetchFn, urlFor) {
-  let last;
+  const failures = [];
   for (const feed of ADSB_FEEDS) {
     try {
       const res = await upstream(fetchFn, urlFor(feed));
       return { source: feed.name, data: await res.json() };
     } catch (err) {
-      last = err;
+      failures.push(err.message);
     }
   }
-  throw last ?? new HttpError(502, 'No ADS-B feed answered');
+  throw new HttpError(502, failures.join('; ') || 'No ADS-B feed answered');
 }
 
 let openskyToken = null;

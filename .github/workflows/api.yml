@@ -32,3 +32,16 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: api
+      # Try every route as the site would, and print what each answers, so problems with the
+      # services behind it show up in this log.
+      - if: steps.check.outputs.ready == 'true'
+        name: Check the API
+        continue-on-error: true
+        run: |
+          sleep 10
+          base=https://power-globe-api.pimdieks.workers.dev
+          for path in / /flights/global "/flights/area?lat=52.3&lon=4.76&nm=50" /flights/military "/metar?ids=EHAM" /satellites/stations "/forecast?latitude=52.3&longitude=4.76&hourly=temperature_2m&forecast_days=1"; do
+            code=$(curl -s -o /tmp/body -w '%{http_code}' -H 'Origin: https://pimdieks.github.io' "$base$path")
+            echo "$code $path :: $(head -c 300 /tmp/body | tr '\n' ' ')"
+          done
+

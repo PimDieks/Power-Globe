@@ -92,7 +92,9 @@ export const TRAFFIC_LEGEND = [
 async function fetchJson(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (!res.ok) {
-    const err = new Error(`${new URL(url).host} answered ${res.status}`);
+    // The Power Globe API says what went wrong upstream as { error }.
+    const detail = await res.json().then((body) => body?.error, () => null);
+    const err = new Error(detail ? `${detail}` : `${new URL(url).host} answered ${res.status}`);
     err.status = res.status;
     throw err;
   }
@@ -211,12 +213,14 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   // ADS-B Exchange style feeds: the one that worked last, else the next.
   async function fromProviders(urlFor, proxyPath) {
     // The Power Globe API asks the feeds server-side; most feeds do not answer web pages.
+    let proxyError = null;
     if (PROXY_URL) {
       try {
         const { source, data } = await fetchJson(`${PROXY_URL}${proxyPath}`);
         return { data, name: source };
       } catch (err) {
         console.error(err);
+        proxyError = err;
       }
     }
     let lastError;
@@ -230,7 +234,8 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
         lastError = err;
       }
     }
-    throw lastError;
+    // The browser usually cannot ask the feeds itself, so the API's reason is the useful one.
+    throw proxyError ? new Error(`Power Globe API: ${proxyError.message}`) : lastError;
   }
 
   async function once(key, task) {
@@ -255,14 +260,23 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   const timeText = () => new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 
   async function openSky() {
+    let proxyError = null;
     if (PROXY_URL) {
       try {
         return (await fetchJson(`${PROXY_URL}/flights/global`)).data;
       } catch (err) {
         console.error(err);
+        proxyError = err;
       }
     }
-    return fetchJson(OPENSKY_URL);
+    try {
+      return await fetchJson(OPENSKY_URL);
+    } catch (err) {
+      if (!proxyError) throw err;
+      const reported = new Error(`Power Globe API: ${proxyError.message}`);
+      reported.status = proxyError.status;
+      throw reported;
+    }
   }
 
   function loadGlobal() {
