@@ -15,6 +15,23 @@ const SCHIPHOL = toAirport([
 const reply = (body, init) => new Response(typeof body === 'string' ? body : JSON.stringify(body), init);
 
 describe('Power Globe API (worker)', () => {
+  it('signs in to OpenSky with an account, shares answers for 2 minutes, and falls back to anonymous', async () => {
+    const env = { OPENSKY_CLIENT_ID: 'id', OPENSKY_CLIENT_SECRET: 'secret' };
+    const fetchFn = vi.fn(async (url, init) =>
+      url.includes('auth.opensky') ? reply({ access_token: 'tok', expires_in: 1800 }) : reply({ time: 1, states: [], seen: init?.headers?.Authorization ?? null }),
+    );
+    const res = await route(new URL('https://api.example/flights/global'), env, fetchFn);
+    expect((await res.json()).data.seen).toBe('Bearer tok');
+    expect(res.headers.get('Cache-Control')).toBe('public, max-age=120');
+    const token = fetchFn.mock.calls.find(([url]) => url.includes('auth.opensky'))[1];
+    expect(String(token.body)).toBe('grant_type=client_credentials&client_id=id&client_secret=secret');
+    expect((await (await route(new URL('https://api.example/'), env, fetchFn)).json()).opensky).toBe('account');
+
+    const anonymous = await route(new URL('https://api.example/flights/global'), {}, fetchFn);
+    expect((await anonymous.json()).data.seen).toBeNull();
+    expect(anonymous.headers.get('Cache-Control')).toBe('public, max-age=300');
+  });
+
   it('serves flights in an area from the first ADS-B feed that answers, snapped for caching', async () => {
     const fetchFn = vi.fn(async (url) => (url.includes('adsb.lol') ? reply('down', { status: 503 }) : reply({ ac: [{ hex: 'abc' }] })));
     const res = await route(new URL('https://api.example/flights/area?lat=52.31&lon=4.76&nm=40'), {}, fetchFn);

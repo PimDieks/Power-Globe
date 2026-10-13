@@ -3,7 +3,10 @@ name: Deploy the Power Globe API
 # Deploys api/worker.js to Cloudflare Workers. Needs two repository secrets:
 #   CLOUDFLARE_API_TOKEN   an API token with the "Edit Cloudflare Workers" template
 #   CLOUDFLARE_ACCOUNT_ID  the account ID shown in the Cloudflare dashboard
-# Without them this workflow does nothing.
+# Without them this workflow does nothing. Optionally, for an OpenSky Network account's larger
+# allowance of worldwide flights, two more (from the account's API client, credentials.json):
+#   OPENSKY_CLIENT_ID      its clientId
+#   OPENSKY_CLIENT_SECRET  its clientSecret
 
 on:
   push:
@@ -32,6 +35,22 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: api
+      # Hand the OpenSky account to the API as Worker secrets (kept encrypted by Cloudflare).
+      - if: steps.check.outputs.ready == 'true'
+        name: Store the OpenSky account
+        working-directory: api
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          OPENSKY_CLIENT_ID: ${{ secrets.OPENSKY_CLIENT_ID }}
+          OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
+        run: |
+          if [ -z "$OPENSKY_CLIENT_ID" ] || [ -z "$OPENSKY_CLIENT_SECRET" ]; then
+            echo "::notice::No OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET secrets: the API asks OpenSky anonymously."
+            exit 0
+          fi
+          printf '%s' "$OPENSKY_CLIENT_ID" | npx --yes wrangler@3 secret put OPENSKY_CLIENT_ID
+          printf '%s' "$OPENSKY_CLIENT_SECRET" | npx --yes wrangler@3 secret put OPENSKY_CLIENT_SECRET
       # Try every route as the site would, and print what each answers, so problems with the
       # services behind it show up in this log.
       - if: steps.check.outputs.ready == 'true'
