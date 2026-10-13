@@ -149,7 +149,7 @@ describe('live traffic', () => {
   it('describes an aircraft', () => {
     const html = aircraftDetailsHtml(
       { id: 'ae1234', callsign: 'RCH123', military: true, altitudeFt: 28010, speedKt: 420.4, track: 85, verticalFpm: -1530, squawk: '7700', type: 'C17', registration: '05-5140', seen: 0, source: 'adsb.lol' },
-      { position: { lat: 51.5, lng: -1.2 }, now: 12_000 },
+      { position: { lat: 51.5, lng: -1.2 }, now: 12_000, locale: 'en-US' },
     );
     expect(html).toContain('Military');
     expect(html).toContain('Emergency');
@@ -171,9 +171,11 @@ describe('live traffic', () => {
       orbit: 'leo',
       epoch: new Date(0),
       now: 7_200_000,
+      locale: 'en-US',
     });
     expect(html).toContain('352 km');
     expect(html).toContain('7.70 km/s');
+    expect(html).toContain('27,720 km/h');
     expect(html).toContain('Low Earth orbit');
     expect(html).toContain('92 min');
     expect(html).toContain('51.6°');

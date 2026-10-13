@@ -5,7 +5,8 @@ import { ORBIT_LABELS } from './orbits.js';
 const EMERGENCY_SQUAWKS = { 7500: 'Hijack', 7600: 'Radio failure', 7700: 'Emergency' };
 
 const round = (v, digits = 0) => (v == null || Number.isNaN(v) ? null : Number(v.toFixed(digits)));
-const num = (v) => v.toLocaleString(undefined);
+// Numbers follow the visitor's own locale unless one is given.
+const num = (v, locale) => v.toLocaleString(locale);
 
 export const coordsText = (lat, lng) =>
   `${Math.abs(lat).toFixed(2)}° ${lat >= 0 ? 'N' : 'S'}, ${Math.abs(lng).toFixed(2)}° ${lng >= 0 ? 'E' : 'W'}`;
@@ -20,15 +21,15 @@ export function ago(ms) {
 // The name to show for an aircraft: its callsign, else its registration, else its address.
 export const aircraftName = (ac) => ac.callsign || ac.registration || ac.id.toUpperCase();
 
-export function aircraftDetailsHtml(ac, { position, now }) {
+export function aircraftDetailsHtml(ac, { position, now, locale }) {
   const rows = [];
   const row = (label, value) => value != null && value !== '' && rows.push(`<dt>${label}</dt><dd>${escapeHtml(value)}</dd>`);
-  row('Altitude', ac.onGround ? 'On the ground' : ac.altitudeFt == null ? null : `${num(Math.round(ac.altitudeFt / 25) * 25)} ft`);
+  row('Altitude', ac.onGround ? 'On the ground' : ac.altitudeFt == null ? null : `${num(Math.round(ac.altitudeFt / 25) * 25, locale)} ft`);
   row('Ground speed', round(ac.speedKt) == null ? null : `${round(ac.speedKt)} kt`);
   row('Track', round(ac.track) == null ? null : `${String(round(ac.track)).padStart(3, '0')}°`);
   if (!ac.onGround && ac.verticalFpm != null) {
     const v = Math.round(ac.verticalFpm / 50) * 50;
-    row('Vertical speed', v === 0 ? 'Level' : `${v > 0 ? 'Climbing' : 'Descending'} ${num(Math.abs(v))} ft/min`);
+    row('Vertical speed', v === 0 ? 'Level' : `${v > 0 ? 'Climbing' : 'Descending'} ${num(Math.abs(v), locale)} ft/min`);
   }
   row('Squawk', ac.squawk ? `${ac.squawk}${EMERGENCY_SQUAWKS[ac.squawk] ? ` (${EMERGENCY_SQUAWKS[ac.squawk]})` : ''}` : null);
   row('Registration', ac.registration);
@@ -47,11 +48,11 @@ export function aircraftDetailsHtml(ac, { position, now }) {
     <dl>${rows.join('')}</dl>`;
 }
 
-export function satelliteDetailsHtml(sat, { position, speed, period, inclination, orbit, epoch, now }) {
+export function satelliteDetailsHtml(sat, { position, speed, period, inclination, orbit, epoch, now, locale }) {
   const rows = [];
   const row = (label, value) => value != null && rows.push(`<dt>${label}</dt><dd>${escapeHtml(value)}</dd>`);
-  row('Altitude', position ? `${num(Math.round(position.altitudeKm))} km` : null);
-  row('Speed', speed == null ? null : `${speed.toFixed(2)} km/s (${num(Math.round(speed * 3600))} km/h)`);
+  row('Altitude', position ? `${num(Math.round(position.altitudeKm), locale)} km` : null);
+  row('Speed', speed == null ? null : `${speed.toFixed(2)} km/s (${num(Math.round(speed * 3600), locale)} km/h)`);
   row('Orbit', ORBIT_LABELS[orbit] ?? null);
   row('Period', period == null ? null : period < 120 ? `${Math.round(period)} min` : `${(period / 60).toFixed(1)} h`);
   row('Inclination', inclination == null ? null : `${inclination.toFixed(1)}°`);
