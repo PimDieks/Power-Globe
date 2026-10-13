@@ -64,7 +64,7 @@ jobs:
           sleep 10
           base=https://power-globe-api.pimdieks.workers.dev
           for path in / /flights/global "/flights/area?lat=52.3&lon=4.76&nm=50" /flights/military "/metar?ids=EHAM" /satellites/stations "/forecast?latitude=52.3&longitude=4.76&hourly=temperature_2m&forecast_days=1" /tiles/openaip/8/131/84.png; do
-            read -r code type < <(curl -s -o /tmp/body -w '%{http_code} %{content_type}' -H 'Origin: https://pimdieks.github.io' "$base$path")
+            read -r code type < <(curl -s -o /tmp/body -w '%{http_code} %{content_type}\n' -H 'Origin: https://pimdieks.github.io' "$base$path")
             case "$type" in
               image/*) echo "$code $path :: $type, $(wc -c < /tmp/body) bytes" ;;
               *) echo "$code $path :: $(head -c 300 /tmp/body | tr '\n' ' ')" ;;
