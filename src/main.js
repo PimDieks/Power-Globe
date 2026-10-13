@@ -28,7 +28,6 @@ import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { setupAirportMap } from './airportmap.js';
 import { latestObservation } from './metar.js';
 import { explain } from './api.js';
-import { setupRelay } from './relay.js';
 
 // Timeline playback speed, in forecast steps (3 hours each) per second.
 const STEPS_PER_SECOND = 1;
@@ -102,13 +101,6 @@ const els = {
     groupRow: document.getElementById('satellite-group-row'),
     status: document.getElementById('traffic-status'),
     legend: document.getElementById('traffic-legend'),
-    relay: {
-      panel: document.getElementById('relay'),
-      form: document.getElementById('relay-form'),
-      url: document.getElementById('relay-url'),
-      off: document.getElementById('relay-off'),
-      status: document.getElementById('relay-status'),
-    },
     credits: {
       flights: document.getElementById('credit-flights'),
       satellites: document.getElementById('credit-satellites'),
@@ -227,7 +219,6 @@ const traffic = setupTraffic({
   },
   announce: (message) => announce(message),
 });
-setupRelay(els.traffic.relay, () => traffic.retry());
 const windCheck = setupWindCheck({
   els: els.windCheck,
   getTime: () => currentTime(),

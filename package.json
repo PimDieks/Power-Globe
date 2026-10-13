@@ -12,8 +12,7 @@
     "test": "vitest run",
     "airports": "node scripts/build-airports.mjs",
     "satellites": "node scripts/fetch-satellites.mjs",
-    "data": "node scripts/build-data.mjs",
-    "relay": "node relay/relay.mjs"
+    "data": "node scripts/build-data.mjs"
   },
   "dependencies": {
     "globe.gl": "^2.46.2",

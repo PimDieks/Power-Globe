@@ -15,7 +15,7 @@
 // Settings (environment): RELAY_KEY, a long random secret, the same as the API's
 // FLIGHT_RELAY_KEY; PORT (default 8788); HOST (default 127.0.0.1, for a tunnel on this
 // machine). Needs Node.js 18 or newer and nothing else. See "Flight relay for the API" in the
-// README. (relay.mjs is the other relay, for one browser on the same computer.)
+// README.
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';

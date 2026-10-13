@@ -75,9 +75,9 @@ To set it up once:
 
 Optionally, with a free OpenSky Network account, create an API client on its account page and add its `clientId` and `clientSecret` as the repository secrets `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET`; the workflow hands them to the Worker (or run `npx wrangler secret put OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` in `api/`). The worldwide flights then refresh every 2 minutes instead of 5, within the account's daily allowance. For the Aviation map, add a free [openAIP](https://www.openaip.net/) API key as the repository secret `OPENAIP_API_KEY`; the Worker serves the chart tiles with it, cached for a day, so the key never reaches the page. Without the proxy everything else works; live flights and METARs then show why they are unavailable.
 
-### Flight relay for the API (flights for every visitor)
+### Flight relay for the API
 
-The flight feeds limit or refuse Cloudflare's servers, whose addresses many sites share: OpenSky does not answer them, adsb.lol answers 429 and airplanes.live and adsb.fi answer 403. OpenSky, adsb.lol and adsb.fi do answer other connections (airplanes.live asks those who ask from a server to email them first). `relay/api-relay.mjs` is a small relay for them, run on a machine of your own: a Raspberry Pi at home, a home server, or a small virtual server with its own address (not another serverless platform, whose shared addresses the feeds treat the same way). The API then asks the flight feeds through it, so every visitor gets flights (the [relay on your own computer](#flight-relay-on-your-own-computer) only serves the browser beside it), and still caches every answer, so the relay is only asked as often as the feeds were before. The relay asks only the flight feeds, only for requests carrying its key, each feed at most once a second, and compresses its answers: about 30 MB an hour up the home connection while someone is watching flights, nothing when nobody is.
+The flight feeds limit or refuse Cloudflare's servers, whose addresses many sites share: OpenSky does not answer them, adsb.lol answers 429 and airplanes.live and adsb.fi answer 403. OpenSky, adsb.lol and adsb.fi do answer other connections (airplanes.live asks those who ask from a server to email them first). `relay/api-relay.mjs` is a small relay for them, run on a machine of your own: a Raspberry Pi at home, a home server, or a small virtual server with its own address (not another serverless platform, whose shared addresses the feeds treat the same way). The API then asks the flight feeds through it, so every visitor gets flights, and still caches every answer, so the relay is only asked as often as the feeds were before. The relay asks only the flight feeds, only for requests carrying its key, each feed at most once a second, and compresses its answers: about 30 MB an hour up the home connection while someone is watching flights, nothing when nobody is.
 
 On the Pi (Raspberry Pi OS; any Linux with systemd works the same):
 
@@ -102,16 +102,6 @@ On the Pi (Raspberry Pi OS; any Linux with systemd works the same):
 3. In this repository's **Settings → Secrets and variables → Actions**, add the secrets `FLIGHT_RELAY_URL` (that address) and `FLIGHT_RELAY_KEY` (the key, shown by `sudo cat /etc/power-globe-api-relay.env`, without `RELAY_KEY=`), and run the **Deploy the Power Globe API** workflow. Its check step should show `"relay":"on"` and flights answering 200.
 
 When the relay cannot be reached, the API says so ("… through the relay") and serves its last answers for up to 6 hours. The relay's own answers: 401, the key does not match; 429, a feed is being asked too often; 504, the feed did not answer the relay. `journalctl -u power-globe-api-relay` shows what went wrong. To update it, download `api-relay.mjs` again and `sudo systemctl restart power-globe-api-relay`.
-
-## Flight relay on your own computer
-
-The free flight feeds (OpenSky, adsb.lol, airplanes.live, adsb.fi) refuse requests from cloud servers, the Power Globe API's included, but answer a home connection. The flight relay runs the API's flight routes on your computer:
-
-1. With [Node.js](https://nodejs.org/) 18 or newer, in this folder: `npm run relay` (nothing to install). It listens on `http://localhost:8787`.
-2. Optionally, for an OpenSky account's larger allowance, put the API client's `credentials.json` from your OpenSky account page in `relay/` (it is never committed), or set `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET`.
-3. On the site, under **Live traffic**, open **Flight relay on this computer** and choose **Use**. Chrome may ask to allow access to devices on your local network.
-
-The relay serves only the browser on the same computer, and only while it runs; the site remembers it and falls back to the Power Globe API when it is not running. Like the API, it shares each answer while it is fresh and keeps the last good one for when a feed fails.
 
 ## Deployment
 
