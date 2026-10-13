@@ -25,6 +25,9 @@ import { airportDetailsHtml, airportPlace, verdictText } from './airportview.js'
 import { setupWindCheck } from './windcheck.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
+import { setupAirportMap } from './airportmap.js';
+import { latestObservation } from './metar.js';
+import { explain } from './api.js';
 
 // Timeline playback speed, in forecast steps (3 hours each) per second.
 const STEPS_PER_SECOND = 1;
@@ -224,17 +227,36 @@ const windCheck = setupWindCheck({
   formatTime: (time) => formatTime(time),
   onSelect: (airport) => goToAirport(airport, { fromList: true }),
   // Airports with wind trouble are marked on the map while the wind check is in use.
-  onProblems: (problems) => mapFeatures.setAirports(state.windCheck ? problems : [], (airport) => goToAirport(airport, { fromList: state.windCheck })),
-  onLimitsChange: () => renderDetails(),
+  onProblems: (problems) =>
+    mapFeatures.setAirports(state.windCheck ? problems : [], (airport) => {
+      pickedAt = performance.now();
+      goToAirport(airport, { fromList: state.windCheck });
+    }),
+  onLimitsChange: () => {
+    renderDetails();
+    airportMap.refresh();
+  },
+});// Zoomed in to airports: runways coloured by whether they can be used in the wind.
+const airportMap = setupAirportMap({
+  globe,
+  mapFeatures,
+  getTime: () => currentTime(),
+  getLimits: () => windCheck.limits(),
+  onSelect: (airport) => {
+    // A tap on a label should not also open the weather where it landed.
+    pickedAt = performance.now();
+    showAirport(airport);
+  },
 });
+
 globe.pointOfView({ lat: 22, lng: -25, altitude: narrowScreen ? 3.6 : 2.4 });
 const controls = globe.controls();
 controls.autoRotate = !reducedMotion;
 controls.autoRotateSpeed = 0.22;
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
-// Stop about 40 km above the ground, a little above the weather layers.
-controls.minDistance = globe.getGlobeRadius() * 1.006;
+// Stop about 16 km above the ground: above the weather layers, close enough to see runways.
+controls.minDistance = globe.getGlobeRadius() * 1.0025;
 
 const shape = gridShape(GRID_STEP);
 const field = new FieldOverlay(globe, { shape });
@@ -388,6 +410,7 @@ function drawStep(step) {
   renderCaption();
   renderDetails();
   windCheck.update();
+  airportMap.refresh();
   state.drawnStep = step;
 }
 
@@ -545,7 +568,10 @@ async function refresh(force = false) {
     state.fieldFade = 0;
     seek(startIndex(times));
     if (!reducedMotion) setPlaying(true);
-    els.status.textContent = `${FORECAST_DAYS}-day forecast, every 3 hours`;
+    const updated = state.forecast.built
+      ? ` · updated ${new Date(state.forecast.built).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`
+      : '';
+    els.status.textContent = `${FORECAST_DAYS}-day forecast, every 3 hours${updated}`;
   } catch (err) {
     console.error(err);
     // Most failures are temporary (a busy or rate-limited API), so try again by itself.
@@ -615,6 +641,7 @@ let regionTimer;
 function onView(pov) {
   basemap.setAltitude(pov.altitude);
   mapFeatures.update(pov.altitude);
+  airportMap.view(pov);
   const zoomedIn = pov.altitude < DETAIL_ALTITUDE;
   controls.autoRotate = state.autoRotate && !zoomedIn;
   if (!zoomedIn) {
@@ -750,7 +777,8 @@ async function showAirport(airport, { fromList = false } = {}) {
   openSidePanel();
   windCheck.close();
   syncWindCheckButton();
-  const detail = { airport, hourly: null, fromList };
+  // `observation`: undefined while the METAR loads, null if there is none.
+  const detail = { airport, hourly: null, fromList, observation: undefined };
   state.detail = detail;
   mapFeatures.setMarker({ lat: airport.lat, lng: airport.lng, name: airport.iata || airport.ident });
   els.details.classList.remove('hidden');
@@ -759,8 +787,18 @@ async function showAirport(airport, { fromList = false } = {}) {
   els.detailsBack.hidden = !fromList;
   els.detailsTitle.textContent = airport.name;
   els.detailsBody.innerHTML = `<p>${airportPlace(airport)}</p><p>Loading conditions…</p>`;
+  latestObservation(airport.ident)
+    .then((observation) => {
+      detail.observation = observation;
+    })
+    .catch((err) => {
+      console.error(err);
+      detail.observation = { error: explain(err) };
+    })
+    .finally(() => state.detail === detail && renderDetails());
   try {
-    const weather = await airportWeather([airport]);
+    // The freshest forecast for the one airport being looked at.
+    const weather = await airportWeather([airport], { preferLive: true });
     if (state.detail !== detail) return;
     detail.hourly = weather.get(airport.ident);
     renderDetails();
@@ -823,8 +861,9 @@ function backToWindCheck() {
   (row || els.windCheck.panel.querySelector('h2')).focus?.();
 }
 
+
 // Altitude to show a searched airport from: low enough to make out its runways.
-const AIRPORT_ALTITUDE = 0.012;
+const AIRPORT_ALTITUDE = 0.004;
 // Degrees of latitude the view spans per globe radius of camera altitude (see detail.js).
 const LAT_SPAN_PER_ALTITUDE = 53;
 
@@ -907,6 +946,7 @@ function renderDetails() {
       limitsLabel: windCheck.label(),
       formatTime,
       formatHour,
+      observation: detail.observation,
     });
     return;
   }

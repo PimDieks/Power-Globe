@@ -1,6 +1,7 @@
 // Airports and their runways (from OurAirports, see scripts/build-airports.mjs), airport search,
 // and hourly ground conditions at airports from Open-Meteo.
-import { fetchAirportHourly } from './weather.js';
+import { AIRPORT_VARIABLES, fetchAirportHourly, parseTime } from './weather.js';
+import { SNAPSHOT_FRESH_MS, fetchSnapshot } from './api.js';
 
 // Case- and accent-insensitive form for matching, so "sao" finds "São Paulo".
 export const fold = (text) =>
@@ -23,13 +24,17 @@ export function toAirport([ident, iata, name, city, country, lat, lng, elevation
     elevationFt,
     large: large === 1,
     scheduled: scheduled === 1,
-    runways: runways.map(([le, leHeading, he, heHeading, lengthFt, surface]) => ({
+    runways: runways.map(([le, leHeading, he, heHeading, lengthFt, surface, widthFt = 0, leLat = null, leLng = null, heLat = null, heLng = null]) => ({
       le,
       leHeading,
       he,
       heHeading,
       lengthFt,
       surface,
+      widthFt,
+      // Threshold positions, or null where OurAirports has none.
+      leEnd: leLat == null ? null : { lat: leLat, lng: leLng },
+      heEnd: heLat == null ? null : { lat: heLat, lng: heLng },
     })),
     // Airports it has scheduled routes to: a measure of how busy it is.
     routes,
@@ -81,8 +86,21 @@ export function searchAirports(airports, query, limit = 8) {
 export const majorAirports = (airports) => airports.filter((a) => a.large && a.scheduled);
 
 // Conditions at an airport at a GMT time ("2026-10-13T15:00"), or null if outside the data.
+// Series every few hours (the site's own data) give the latest entry up to three hours before.
 export function conditionsAt(hourly, time) {
-  const i = hourly?.time?.indexOf(time) ?? -1;
+  const times = hourly?.time;
+  if (!times) return null;
+  let i = times.indexOf(time);
+  if (i < 0) {
+    const t = Date.parse(`${time}Z`);
+    for (let k = times.length - 1; k >= 0; k--) {
+      const tk = Date.parse(`${times[k]}Z`);
+      if (tk <= t) {
+        if (t - tk < 3 * 3_600_000 && k < times.length - 1) i = k;
+        break;
+      }
+    }
+  }
   if (i < 0) return null;
   return {
     time,
@@ -98,19 +116,52 @@ export function conditionsAt(hourly, time) {
 const CACHE_MS = 60 * 60 * 1000;
 const weatherCache = new Map();
 
-// Hourly ground conditions for `airports`, fetching only those not cached. `onData(map)` is
-// called as each batch arrives, so a long list can fill in progressively.
-export async function airportWeather(airports, { onData, onProgress, onWait } = {}) {
+// The site's own airport weather (major airports, every three hours, see build-data.mjs):
+// { built, end, get(ident) → series like Open-Meteo's hourly }, or null.
+export function snapshotSeries(snapshot) {
+  if (!snapshot?.times?.length || !snapshot.airports) return null;
+  const variables = snapshot.variables ?? AIRPORT_VARIABLES;
+  return {
+    built: Date.parse(snapshot.built),
+    end: parseTime(snapshot.times.at(-1)),
+    get(ident) {
+      const rows = snapshot.airports[ident];
+      if (!rows) return null;
+      return Object.fromEntries([['time', snapshot.times], ...variables.map((v, i) => [v, rows[i]])]);
+    },
+  };
+}
+
+let snapshotPromise = null;
+const airportSnapshot = () => (snapshotPromise ??= fetchSnapshot('api/airport-weather.json').then(snapshotSeries));
+
+// Hourly ground conditions for `airports`, fetching only those not cached: from the site's own
+// data while it is recent, else Open-Meteo, else the site's data however old. `preferLive` asks
+// Open-Meteo first (for the one airport being looked at). `onData(map)` is called as each batch
+// arrives, so a long list can fill in progressively.
+export async function airportWeather(airports, { onData, onProgress, onWait, preferLive = false } = {}) {
   const now = Date.now();
   const result = new Map();
-  const missing = [];
+  let missing = [];
   for (const a of airports) {
     const cached = weatherCache.get(a.ident);
     if (cached && now - cached.at < CACHE_MS) result.set(a.ident, cached.hourly);
     else missing.push(a);
   }
+  // Fill in what the site's own data has; resolves to the airports it did not have.
+  const fromSnapshot = async (list, maxAge) => {
+    const snapshot = await airportSnapshot();
+    if (!snapshot || now - snapshot.built > maxAge || snapshot.end < now) return list;
+    return list.filter((a) => {
+      const series = snapshot.get(a.ident);
+      if (series) result.set(a.ident, series);
+      return !series;
+    });
+  };
+  if (missing.length && !preferLive) missing = await fromSnapshot(missing, SNAPSHOT_FRESH_MS);
   if (result.size) onData?.(result);
-  if (missing.length) {
+  if (!missing.length) return result;
+  try {
     await fetchAirportHourly(missing, {
       onProgress,
       onWait,
@@ -122,6 +173,11 @@ export async function airportWeather(airports, { onData, onProgress, onWait } = 
         onData?.(result);
       },
     });
+  } catch (err) {
+    const before = result.size;
+    await fromSnapshot(missing.filter((a) => !result.has(a.ident)), Infinity);
+    if (result.size === before) throw err;
+    onData?.(result);
   }
   return result;
 }

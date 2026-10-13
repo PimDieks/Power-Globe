@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-  # Rebuild every six hours so the bundled satellite elements stay fresh.
+  # Rebuild every six hours so the site's own data (forecast, airport weather, satellite
+  # elements) stays fresh.
   schedule:
     - cron: '23 */6 * * *'
 
@@ -30,7 +31,14 @@ jobs:
       # A fallback copy of the satellite elements; the site works without it.
       - run: npm run satellites
         continue-on-error: true
+      # The site's own data API (forecast and airport weather); the site works without it.
+      - run: npm run data
+        continue-on-error: true
       - run: npm run build
+        env:
+          # The Power Globe API (api/worker.js), if one is deployed: set the repository variable
+          # API_URL to its address, e.g. https://power-globe-api.<account>.workers.dev
+          VITE_API_URL: ${{ vars.API_URL }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

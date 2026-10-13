@@ -98,7 +98,19 @@ export function buildAirports(airportRows, runwayRows, routes = new Map()) {
     le ??= he != null ? (he + 180) % 360 : numberHeading(r.le_ident);
     he ??= le != null ? (le + 180) % 360 : null;
     if (le == null) continue;
-    const runway = [r.le_ident, Math.round(le), r.he_ident || '', Math.round(he), num(r.length_ft) ?? 0, (r.surface || '').toUpperCase().slice(0, 4)];
+    // Threshold positions, where known, to draw the runway on the map.
+    const ends = ['le_latitude_deg', 'le_longitude_deg', 'he_latitude_deg', 'he_longitude_deg'].map((k) => num(r[k]));
+    const located = ends.every((v) => v != null && !Number.isNaN(v));
+    const runway = [
+      r.le_ident,
+      Math.round(le),
+      r.he_ident || '',
+      Math.round(he),
+      num(r.length_ft) ?? 0,
+      (r.surface || '').toUpperCase().slice(0, 4),
+      num(r.width_ft) ?? 0,
+      ...(located ? ends.map((v) => Math.round(v * 1e5) / 1e5) : [null, null, null, null]),
+    ];
     if (!runwaysByAirport.has(r.airport_ref)) runwaysByAirport.set(r.airport_ref, []);
     runwaysByAirport.get(r.airport_ref).push(runway);
   }
@@ -148,7 +160,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       'Routes: OpenFlights (https://openflights.org/data.php), Open Database License (ODbL).',
     built: new Date().toISOString().slice(0, 10),
     fields: ['ident', 'iata', 'name', 'city', 'country', 'lat', 'lon', 'elevationFt', 'large', 'scheduled', 'runways', 'routes'],
-    runwayFields: ['leIdent', 'leHeadingT', 'heIdent', 'heHeadingT', 'lengthFt', 'surface'],
+    runwayFields: ['leIdent', 'leHeadingT', 'heIdent', 'heHeadingT', 'lengthFt', 'surface', 'widthFt', 'leLat', 'leLon', 'heLat', 'heLon'],
     airports: data,
   });
   await writeFile(OUT, json);

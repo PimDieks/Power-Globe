@@ -3,6 +3,8 @@
 An open-source, interactive 3D globe that visualizes temperature and other weather conditions around the world, with a runway wind check for airports.
 
 - **Airport conditions:** search any of about 5,000 airports by name, city or ICAO/IATA code (`EHAM`, `JFK`) to fly down to its runways and see the ground conditions at the time on the timeline: temperature, dew point (with the spread, and a fog hint when it is small), wind speed, direction and gusts in knots. Every runway end gets its headwind or tailwind and crosswind, gusts included, with crosswind and tailwind checked against your limits (headwind is shown but not limited), plus an outlook for the next 24 hours.
+- **Runways on the map:** zoom in on any airport and its runways are drawn to scale in their real layout (from OurAirports' threshold positions), coloured by whether they can be used in the forecast wind at the time on the timeline: green within limits, amber marginal, red out of limits. Closer in, each runway end gets a label (`27 ✓`) and each airport its wind; tap the wind to open the airport.
+- **Observed now:** the airport panel shows the latest official observation (METAR, from NOAA's Aviation Weather Center): the raw report, flight category (VFR, MVFR, IFR, LIFR), visibility and ceiling, and the runway check in the observed wind, above the forecast.
 - **Wind check:** a list of the major airports (about 1,150 large airports with scheduled flights) where wind and gusts put every runway marginal or over the crosswind and tailwind limits, worst first, and marked on the globe. Pick limits for light aircraft, regional or airliner operations or set your own; they are remembered. The list follows the timeline. All airports take a few minutes to load on the free weather API, so choose which come first: those **nearest to the view** (the airports around where you are looking come in at once, and moving the globe while it loads moves the check along) or the **most connected** (airports with routes to the most other airports, where most flights go).
 
 - **Live traffic, each behind its own toggle:**
@@ -33,7 +35,36 @@ npm run build    # production build in dist/
 npm run preview  # serve the production build locally
 npm run airports # rebuild public/data/airports.json from the latest OurAirports data
 npm run satellites # save CelesTrak's satellite elements into public/data/satellites/ (optional)
+npm run data       # build the site's own forecast and airport weather into public/data/api/ (optional)
 ```
+
+## The site's own data (Power Globe data API)
+
+Visitors should not depend on public services that limit or refuse requests, so the site carries its own copy of the data it needs, rebuilt every six hours by the deploy workflow and served next to the site under `data/`:
+
+| File | Contents | Source |
+| --- | --- | --- |
+| `data/api/forecast.json` | The global forecast grid the globe shows, 5 days every 3 hours | Open-Meteo |
+| `data/api/airport-weather.json` | Temperature, dew point, wind and gusts (kt) at the ~1,150 major airports, 5 days every 3 hours | Open-Meteo |
+| `data/airports.json` | Airports, runways (headings, thresholds, widths) and route counts | OurAirports, OpenFlights |
+| `data/satellites/<group>.tle` | Satellite orbital elements | CelesTrak |
+| `data/api/index.json` | What is there and when it was built | |
+
+The globe and the wind check use these while they are less than six and a half hours old (one shared download instead of every visitor spending the free API allowance; the wind check fills in all major airports at once), ask Open-Meteo directly otherwise, and fall back to the copy if Open-Meteo fails. The airport panel asks Open-Meteo first for the freshest forecast. Build them yourself with `npm run data` (about 1,550 Open-Meteo locations, paced to its limits).
+
+## Power Globe API (live data proxy)
+
+Live flights, METARs and (if needed) satellites come from services that do not accept requests from web pages (browsers block them, "Failed to fetch"). `api/worker.js` is a small proxy for them, run on Cloudflare Workers (free plan: 100,000 requests a day). It fetches the open feeds server-side, caches each answer at the edge (flights in an area 10 s, worldwide military 30 s, worldwide flights 60 s, METARs 2 min, satellites 2 h) so visitors share requests, and only answers this site. Routes: `/flights/global`, `/flights/area?lat=&lon=&nm=`, `/flights/military`, `/metar?ids=`, `/satellites/<group>`.
+
+To set it up once:
+
+1. Create a free account at [cloudflare.com](https://dash.cloudflare.com/sign-up), open **Workers & Pages** once so it gives you a `workers.dev` subdomain, and note your **Account ID** (shown on that page).
+2. Under **My Profile → API Tokens**, create a token from the **Edit Cloudflare Workers** template.
+3. In this repository's **Settings → Secrets and variables → Actions**, add the secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+4. Run the **Deploy the Power Globe API** workflow (Actions tab). Its log ends with the API's address, like `https://power-globe-api.<subdomain>.workers.dev`.
+5. Under **Settings → Secrets and variables → Actions → Variables**, add `API_URL` with that address, and run **Deploy to GitHub Pages**.
+
+Optionally, with a free OpenSky Network account, add its API client as Worker secrets for a larger allowance: `npx wrangler secret put OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` in `api/`. Without the proxy everything else works; live flights and METARs then show why they are unavailable.
 
 ## Deployment
 
@@ -58,6 +89,11 @@ Every push to `main` builds the site and deploys it to GitHub Pages via
 | `src/trafficlayer.js` | Aircraft and satellites as GPU point sprites, the selection ring and the orbit line. |
 | `src/trafficview.js` | The details panel for an aircraft or satellite. |
 | `scripts/fetch-satellites.mjs` | Saves a copy of CelesTrak's elements into the site at deploy time (every six hours), used while CelesTrak is not needed or cannot be reached. |
+| `src/airportmap.js`, `src/runwaymap.js` | Runways on the map, coloured by wind status, with runway end and wind labels. |
+| `src/metar.js` | The latest METAR and flight category. |
+| `src/api.js` | Where the site's own data and the live proxy are. |
+| `scripts/build-data.mjs` | Builds the site's own data API (forecast and airport weather). |
+| `api/worker.js` | The Power Globe API: the live data proxy (Cloudflare Worker). |
 | `src/search.js` | The search box, as an accessible combobox. |
 | `src/airports.js` | The airport list, airport search, and hourly ground conditions at airports (cached for an hour). |
 | `src/runways.js` | Headwind, tailwind and crosswind on each runway end, and the limit presets. Limits are checked against the stronger of the mean wind and the gusts. |
@@ -82,6 +118,7 @@ and the UI pick it up automatically.
 Precipitation is shown as a rate, mm per hour averaged over the 3 hours up to the time shown, on the map, in the storm markers and in the details panel alike.
 
 - Weather data: [Open-Meteo.com](https://open-meteo.com/), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The free API is for non-commercial use, with a fair-use limit of about 10,000 calls per day.
+- Observations (METAR): [NOAA Aviation Weather Center](https://aviationweather.gov/data/api/) (public domain).
 - Live flights: [The OpenSky Network](https://opensky-network.org/) (free for non-commercial use), [adsb.lol](https://adsb.lol/) (Open Database License), [airplanes.live](https://airplanes.live/) and [adsb.fi](https://adsb.fi/) (free for non-commercial use).
 - Satellites: orbital elements from [CelesTrak](https://celestrak.org/); positions computed with [satellite.js](https://github.com/shashwatak/satellite-js) (MIT).
 - Street and topographic maps: [Esri](https://www.esri.com/) World Street Map and World Topo Map (Esri, HERE, Garmin, USGS, OpenStreetMap contributors and the GIS User Community), under [Esri's terms of use](https://www.esri.com/en-us/legal/terms/full-master-agreement).

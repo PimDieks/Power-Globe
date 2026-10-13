@@ -276,8 +276,8 @@ describe('build-airports', () => {
     expect(airport[11]).toBe(12);
     expect(airport.slice(0, 10)).toEqual(['EXXX', 'TST', 'Test', 'Town', 'NL', 50.1235, 4.5, 30, 1, 1]);
     expect(airport[10]).toEqual([
-      ['09', 92, '27', 272, 8000, 'ASPH'],
-      ['18', 180, '36', 0, 6000, 'ASPH'],
+      ['09', 92, '27', 272, 8000, 'ASPH', 0, null, null, null, null],
+      ['18', 180, '36', 0, 6000, 'ASPH', 0, null, null, null, null],
     ]);
   });
 });

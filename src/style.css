@@ -958,6 +958,96 @@ input:disabled {
   height: 10px;
 }
 
+/* Runway ends and airport winds on the map. Zero-size anchors like the city labels. */
+
+.runway-label,
+.wind-label {
+  position: relative;
+  width: 0;
+  height: 0;
+}
+
+.runway-label span,
+.wind-label span {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(-50%, -50%);
+  padding: 1px 6px;
+  border-radius: 6px;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+.runway-label span {
+  color: #0a0e18;
+  background: var(--status, #e6ebf2);
+  box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.7);
+}
+
+.wind-label span {
+  color: #fff;
+  background: rgba(10, 14, 24, 0.88);
+  border: 1px solid rgba(155, 209, 255, 0.6);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.wind-label i {
+  display: inline-block;
+  margin-right: 4px;
+  font-style: normal;
+  color: var(--accent);
+}
+
+/* Observed weather in the airport panel */
+
+.observation {
+  margin-bottom: 4px;
+}
+
+.observation h3 {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.observation-age {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.side-panel p.raw-metar {
+  margin: 0 0 10px;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.raw-metar code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+}
+
+/* Flight categories in their usual aviation colours. */
+.badge.category-vfr {
+  background: #7ee2a8;
+}
+
+.badge.category-mvfr {
+  background: #8fb8ff;
+}
+
+.badge.category-ifr {
+  background: #ff8a80;
+}
+
+.badge.category-lifr {
+  background: #e59cff;
+}
+
 /* Timeline */
 
 #timeline {

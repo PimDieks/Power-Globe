@@ -1,4 +1,5 @@
 import { VARIABLES } from './layers.js';
+import { SNAPSHOT_FRESH_MS, fetchSnapshot } from './api.js';
 
 const API_URL = 'https://api.open-meteo.com/v1/forecast';
 // Open-Meteo accepts many coordinates per request; keep URLs and responses a sensible size.
@@ -183,6 +184,8 @@ export function buildAirportUrl(airports) {
 
 // Locations kept free for tapping on the map while a long airport list loads.
 export const AIRPORT_RESERVE = 20;
+// Hourly airport conditions every this many hours in the site's own data.
+export const AIRPORT_SNAPSHOT_STEP = 3;
 const BUDGET_POLL_MS = 2000;
 
 // Hourly airport conditions, 100 airports per request. Long lists are paced to the free API's
@@ -277,17 +280,41 @@ function writeCache(key, data) {
   }
 }
 
-// Global forecast grid, cached locally to stay within the free API's limits.
+// The global forecast from the site's own data API, with `built` (ms), if it is there and still
+// reaches the present.
+async function forecastSnapshot(step) {
+  const snapshot = await fetchSnapshot('api/forecast.json');
+  const data = snapshot?.data;
+  if (!data?.times?.length || snapshot.step !== step) return null;
+  if (parseTime(data.times.at(-1)) < Date.now()) return null;
+  return { ...data, built: Date.parse(snapshot.built) };
+}
+
+// Global forecast grid: cached locally, else the site's own copy while it is recent (so
+// visitors share one download instead of each spending the free API's allowance), else
+// Open-Meteo, else the site's copy however old. `force` asks Open-Meteo first.
 export async function loadForecast({ step = GRID_STEP, force = false, onProgress } = {}) {
   const key = `${CACHE_KEY}:${step}`;
+  let snapshot = null;
   if (!force) {
     const cached = readCache(key);
     if (cached) return cached;
+    snapshot = await forecastSnapshot(step);
+    if (snapshot && Date.now() - snapshot.built < SNAPSHOT_FRESH_MS) {
+      writeCache(key, snapshot);
+      return snapshot;
+    }
   }
-  const points = buildGrid(step);
-  const data = toForecast(points, await fetchHourly(points, { threeHourly: true, onProgress }));
-  writeCache(key, data);
-  return data;
+  try {
+    const points = buildGrid(step);
+    const data = toForecast(points, await fetchHourly(points, { threeHourly: true, onProgress }));
+    writeCache(key, data);
+    return data;
+  } catch (err) {
+    snapshot ??= await forecastSnapshot(step);
+    if (snapshot) return snapshot;
+    throw err;
+  }
 }
 
 // Finer forecast for one region of the globe, for when the view is zoomed in. Kept in
