@@ -19,6 +19,7 @@ import { ScreenFlow } from './screenflow.js';
 import { HAZARDS, hazardRings } from './patterns.js';
 import { DETAIL_ALTITUDE, needsNewRegion, regionFor, viewBounds } from './detail.js';
 import { setupBasemap, setupMapFeatures } from './map.js';
+import { setupSearch } from './search.js';
 
 // Timeline playback speed, in forecast steps (3 hours each) per second.
 const STEPS_PER_SECOND = 1;
@@ -75,6 +76,11 @@ const els = {
   now: document.getElementById('now'),
   caption: document.getElementById('caption'),
   controls: document.getElementById('controls'),
+  controlsToggle: document.getElementById('controls-toggle'),
+  controlsBody: document.getElementById('controls-body'),
+  searchInput: document.getElementById('search-input'),
+  searchResults: document.getElementById('search-results'),
+  searchStatus: document.getElementById('search-status'),
 };
 
 const state = {
@@ -98,7 +104,7 @@ const state = {
 
 if (reducedMotion) els.wind.checked = false;
 // On phones the controls start folded so the globe gets the screen.
-if (narrowScreen) els.controls.open = false;
+if (narrowScreen) setControlsOpen(false);
 
 const fmt = (value, unit) => (value == null ? '–' : `${Math.round(value * 10) / 10} ${unit}`);
 
@@ -141,7 +147,7 @@ const globe = new Globe(els.globe, { animateIn: !reducedMotion })
   .onGlobeClick(({ lat, lng }) => showDetails(lat, lng));
 
 const setMapBrightness = setupBasemap(globe, `${IMAGE_BASE}/earth-blue-marble.jpg`);
-const updateMapFeatures = setupMapFeatures(globe);
+const mapFeatures = setupMapFeatures(globe);
 globe.pointOfView({ lat: 22, lng: -25, altitude: narrowScreen ? 3.6 : 2.4 });
 const controls = globe.controls();
 controls.autoRotate = !reducedMotion;
@@ -470,7 +476,7 @@ async function fetchRegion(region) {
 let regionTimer;
 function onView(pov) {
   setMapBrightness(pov.altitude);
-  updateMapFeatures(pov.altitude);
+  mapFeatures.update(pov.altitude);
   const zoomedIn = pov.altitude < DETAIL_ALTITUDE;
   controls.autoRotate = state.autoRotate && !zoomedIn;
   if (!zoomedIn) {
@@ -503,14 +509,26 @@ function announce(message) {
   });
 }
 
-async function showDetails(lat, lng) {
+// The layers and display options fold away; the title and search box stay visible.
+function setControlsOpen(open) {
+  els.controlsBody.hidden = !open;
+  els.controlsToggle.setAttribute('aria-expanded', String(open));
+  els.controls.classList.toggle('collapsed', !open);
+  if (open && phoneLayout.matches) closeDetails();
+}
+
+// `name` titles the panel, e.g. a searched place (tapped spots show coordinates); `pinLabel`
+// is the shorter name shown on the map pin.
+async function showDetails(lat, lng, name, pinLabel = name) {
   state.autoRotate = false;
   controls.autoRotate = false;
   const detail = { lat, lng, data: null };
   state.detail = detail;
-  if (phoneLayout.matches) els.controls.open = false;
+  const title = name ?? coords(lat, lng);
+  if (phoneLayout.matches) setControlsOpen(false);
+  mapFeatures.setMarker({ lat, lng, name: pinLabel });
   els.details.classList.remove('hidden');
-  els.detailsTitle.textContent = coords(lat, lng);
+  els.detailsTitle.textContent = title;
   els.detailsBody.innerHTML = '<p>Loading…</p>';
   try {
     const data = await loadPointForecast(lat, lng);
@@ -520,7 +538,7 @@ async function showDetails(lat, lng) {
       renderDetails();
       const index = detailIndex(data);
       announce(
-        `Weather at ${coords(lat, lng)}: ${describeWeatherCode(data.weather_code?.[index])}, ` +
+        `Weather at ${title}: ${describeWeatherCode(data.weather_code?.[index])}, ` +
           `${fmt(data.temperature_2m?.[index], '°C')}.`,
       );
     }
@@ -528,7 +546,7 @@ async function showDetails(lat, lng) {
     console.error(err);
     if (state.detail === detail) {
       els.detailsBody.innerHTML = `<p>Could not load weather here. ${err.message ?? ''}</p>`;
-      announce(`Could not load weather at ${coords(lat, lng)}.`);
+      announce(`Could not load weather at ${title}.`);
     }
   }
 }
@@ -536,6 +554,28 @@ async function showDetails(lat, lng) {
 function closeDetails() {
   state.detail = null;
   els.details.classList.add('hidden');
+  mapFeatures.setMarker(null);
+}
+
+// Altitude to show a searched place from.
+const PLACE_ALTITUDE = 0.35;
+// Degrees of latitude the view spans per globe radius of camera altitude (see detail.js).
+const LAT_SPAN_PER_ALTITUDE = 53;
+
+// Glide to a searched place and open its forecast. On phones the details panel covers the lower
+// half of the screen, so aim the camera a little south to put the place in the open space
+// between the search box and the panel.
+function goTo(place) {
+  let lat = place.lat;
+  if (phoneLayout.matches) {
+    const top = els.controls.offsetTop + els.controls.offsetHeight;
+    const bottom = Math.max(top + 80, window.innerHeight * 0.45);
+    const shift = (window.innerHeight / 2 - (top + bottom) / 2) / window.innerHeight;
+    lat = Math.max(-85, Math.min(85, lat - shift * LAT_SPAN_PER_ALTITUDE * PLACE_ALTITUDE));
+  }
+  globe.pointOfView({ lat, lng: place.lng, altitude: PLACE_ALTITUDE }, reducedMotion ? 0 : 1800);
+  const name = place.detail ? `${place.name}, ${place.detail}` : place.name;
+  showDetails(place.lat, place.lng, name, place.name);
 }
 
 // Temperature sparkline for the clicked spot, with a marker at the timeline position.
@@ -609,8 +649,12 @@ els.detailsClose.addEventListener('click', closeDetails);
 window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && state.detail) closeDetails();
 });
-els.controls.addEventListener('toggle', () => {
-  if (els.controls.open && phoneLayout.matches) closeDetails();
+els.controlsToggle.addEventListener('click', () => setControlsOpen(els.controlsBody.hidden));
+setupSearch({
+  input: els.searchInput,
+  list: els.searchResults,
+  status: els.searchStatus,
+  onSelect: goTo,
 });
 els.hazards.addEventListener('change', invalidate);
 
@@ -619,11 +663,13 @@ els.hazards.addEventListener('change', invalidate);
 function updateLayout() {
   const root = document.documentElement.style;
   root.setProperty('--credits-height', `${els.credits.offsetHeight}px`);
+  root.setProperty('--controls-bottom', `${els.controls.offsetTop + els.controls.offsetHeight}px`);
   root.setProperty('--timeline-top', `${window.innerHeight - els.timeline.offsetTop}px`);
 }
 const layoutObserver = new ResizeObserver(updateLayout);
 layoutObserver.observe(els.timeline);
 layoutObserver.observe(els.credits);
+layoutObserver.observe(els.controls);
 window.addEventListener('resize', updateLayout);
 updateLayout();
 

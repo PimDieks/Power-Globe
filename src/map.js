@@ -73,8 +73,20 @@ function labelElement(city) {
   return el;
 }
 
-// Country borders and city names that appear as the view zooms in. Returns an update
-// function to call with the camera altitude.
+// A pin for the place whose forecast is open, labelled with its name if it has one.
+function markerElement(name) {
+  const el = document.createElement('div');
+  el.className = 'place-marker';
+  if (name) {
+    const label = document.createElement('span');
+    label.textContent = name;
+    el.append(label);
+  }
+  return el;
+}
+
+// Country borders and city names that appear as the view zooms in, and a pin for the selected
+// place. Returns `update(altitude)` to call as the camera moves and `setMarker(place)`.
 export function setupMapFeatures(globe) {
   const elements = new Map(CITIES.map((city) => [city, labelElement(city)]));
   globe
@@ -82,7 +94,7 @@ export function setupMapFeatures(globe) {
     .htmlLng('lng')
     .htmlAltitude(0.0006)
     .htmlTransitionDuration(0)
-    .htmlElement((city) => elements.get(city))
+    .htmlElement((d) => d.el ?? elements.get(d))
     .pathPoints((line) => line)
     .pathPointLat((p) => p[1])
     .pathPointLng((p) => p[0])
@@ -93,8 +105,14 @@ export function setupMapFeatures(globe) {
     .pathTransitionDuration(0);
 
   let tier = -1;
+  let marker = null;
   let borders = null;
   let bordersShown = false;
+
+  function refreshLabels() {
+    const cities = CITIES.filter((city) => city.tier <= tier && !(marker && city.name === marker.name));
+    globe.htmlElementsData(marker ? [...cities, marker] : cities);
+  }
 
   async function loadBorders() {
     // Loaded on demand: the border data is only needed once someone zooms in.
@@ -105,11 +123,16 @@ export function setupMapFeatures(globe) {
     return mesh(world, world.objects.countries, (a, b) => a !== b).coordinates;
   }
 
-  return (altitude) => {
+  function setMarker(place) {
+    marker = place ? { lat: place.lat, lng: place.lng, name: place.name, el: markerElement(place.name) } : null;
+    refreshLabels();
+  }
+
+  function update(altitude) {
     const nextTier = labelTier(altitude);
     if (nextTier !== tier) {
       tier = nextTier;
-      globe.htmlElementsData(CITIES.filter((city) => city.tier <= tier));
+      refreshLabels();
     }
     const showBorders = altitude < MAP_ALTITUDE;
     if (showBorders === bordersShown) return;
@@ -126,5 +149,7 @@ export function setupMapFeatures(globe) {
     borders.then((lines) => {
       if (bordersShown) globe.pathsData(lines);
     });
-  };
+  }
+
+  return { update, setMarker };
 }

@@ -135,6 +135,9 @@ function fetchJson(url) {
   return run;
 }
 
+// Any other Open-Meteo request (e.g. place search), in the same queue as the forecast.
+export const queuedJson = (url) => fetchJson(url);
+
 // Hourly forecasts for a list of points, in the same order. The API returns an array for
 // multiple coordinates and a single object for one. `onProgress(done, total)` reports chunks.
 export async function fetchHourly(points, { threeHourly = false, onProgress } = {}) {

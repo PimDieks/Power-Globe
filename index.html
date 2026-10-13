@@ -13,27 +13,53 @@
   <body>
     <main id="globe" aria-label="Weather globe" aria-describedby="globe-help"></main>
 
-    <aside aria-label="Layers and display">
+    <aside aria-label="Search, layers and display">
       <p id="globe-help" class="visually-hidden">
         An interactive globe showing the weather forecast. Drag to turn it, pinch or scroll to zoom, and tap a spot to
-        see its forecast. Use the controls to choose what is shown and the timeline to pick a time.
+        see its forecast. Search for a place, choose what is shown with the controls, and pick a time on the timeline.
       </p>
-      <details class="panel" id="controls" open>
-        <summary><h1>Power Globe</h1></summary>
-        <div class="button-row" id="layer-buttons" role="radiogroup" aria-label="Weather layer"></div>
-        <div id="legend"></div>
-
-        <h2>Display</h2>
-        <div class="button-row" id="mode-buttons" role="radiogroup" aria-label="Display style"></div>
-        <label class="toggle"><input type="checkbox" id="toggle-wind" checked /> Wind flow</label>
-        <label class="toggle"><input type="checkbox" id="toggle-hazards" checked /> Storms &amp; heavy precipitation</label>
-        <div id="pattern-legend"></div>
-
-        <div class="status-row">
-          <span id="status" role="status">Loading forecast…</span>
-          <button id="refresh" type="button">Refresh</button>
+      <div class="panel" id="controls">
+        <div class="panel-head">
+          <h1>Power Globe</h1>
+          <button id="controls-toggle" class="icon-button" type="button" aria-expanded="true" aria-controls="controls-body">
+            <span class="chevron" aria-hidden="true"></span><span class="visually-hidden">Layers and display options</span>
+          </button>
         </div>
-      </details>
+
+        <div class="search" role="search">
+          <label for="search-input" class="visually-hidden">Search for a city or place</label>
+          <input
+            id="search-input"
+            type="search"
+            placeholder="Search a city or place"
+            autocomplete="off"
+            spellcheck="false"
+            enterkeyhint="search"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded="false"
+            aria-controls="search-results"
+          />
+          <ul id="search-results" role="listbox" aria-label="Places" hidden></ul>
+          <p id="search-status" class="search-status" aria-live="polite"></p>
+        </div>
+
+        <div id="controls-body">
+          <div class="button-row" id="layer-buttons" role="radiogroup" aria-label="Weather layer"></div>
+          <div id="legend"></div>
+
+          <h2>Display</h2>
+          <div class="button-row" id="mode-buttons" role="radiogroup" aria-label="Display style"></div>
+          <label class="toggle"><input type="checkbox" id="toggle-wind" checked /> Wind flow</label>
+          <label class="toggle"><input type="checkbox" id="toggle-hazards" checked /> Storms &amp; heavy precipitation</label>
+          <div id="pattern-legend"></div>
+
+          <div class="status-row">
+            <span id="status" role="status">Loading forecast…</span>
+            <button id="refresh" type="button">Refresh</button>
+          </div>
+        </div>
+      </div>
     </aside>
 
     <aside class="panel hidden" id="details" aria-labelledby="details-title">
