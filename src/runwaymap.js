@@ -118,3 +118,84 @@ export function bearingBetween(a, b) {
   const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dl);
   return ((Math.atan2(y, x) / RAD) + 360) % 360;
 }
+
+// A flat frame in metres around `origin` (x east, y north); accurate over the few kilometres of
+// an airport view, where the screen also shows north up.
+export function localFrame(origin) {
+  const k = 111_320;
+  const c = Math.cos(origin.lat * RAD);
+  const wrap = (d) => ((((d + 180) % 360) + 360) % 360) - 180;
+  return {
+    toXY: (p) => ({ x: wrap(p.lng - origin.lng) * k * c, y: (p.lat - origin.lat) * k }),
+    toLatLng: ({ x, y }) => ({ lat: origin.lat + y / k, lng: origin.lng + x / (k * c) }),
+  };
+}
+
+const inRect = (p, r) => p.x >= r.x0 && p.x <= r.x1 && p.y >= r.y0 && p.y <= r.y1;
+
+function segmentsCross(p1, p2, q1, q2) {
+  const d = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  const d1 = d(q1, q2, p1);
+  const d2 = d(q1, q2, p2);
+  const d3 = d(p1, p2, q1);
+  const d4 = d(p1, p2, q2);
+  return d1 * d2 < 0 && d3 * d4 < 0;
+}
+
+// Whether the segment a–b passes through the rectangle.
+export function segmentHitsRect(a, b, r) {
+  if (inRect(a, r) || inRect(b, r)) return true;
+  const c = [
+    { x: r.x0, y: r.y0 },
+    { x: r.x1, y: r.y0 },
+    { x: r.x1, y: r.y1 },
+    { x: r.x0, y: r.y1 },
+  ];
+  return c.some((p, i) => segmentsCross(a, b, p, c[(i + 1) % 4]));
+}
+
+const overlaps = (r, s) => r.x0 < s.x1 && r.x1 > s.x0 && r.y0 < s.y1 && r.y1 > s.y0;
+
+// Where to put labels so none covers a runway or another label. Each label has an `anchor`
+// (x, y in metres), a preferred unit `direction` to sit in, and a size `w` × `h`; each runway
+// is a segment `a`–`b` with half width `r`. `px` is metres per screen pixel. Candidates go out
+// from the anchor, first straight along the direction, then turning to either side and moving
+// further out. A label with no free spot takes the first one clear of other labels, else its
+// first candidate. Returns label centres.
+export function placeLabels(labels, runways, px, { gap = 3 } = {}) {
+  const placed = [];
+  const ANGLES = [0, 25, -25, 50, -50, 80, -80, 115, -115, 150, -150, 180];
+  const DISTANCES = [6, 14, 24, 36, 52, 72, 100, 140];
+  return labels.map(({ anchor, direction, w, h }) => {
+    const rect = (c) => ({ x0: c.x - w / 2 - gap * px, x1: c.x + w / 2 + gap * px, y0: c.y - h / 2 - gap * px, y1: c.y + h / 2 + gap * px });
+    const clearOfLabels = (c) => !placed.some((s) => overlaps(rect(c), s));
+    const free = (c) => {
+      const r = rect(c);
+      if (!clearOfLabels(c)) return false;
+      // Grow the label by each runway's half width, so the runway's edges stay clear too.
+      return !runways.some((rw) => segmentHitsRect(rw.a, rw.b, { x0: r.x0 - rw.r, x1: r.x1 + rw.r, y0: r.y0 - rw.r, y1: r.y1 + rw.r }));
+    };
+    let first = null;
+    let firstClear = null;
+    let chosen = null;
+    for (const d of DISTANCES) {
+      for (const angle of ANGLES) {
+        const t = (angle * Math.PI) / 180;
+        const dir = { x: direction.x * Math.cos(t) - direction.y * Math.sin(t), y: direction.x * Math.sin(t) + direction.y * Math.cos(t) };
+        // From the anchor to the label's edge, then the gap, then to its centre.
+        const reach = d * px + Math.abs(dir.x) * (w / 2) + Math.abs(dir.y) * (h / 2);
+        const c = { x: anchor.x + dir.x * reach, y: anchor.y + dir.y * reach };
+        first ??= c;
+        if (!firstClear && clearOfLabels(c)) firstClear = c;
+        if (free(c)) {
+          chosen = c;
+          break;
+        }
+      }
+      if (chosen) break;
+    }
+    chosen ??= firstClear ?? first;
+    placed.push(rect(chosen));
+    return chosen;
+  });
+}

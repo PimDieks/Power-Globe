@@ -211,7 +211,6 @@ export function setupMapFeatures(globe) {
   // keeps an object on screen as long as the same datum is passed in).
   let airportMarkers = new Map();
   let runwayLabels = [];
-  let runwayData = new Map();
   let borders = null;
   let bordersShown = false;
 
@@ -249,18 +248,12 @@ export function setupMapFeatures(globe) {
     refreshLabels();
   }
 
-  // Labels for runway ends and airport winds (see airportmap.js), each with a unique `key`.
+  // Labels for runway ends and airport winds (see airportmap.js). Made afresh each time: they
+  // only change when the view settles, the timeline steps or weather arrives, and fresh labels
+  // can never be left at a previous layout's position.
   function setRunwayLabels(labels, onSelect) {
     if (!labels.length && !runwayLabels.length) return;
-    const next = new Map();
-    runwayLabels = labels.map((label) => {
-      const datum = runwayData.get(label.key) ?? { lat: label.lat, lng: label.lng, el: runwayLabelElement(label, onSelect) };
-      datum.lat = label.lat;
-      datum.lng = label.lng;
-      next.set(label.key, datum);
-      return datum;
-    });
-    runwayData = next;
+    runwayLabels = labels.map((label) => ({ lat: label.lat, lng: label.lng, el: runwayLabelElement(label, onSelect) }));
     refreshLabels();
   }
 

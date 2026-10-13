@@ -3,7 +3,7 @@
 import { airportWeather, conditionsAt, loadAirports } from './airports.js';
 import { STATUS, assessAirport, formatWind } from './runways.js';
 import { viewBounds } from './detail.js';
-import { bearingBetween, destination, runwayEnds, runwayStatus, setupRunways } from './runwaymap.js';
+import { destination, localFrame, placeLabels, runwayEnds, runwayStatus, setupRunways } from './runwaymap.js';
 
 // Runways show below this camera altitude (globe radii); a 3 km runway is then over 10 px long.
 export const RUNWAY_ALTITUDE = 0.035;
@@ -102,9 +102,11 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, onSele
     const time = getTime();
     const limits = getLimits();
     const mpp = metresPerPixel(pov.altitude, window.innerHeight);
-    const strips = [];
-    const labels = [];
     const showLabels = pov.altitude < LABEL_ALTITUDE;
+    const frame = localFrame(pov);
+    const strips = [];
+    const segments = [];
+    const wanted = [];
     for (const airport of shown) {
       const conditions = conditionsAt(weather.get(airport.ident), time);
       const endStatus = new Map();
@@ -113,35 +115,50 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, onSele
         const ends = runwayEnds(airport, runway);
         strips.push({ ends, widthFt: runway.widthFt, status: runwayStatus(runway, endStatus) });
         if (!showLabels) continue;
-        // A label just beyond each threshold, on the extended centreline.
-        const out = [bearingBetween(ends[1], ends[0]), bearingBetween(ends[0], ends[1])];
+        const [a, b] = ends.map(frame.toXY);
+        // As drawn: at least 5 px wide, plus its outline.
+        segments.push({ a, b, r: Math.max(runway.widthFt * 0.3048, 5 * mpp) / 2 + 1.5 * mpp });
+        const length = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+        const along = { x: (b.x - a.x) / length, y: (b.y - a.y) / length };
+        // Each end's label goes beyond its threshold, on the extended centreline if that is free.
         [runway.le, runway.he].forEach((ident, k) => {
           if (!ident) return;
           const status = endStatus.get(ident) ?? 'unknown';
-          labels.push({
-            key: `${airport.ident}:${ident}:${status}`,
-            kind: 'runway',
-            status,
-            text: `${ident} ${STATUS[status].icon}`,
-            title: `Runway ${ident}: ${STATUS[status].label}`,
-            ...destination(ends[k], out[k], 16 * mpp),
+          const text = `${ident} ${STATUS[status].icon}`;
+          wanted.push({
+            label: { key: `${airport.ident}:${ident}:${status}`, kind: 'runway', status, text, title: `Runway ${ident}: ${STATUS[status].label}` },
+            anchor: k ? b : a,
+            direction: k ? along : { x: -along.x, y: -along.y },
+            // Estimated size of the label on screen (12 px bold text, padding and border).
+            w: (8.2 * text.length + 18) * mpp,
+            h: 22 * mpp,
           });
         });
       }
       if (showLabels && conditions) {
-        labels.push({
-          key: `${airport.ident}:wind:${Math.round(conditions.direction)}:${Math.round(conditions.speed)}:${Math.round(conditions.gust ?? 0)}`,
-          kind: 'wind',
-          airport,
-          text: `${airport.iata || airport.ident} · ${formatWind(conditions)}`,
-          direction: conditions.direction,
-          title: `${airport.name}: open the runway check`,
+        const text = `${airport.iata || airport.ident} · ${formatWind(conditions)}`;
+        wanted.push({
+          label: {
+            key: `${airport.ident}:wind:${Math.round(conditions.direction)}:${Math.round(conditions.speed)}:${Math.round(conditions.gust ?? 0)}`,
+            kind: 'wind',
+            airport,
+            text,
+            direction: conditions.direction,
+            title: `${airport.name}: open the runway check`,
+          },
           // North of the airport, clear of its runways.
-          ...destination(airport, 0, Math.max(airportRadius(airport), 1500) + 30 * mpp),
+          anchor: frame.toXY(destination(airport, 0, airportRadius(airport))),
+          direction: { x: 0, y: 1 },
+          w: (7.6 * text.length + 34) * mpp,
+          h: 24 * mpp,
         });
       }
     }
     runways.draw(strips, mpp);
+    // Runway ends first, so they get the spots nearest their runways; then the winds.
+    wanted.sort((p, q) => (p.label.kind === 'wind') - (q.label.kind === 'wind'));
+    const centres = placeLabels(wanted, segments, mpp, { gap: 4 });
+    const labels = wanted.map((w, i) => ({ ...w.label, ...frame.toLatLng(centres[i]) }));
     mapFeatures.setRunwayLabels(labels, onSelect);
   }
 
