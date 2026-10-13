@@ -190,22 +190,14 @@ describe('live traffic', () => {
 });
 
 describe('Earth views', () => {
-  it('offers five maps of the Earth, each with tiles and a credit', async () => {
+  it('offers four maps of the Earth, each with tiles and a credit', async () => {
     const { BASEMAPS } = await import('../src/map.js');
-    expect(Object.keys(BASEMAPS)).toEqual(['satellite', 'streets', 'topo', 'clouds', 'aviation']);
+    expect(Object.keys(BASEMAPS)).toEqual(['satellite', 'streets', 'topo', 'aviation']);
     for (const map of Object.values(BASEMAPS)) {
-      expect(map.url(1, 2, 3)).toMatch(/^https:\/\/.+\/3\/2\/1(\.png|\.jpg)?$/);
+      expect(map.url(1, 2, 3)).toMatch(/^https:\/\/.+\/3\/2\/1(\.png)?$/);
       expect(map.credit).toBeTruthy();
       expect(map.maxLevel).toBeGreaterThan(0);
     }
-  });
-
-  it('shows the clouds of the last whole day, and the satellite imagery closer in', async () => {
-    const { BASEMAPS, cloudsDay } = await import('../src/map.js');
-    expect(cloudsDay(Date.parse('2026-10-13T00:30:00Z'))).toBe('2026-10-12');
-    expect(BASEMAPS.clouds.url(4, 2, 3)).toContain(`/VIIRS_NOAA20_CorrectedReflectance_TrueColor/default/${cloudsDay()}/`);
-    expect(BASEMAPS.clouds.url(4, 2, 12)).toBe(BASEMAPS.satellite.url(4, 2, 12));
-    expect(BASEMAPS.clouds.credit).toContain(cloudsDay());
   });
 
   it('draws the aviation chart through the Power Globe API, so its key stays there', async () => {
