@@ -23,7 +23,7 @@ describe('regionFor', () => {
     for (const altitude of [0.05, 0.2, 0.5, 1]) {
       for (const lat of [0, 52, -70]) {
         const { shape } = regionFor(viewBounds({ lat, lng: 5, altitude }, 1.8));
-        expect(shape.rows * shape.cols).toBeLessThanOrEqual(200);
+        expect(shape.rows * shape.cols).toBeLessThanOrEqual(150);
         expect(shapePoints(shape)).toHaveLength(shape.rows * shape.cols);
       }
     }

@@ -43,7 +43,7 @@ export function advect(lat, lng, u, v, seconds, rate = RATE) {
 // Glowing particles drifting with the wind, painted with fading trails onto a canvas that
 // wraps the sphere (or, zoomed in, just the area in view) above the colour field.
 export class WindFlow {
-  constructor(globe, { bounds = WORLD, count = 6000, width = 2048, height = width / 2, lineWidth = 1.3, altitude = 0.004 } = {}) {
+  constructor(globe, { bounds = WORLD, count = 6000, width = 2048, height = width / 2, lineWidth = 1.3, altitude = 0.0016 } = {}) {
     this.globe = globe;
     this.altitude = altitude;
     this.width = width;

@@ -187,7 +187,7 @@ export function patchGeometry(globe, bounds, altitude) {
 // Repainting a small canvas each frame keeps animation cheap. The global field covers the
 // whole sphere; a regional one shows finer data for the area being looked at.
 export class FieldOverlay {
-  constructor(globe, { shape, bounds = WORLD, width = 360, height = 180, altitude = 0.002, depthBias = 2, feather = 0, renderOrder = -3 }) {
+  constructor(globe, { shape, bounds = WORLD, width = 360, height = 180, altitude = 0.001, depthBias = 2, feather = 0, renderOrder = -3 }) {
     this.globe = globe;
     this.altitude = altitude;
     this.feather = feather;

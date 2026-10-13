@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import { CITIES, labelTier } from './cities.js';
 
-// Sentinel-2 cloudless satellite mosaic by EOX (CC BY 4.0), as Web Mercator map tiles.
+// Esri World Imagery: satellite and aerial imagery down to sub-metre detail in many places,
+// as Web Mercator map tiles.
 const TILE_URL = (x, y, level) =>
-  `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless_3857/default/g/${level}/${y}/${x}.jpg`;
-const MAX_TILE_LEVEL = 14;
+  `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${level}/${y}/${x}`;
+const MAX_TILE_LEVEL = 17;
 // Below this altitude the view reads as a map: brighter imagery, borders and city names.
 const MAP_ALTITUDE = 1.3;
 
@@ -13,6 +14,10 @@ const MAP_ALTITUDE = 1.3;
 // load, or if the tile server cannot be reached.
 export function setupBasemap(globe, backdropUrl) {
   globe.globeTileEngineUrl(TILE_URL).globeTileEngineMaxLevel(MAX_TILE_LEVEL);
+  let tilesTuned = false;
+  window.addEventListener('resize', () => {
+    tilesTuned = matchTileDetailToScreen(globe);
+  });
 
   const texture = new THREE.TextureLoader().load(backdropUrl);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -29,10 +34,33 @@ export function setupBasemap(globe, backdropUrl) {
   // brighten them when zoomed in to a map.
   const lights = globe.lights().map((light) => ({ light, intensity: light.intensity }));
   return (altitude) => {
+    // The tile engine joins the scene only once the globe has initialised, so keep trying.
+    tilesTuned ||= matchTileDetailToScreen(globe);
     const t = Math.min(1, Math.max(0, (altitude - 0.4) / (MAP_ALTITUDE + 0.6 - 0.4)));
     const brightness = 1 - 0.45 * t;
     for (const { light, intensity } of lights) light.intensity = intensity * brightness;
   };
+}
+
+// three-globe picks a tile level from the camera's altitude alone (level L from 8 / 2^L globe
+// radii down), which up close is about two levels too coarse for a phone's screen. Account
+// for how many device pixels the view spans, so close-up tiles come out about one texel per pixel.
+// Returns whether the tile engine was found.
+function matchTileDetailToScreen(globe) {
+  let engine = null;
+  globe.scene().traverse((obj) => {
+    if (!engine && Array.isArray(obj.thresholds) && 'tileUrl' in obj) engine = obj;
+  });
+  if (!engine) return false;
+  const pixels = window.innerHeight * window.devicePixelRatio;
+  // Levels finer than the default that the screen can show, e.g. about 2 on a phone.
+  const shift = Math.log2(Math.min(48, Math.max(8, 0.02 * pixels)) / 8);
+  // Keep the default for distant views, where it already looks sharp and finer levels would
+  // mean hundreds of extra tiles, and blend to the full shift from level 5 to 8.
+  engine.thresholds = engine.thresholds.map(
+    (_, level) => (8 / 2 ** level) * 2 ** (shift * Math.min(1, Math.max(0, (level - 5) / 3))),
+  );
+  return true;
 }
 
 function labelElement(city) {
@@ -49,13 +77,15 @@ export function setupMapFeatures(globe) {
   globe
     .htmlLat('lat')
     .htmlLng('lng')
-    .htmlAltitude(0.006)
+    .htmlAltitude(0.0006)
     .htmlTransitionDuration(0)
     .htmlElement((city) => elements.get(city))
     .pathPoints((line) => line)
     .pathPointLat((p) => p[1])
     .pathPointLng((p) => p[0])
-    .pathPointAlt(0.005)
+    // Close to the ground so they line up with the imagery when zoomed right in. They are drawn
+    // after the weather layers, which do not write depth, so they still show on top.
+    .pathPointAlt(0.0004)
     .pathColor(() => 'rgba(255, 255, 255, 0.28)')
     .pathTransitionDuration(0);
 

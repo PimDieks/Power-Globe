@@ -1,5 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { buildGrid, buildUrl, chunk, fetchHourly, gridShape, shapePoints, startIndex, toForecast } from '../src/weather.js';
+import {
+  apiBudget,
+  buildGrid,
+  buildUrl,
+  chunk,
+  fetchHourly,
+  gridShape,
+  resetApiBudget,
+  shapePoints,
+  startIndex,
+  toForecast,
+} from '../src/weather.js';
 import { LAYERS, VARIABLES, buildLut, colorFor, normalize, describeWeatherCode } from '../src/layers.js';
 
 describe('buildGrid', () => {
@@ -59,7 +70,27 @@ const fakeHourly = (n, offset = 0) => ({
 });
 
 describe('fetchHourly', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resetApiBudget();
+  });
+
+  it('counts requested locations against the free API limits', async () => {
+    vi.stubGlobal('fetch', async () => ({ ok: true, json: async () => ({ hourly: fakeHourly(1) }) }));
+    const now = Date.now();
+    expect(apiBudget(now)).toBe(600);
+    await fetchHourly(buildGrid(10).slice(0, 150));
+    expect(apiBudget(now)).toBe(450);
+    // The per-minute allowance recovers; the hourly one (5,000) is far from used up.
+    expect(apiBudget(now + 61_000)).toBe(600);
+  });
+
+  it('pauses after the API reports a rate limit', async () => {
+    vi.stubGlobal('fetch', async () => ({ ok: false, status: 429, json: async () => ({ reason: 'limit' }) }));
+    await expect(fetchHourly([{ lat: 0, lng: 0 }])).rejects.toThrow('429');
+    expect(apiBudget()).toBe(0);
+    expect(apiBudget(Date.now() + 61_000)).toBeGreaterThan(0);
+  });
 
   it('chunks requests and keeps point order', async () => {
     const fetchMock = vi.fn(async (url) => {

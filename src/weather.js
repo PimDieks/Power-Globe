@@ -62,6 +62,36 @@ export function buildUrl(points, { threeHourly = false } = {}) {
   return `${API_URL}?${params}`;
 }
 
+// Open-Meteo's free tier allows 600 locations per minute and 5,000 per hour. Requests are
+// counted here so optional ones (zoomed-in detail) can hold back before hitting the limit.
+const LIMITS = [
+  [60_000, 600],
+  [3_600_000, 5_000],
+];
+// After the API reports a rate limit, wait this long before asking again.
+const RATE_LIMIT_PAUSE_MS = 60_000;
+let spent = [];
+let pausedUntil = 0;
+
+function spend(locations, now = Date.now()) {
+  spent.push([now, locations]);
+}
+
+// Locations that can still be requested now without exceeding the free limits.
+export function apiBudget(now = Date.now()) {
+  if (now < pausedUntil) return 0;
+  spent = spent.filter(([t]) => now - t < LIMITS.at(-1)[0]);
+  return Math.min(
+    ...LIMITS.map(([window, limit]) => limit - spent.reduce((sum, [t, n]) => (now - t < window ? sum + n : sum), 0)),
+  );
+}
+
+// For tests.
+export function resetApiBudget() {
+  spent = [];
+  pausedUntil = 0;
+}
+
 export class ApiError extends Error {
   constructor(message, status) {
     super(message);
@@ -77,6 +107,7 @@ async function fetchJson(url) {
     throw new ApiError(err.name === 'TimeoutError' ? 'Open-Meteo did not respond in time' : 'Could not reach Open-Meteo');
   }
   if (!res.ok) {
+    if (res.status === 429) pausedUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
     // Open-Meteo explains errors as { error: true, reason: "..." }.
     const reason = await res.json().then((body) => body.reason, () => null);
     throw new ApiError(`Open-Meteo: ${reason ?? res.statusText ?? 'request failed'} (${res.status})`, res.status);
@@ -105,6 +136,7 @@ export async function fetchHourly(points, { threeHourly = false, onProgress } = 
   let done = 0;
   const responses = await mapLimit(parts, CONCURRENCY, async (part) => {
     let data;
+    spend(part.length);
     try {
       data = await fetchJson(buildUrl(part, { threeHourly }));
     } catch (err) {
