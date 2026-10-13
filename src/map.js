@@ -1,5 +1,8 @@
 import * as THREE from 'three';
+import SlippyMap from 'three-slippy-map-globe';
+import { PROXY_URL } from './api.js';
 import { CITIES, labelTier } from './cities.js';
+import { STATUS } from './runways.js';
 
 // Daily cloud imagery is used up to this tile level (about 300 m per pixel).
 const CLOUDS_MAX_LEVEL = 9;
@@ -48,6 +51,17 @@ export const BASEMAPS = {
       return `Clouds on ${cloudsDay()} (UTC): <a href="https://www.earthdata.nasa.gov/data/instruments/viirs" target="_blank" rel="noopener">NASA VIIRS</a> via GIBS; close up imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics and the GIS User Community`;
     },
   },
+  // An aeronautical chart: openAIP's airspaces, airports, navaids and reporting points (through
+  // the Power Globe API, which holds the key) over a plain light grey map.
+  aviation: {
+    label: 'Aviation',
+    url: esri('Canvas/World_Light_Gray_Base'),
+    maxLevel: 16,
+    light: 1.2,
+    chart: { url: (x, y, level) => `${PROXY_URL}/tiles/openaip/${level}/${x}/${y}.png`, maxLevel: 14 },
+    credit:
+      'Chart <a href="https://www.openaip.net/" target="_blank" rel="noopener">openAIP</a> (CC BY-NC 4.0); map <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, HERE, Garmin, OpenStreetMap contributors and the GIS User Community',
+  },
 };
 // Below this altitude the view reads as a map: brighter imagery, borders and city names.
 const MAP_ALTITUDE = 1.3;
@@ -59,9 +73,11 @@ const MAP_ALTITUDE = 1.3;
 export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCredit } = {}) {
   let style = BASEMAPS[initial] ?? BASEMAPS.satellite;
   globe.globeTileEngineUrl(style.url).globeTileEngineMaxLevel(style.maxLevel);
+  // A second, transparent layer of tiles just above the map, for a chart drawn over it.
+  const chart = setupChartLayer(globe);
   let tilesTuned = false;
   window.addEventListener('resize', () => {
-    tilesTuned = matchTileDetailToScreen(globe);
+    tilesTuned = matchTileDetailToScreen(globe, chart.engine);
   });
 
   const texture = new THREE.TextureLoader().load(backdropUrl);
@@ -84,7 +100,8 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
   function setAltitude(value) {
     altitude = value;
     // The tile engine joins the scene only once the globe has initialised, so keep trying.
-    tilesTuned ||= matchTileDetailToScreen(globe);
+    tilesTuned ||= matchTileDetailToScreen(globe, chart.engine);
+    chart.update();
     const t = Math.min(1, Math.max(0, (altitude - 0.4) / (MAP_ALTITUDE + 0.6 - 0.4)));
     // Not full brightness even zoomed in, so white wind trails and labels keep their contrast.
     const brightness = (0.85 - 0.3 * t) * style.light;
@@ -98,22 +115,74 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     // Drop the old map's tiles; the new URL then loads tiles for the current view.
     globe.globeTileEngineClearCache();
     globe.globeTileEngineMaxLevel(style.maxLevel).globeTileEngineUrl(style.url);
+    chart.set(style.chart);
     setAltitude(altitude);
     onCredit?.(style.credit);
   }
 
+  chart.set(style.chart);
   onCredit?.(style.credit);
   return { setAltitude, setStyle };
+}
+
+// A layer of transparent map tiles over the globe's own (three-globe has room for one).
+// `set({ url, maxLevel })` shows a chart, `set(null)` removes it; call `update()` as the camera
+// moves.
+function setupChartLayer(globe) {
+  const engine = new SlippyMap(globe.getGlobeRadius() * 1.00002);
+  engine.visible = false;
+  // Its dark backing sphere would hide the map below.
+  engine.children[0].material.visible = false;
+  const tileLevel = (tile) => Math.round(Math.log2((2 * Math.PI) / tile.geometry.parameters.phiLength));
+  // Tiles see through to the map, and only the current level shows: coarser tiles kept for
+  // later would otherwise show through between the finer ones' lines and labels.
+  const showLevel = () => {
+    for (const tile of engine.children) if (tile.material.map) tile.visible = tileLevel(tile) === engine.level;
+  };
+  const add = engine.add.bind(engine);
+  engine.add = (...tiles) => {
+    for (const tile of tiles) {
+      tile.material.transparent = true;
+      tile.renderOrder = 1;
+    }
+    add(...tiles);
+    showLevel();
+    return engine;
+  };
+  globe.scene().add(engine);
+  let settle = null;
+
+  return {
+    engine,
+    set(chart) {
+      engine.clearTiles();
+      engine.visible = Boolean(chart);
+      if (!chart) return;
+      engine.maxLevel = chart.maxLevel;
+      engine.tileUrl = chart.url;
+      engine.updatePov(globe.camera());
+    },
+    // Tiles are asked for once the view settles, not for every level passed on the way while
+    // zooming: far fewer requests to the chart's service.
+    update() {
+      if (!engine.visible) return;
+      clearTimeout(settle);
+      settle = setTimeout(() => {
+        engine.updatePov(globe.camera());
+        showLevel();
+      }, 250);
+    },
+  };
 }
 
 // three-globe picks a tile level from the camera's altitude alone (level L from 8 / 2^L globe
 // radii down), which up close is about two levels too coarse for a phone's screen. Account
 // for how many device pixels the view spans, so close-up tiles come out about one texel per pixel.
 // Returns whether the tile engine was found.
-function matchTileDetailToScreen(globe) {
+function matchTileDetailToScreen(globe, chart) {
   let engine = null;
   globe.scene().traverse((obj) => {
-    if (!engine && Array.isArray(obj.thresholds) && 'tileUrl' in obj) engine = obj;
+    if (!engine && obj !== chart && Array.isArray(obj.thresholds) && 'tileUrl' in obj) engine = obj;
   });
   if (!engine) return false;
   const pixels = window.innerHeight * window.devicePixelRatio;
@@ -129,7 +198,9 @@ function matchTileDetailToScreen(globe) {
   // from `d` globe radii up the screen shows π·H / (d·tan 25°) pixels of it (50° field of view).
   // The default is two levels coarser on a large screen, which looks soft.
   const wholeGlobe = (level) => (Math.PI * pixels * 0.6) / (Math.tan((25 * Math.PI) / 180) * 256 * 2 ** level);
-  engine.thresholds = engine.thresholds.map((_, level) => (level <= 4 ? Math.max(zoomed(level), wholeGlobe(level)) : zoomed(level)));
+  for (const e of [engine, chart].filter(Boolean)) {
+    e.thresholds = e.thresholds.map((_, level) => (level <= 4 ? Math.max(zoomed(level), wholeGlobe(level)) : zoomed(level)));
+  }
   return true;
 }
 
@@ -176,7 +247,11 @@ function airportElement(airport, status, onClick) {
 function runwayLabelElement(label, onSelect) {
   const el = document.createElement('div');
   el.className =
-    label.kind === 'wind' ? 'wind-label' : label.kind === 'airport' ? `airport-label status-${label.status}` : `runway-label status-${label.status}`;
+    label.kind === 'wind'
+      ? 'wind-label'
+      : label.kind === 'airport'
+        ? `airport-label status-${label.status}${label.flag ? ' flagged' : ''}`
+        : `runway-label status-${label.status}`;
   el.setAttribute('aria-hidden', 'true');
   el.title = label.title ?? '';
   const span = document.createElement('span');
@@ -192,6 +267,12 @@ function runwayLabelElement(label, onSelect) {
     span.append(arrow);
   }
   span.append(label.text);
+  // An airport the wind check flags: its status as on the wind check's markers.
+  if (label.flag) {
+    const badge = document.createElement('b');
+    badge.textContent = STATUS[label.status].icon;
+    span.append(badge);
+  }
   el.append(span);
   if (label.airport) {
     el.addEventListener('click', (event) => {
@@ -236,7 +317,9 @@ export function setupMapFeatures(globe) {
 
   function refreshLabels() {
     const cities = CITIES.filter((city) => city.tier <= tier && !(marker && city.name === marker.name));
-    const shown = marker ? airports.filter((a) => a.lat !== marker.lat || a.lng !== marker.lng) : airports;
+    // An airport with a label of its own on the map (see airportmap.js) needs no marker.
+    const labelled = new Set(runwayLabels.map((l) => l.ident).filter(Boolean));
+    const shown = airports.filter((a) => !labelled.has(a.ident) && !(marker && a.lat === marker.lat && a.lng === marker.lng));
     globe.htmlElementsData([...cities, ...runwayLabels, ...shown, ...(marker ? [marker] : [])]);
   }
 
@@ -260,7 +343,7 @@ export function setupMapFeatures(globe) {
     const next = new Map();
     airports = problems.map(({ airport, status }) => {
       const key = `${airport.ident}:${status}`;
-      const datum = airportMarkers.get(key) ?? { lat: airport.lat, lng: airport.lng, el: airportElement(airport, status, onClick) };
+      const datum = airportMarkers.get(key) ?? { lat: airport.lat, lng: airport.lng, ident: airport.ident, el: airportElement(airport, status, onClick) };
       next.set(key, datum);
       return datum;
     });
@@ -273,7 +356,7 @@ export function setupMapFeatures(globe) {
   // can never be left at a previous layout's position.
   function setRunwayLabels(labels, onSelect) {
     if (!labels.length && !runwayLabels.length) return;
-    runwayLabels = labels.map((label) => ({ lat: label.lat, lng: label.lng, el: runwayLabelElement(label, onSelect) }));
+    runwayLabels = labels.map((label) => ({ lat: label.lat, lng: label.lng, ident: label.airport?.ident, el: runwayLabelElement(label, onSelect) }));
     refreshLabels();
   }
 

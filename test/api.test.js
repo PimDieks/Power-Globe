@@ -15,6 +15,19 @@ const SCHIPHOL = toAirport([
 const reply = (body, init) => new Response(typeof body === 'string' ? body : JSON.stringify(body), init);
 
 describe('Power Globe API (worker)', () => {
+  it('serves openAIP chart tiles with the key it holds, and refuses tiles that do not exist', async () => {
+    const fetchFn = vi.fn(async () => new Response(new Uint8Array([137, 80, 78, 71]), { headers: { 'Content-Type': 'image/png' } }));
+    const env = { OPENAIP_API_KEY: 'k3y' };
+    const res = await route(new URL('https://api.example/tiles/openaip/8/131/84.png'), env, fetchFn);
+    expect(fetchFn.mock.calls[0][0]).toBe('https://api.tiles.openaip.net/api/data/openaip/8/131/84.png?apiKey=k3y');
+    expect(res.headers.get('Content-Type')).toBe('image/png');
+    expect(res.headers.get('Cache-Control')).toBe('public, max-age=86400');
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array([137, 80, 78, 71]));
+    await expect(route(new URL('https://api.example/tiles/openaip/15/0/0.png'), env, fetchFn)).rejects.toMatchObject({ status: 404 });
+    await expect(route(new URL('https://api.example/tiles/openaip/2/4/0.png'), env, fetchFn)).rejects.toMatchObject({ status: 404 });
+    await expect(route(new URL('https://api.example/tiles/openaip/2/1/1.png'), {}, fetchFn)).rejects.toMatchObject({ status: 503 });
+  });
+
   it('signs in to OpenSky with an account, shares answers for 2 minutes, and falls back to anonymous', async () => {
     const env = { OPENSKY_CLIENT_ID: 'id', OPENSKY_CLIENT_SECRET: 'secret' };
     const fetchFn = vi.fn(async (url, init) =>
