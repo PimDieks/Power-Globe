@@ -188,9 +188,9 @@ describe('live traffic', () => {
 });
 
 describe('Earth views', () => {
-  it('offers four maps of the Earth, each with tiles and a credit', async () => {
+  it('offers five maps of the Earth, each with tiles and a credit', async () => {
     const { BASEMAPS } = await import('../src/map.js');
-    expect(Object.keys(BASEMAPS)).toEqual(['satellite', 'streets', 'topo', 'clouds']);
+    expect(Object.keys(BASEMAPS)).toEqual(['satellite', 'streets', 'topo', 'clouds', 'aviation']);
     for (const map of Object.values(BASEMAPS)) {
       expect(map.url(1, 2, 3)).toMatch(/^https:\/\/.+\/3\/2\/1(\.png|\.jpg)?$/);
       expect(map.credit).toBeTruthy();
@@ -204,5 +204,11 @@ describe('Earth views', () => {
     expect(BASEMAPS.clouds.url(4, 2, 3)).toContain(`/VIIRS_NOAA20_CorrectedReflectance_TrueColor/default/${cloudsDay()}/`);
     expect(BASEMAPS.clouds.url(4, 2, 12)).toBe(BASEMAPS.satellite.url(4, 2, 12));
     expect(BASEMAPS.clouds.credit).toContain(cloudsDay());
+  });
+
+  it('draws the aviation chart through the Power Globe API, so its key stays there', async () => {
+    const { BASEMAPS } = await import('../src/map.js');
+    expect(BASEMAPS.aviation.chart.url(131, 84, 8)).toBe('https://power-globe-api.pimdieks.workers.dev/tiles/openaip/8/131/84.png');
+    expect(BASEMAPS.aviation.credit).toContain('openAIP');
   });
 });

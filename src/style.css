@@ -1034,6 +1034,28 @@ input:disabled {
   color: var(--status, #e6ebf2);
 }
 
+/* Flagged by the wind check: outlined and badged in its status colour, like its marker. */
+.airport-label.flagged span {
+  border-color: var(--status);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--status) 55%, transparent);
+}
+
+.airport-label.flagged b {
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  margin-left: 5px;
+  border-radius: 50%;
+  font-size: 10px;
+  color: #0a0e18;
+  background: var(--status);
+}
+
+.airport-label.flagged.status-nogo b {
+  border-radius: 3px;
+}
+
 .airport-label.status-unknown i {
   --status: #e6ebf2;
 }

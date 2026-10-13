@@ -226,12 +226,16 @@ const windCheck = setupWindCheck({
   getCenter: () => globe.pointOfView(),
   formatTime: (time) => formatTime(time),
   onSelect: (airport) => goToAirport(airport, { fromList: true }),
-  // Airports with wind trouble are marked on the map while the wind check is in use.
-  onProblems: (problems) =>
-    mapFeatures.setAirports(state.windCheck ? problems : [], (airport) => {
+  // Airports with wind trouble are marked on the map while the wind check is in use; zoomed
+  // in, their airfield labels show it instead (see airportmap.js).
+  onProblems: (problems) => {
+    state.problems = state.windCheck ? problems : [];
+    mapFeatures.setAirports(state.problems, (airport) => {
       pickedAt = performance.now();
       goToAirport(airport, { fromList: state.windCheck });
-    }),
+    });
+    airportMap.refresh();
+  },
   onLimitsChange: () => {
     renderDetails();
     airportMap.refresh();
@@ -242,6 +246,7 @@ const airportMap = setupAirportMap({
   mapFeatures,
   getTime: () => currentTime(),
   getLimits: () => windCheck.limits(),
+  getProblems: () => state.problems ?? [],
   onSelect: (airport) => {
     // A tap on a label should not also open the weather where it landed.
     pickedAt = performance.now();
@@ -867,7 +872,9 @@ function openWindCheck() {
 function closeWindCheck() {
   state.windCheck = false;
   windCheck.close();
+  state.problems = [];
   mapFeatures.setAirports([]);
+  airportMap.refresh();
   syncWindCheckButton();
 }
 

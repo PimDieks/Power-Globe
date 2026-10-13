@@ -9,6 +9,8 @@
 //   GET /metar?ids=EHAM,KJFK      latest METARs (NOAA Aviation Weather Center), cached 2 min
 //   GET /satellites/<group>       orbital elements as TLE (CelesTrak), cached 2 h
 //   GET /forecast?<Open-Meteo query>  Open-Meteo forecasts (up to 100 places), cached 30 min
+//   GET /tiles/openaip/<z>/<x>/<y>.png  aeronautical chart tiles (openAIP: airspaces, airports,
+//                                 navaids), cached 1 day; needs OPENAIP_API_KEY
 //
 // Nothing upstream is ever asked more than its cache allows: every answer is cached at the edge
 // and shared by all visitors, a backup of it is kept for 6 hours and served if the service
@@ -17,7 +19,7 @@
 //
 // Settings (wrangler.toml [vars] or secrets): ALLOWED_ORIGINS, a comma-separated list of sites
 // allowed to use it ("*" for any); OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET (optional) for an
-// OpenSky account's larger allowance.
+// OpenSky account's larger allowance; OPENAIP_API_KEY (optional) for the aeronautical chart.
 
 const USER_AGENT = 'power-globe-api (https://github.com/PimDieks/Power-Globe)';
 const DEFAULT_ORIGINS = 'https://pimdieks.github.io,http://localhost:5173,http://localhost:4173';
@@ -30,8 +32,12 @@ const BACKUP_SECONDS = 6 * 3600;
 // service nor visitors are kept waiting on it again straight away.
 const UPSTREAM_TIMEOUT_MS = 10_000;
 const FAILURE_SECONDS = 120;
-// Requests a minute per visitor (counted per Worker instance, so roughly).
+// Requests a minute per visitor (counted per Worker instance, so roughly). Map tiles come many
+// at a time as the view moves, so they have their own, larger allowance.
 export const RATE_LIMIT = 120;
+export const TILE_RATE_LIMIT = 900;
+// The chart's tile levels: openAIP draws them down to level 14 (about 10 m per pixel).
+export const OPENAIP_MAX_LEVEL = 14;
 
 export const ADSB_FEEDS = [
   { name: 'adsb.lol', military: 'https://api.adsb.lol/v2/mil', area: (lat, lon, nm) => `https://api.adsb.lol/v2/point/${lat}/${lon}/${nm}` },
@@ -115,8 +121,9 @@ export async function route(url, env = {}, fetchFn = fetch) {
     return json(
       {
         name: 'Power Globe API',
-        routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/metar?ids=', '/satellites/<group>', '/forecast?'],
+        routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/metar?ids=', '/satellites/<group>', '/forecast?', '/tiles/openaip/<z>/<x>/<y>.png'],
         opensky: openskyAccount(env) ? 'account' : 'anonymous',
+        chart: env.OPENAIP_API_KEY ? 'openAIP' : 'no key',
       },
       300,
     );
@@ -161,6 +168,16 @@ export async function route(url, env = {}, fetchFn = fetch) {
     if (!/^1 /m.test(text)) throw new HttpError(502, `CelesTrak: ${text.trim().slice(0, 80)}`);
     return new Response(text, { headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=7200' } });
   }
+  const tile = path.match(/^\/tiles\/openaip\/(\d+)\/(\d+)\/(\d+)\.png$/);
+  if (tile) {
+    const [z, x, y] = tile.slice(1).map(Number);
+    if (z > OPENAIP_MAX_LEVEL || x >= 2 ** z || y >= 2 ** z) throw new HttpError(404, 'No such tile');
+    if (!env.OPENAIP_API_KEY) throw new HttpError(503, 'The chart needs an openAIP API key (OPENAIP_API_KEY)');
+    const res = await upstream(fetchFn, `https://api.tiles.openaip.net/api/data/openaip/${z}/${x}/${y}.png?apiKey=${encodeURIComponent(env.OPENAIP_API_KEY)}`, {
+      headers: { Accept: 'image/png' },
+    });
+    return new Response(res.body, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' } });
+  }
   throw new HttpError(404, 'Not found');
 }
 
@@ -197,7 +214,8 @@ export default {
     const backupKey = new Request(`${url.origin}/__backup${url.pathname}${url.search}`, { method: 'GET' });
     let res = await cache?.match(key);
     if (!res) {
-      if (overLimit(request.headers.get('CF-Connecting-IP') ?? 'unknown')) {
+      const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
+      if (url.pathname.startsWith('/tiles/') ? overLimit(`tiles:${ip}`, Date.now(), TILE_RATE_LIMIT) : overLimit(ip)) {
         return new Response(JSON.stringify({ error: 'Too many requests; slow down' }), { status: 429, headers: { ...cors, 'Content-Type': 'application/json', 'Retry-After': '60' } });
       }
       try {

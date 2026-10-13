@@ -90,6 +90,14 @@ export const TRAFFIC_LEGEND = [
   ['dot', COLORS.geo, 'Satellite, high orbit'],
 ];
 
+// Why a feed did not answer this browser, in a few words: a blocked request ("Failed to fetch")
+// usually means the feed does not accept requests from web pages.
+function browserReason(err) {
+  if (err.status) return `answered ${err.status}`;
+  if (err.name === 'TimeoutError') return 'timed out';
+  return /failed to fetch|networkerror|load failed/i.test(err.message) ? 'blocked' : err.message;
+}
+
 async function fetchJson(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (!res.ok) {
@@ -224,7 +232,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
         proxyError = err;
       }
     }
-    let lastError;
+    const failures = [];
     for (let k = 0; k < ADSB_PROVIDERS.length; k++) {
       const i = (provider + k) % ADSB_PROVIDERS.length;
       try {
@@ -232,11 +240,11 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
         provider = i;
         return { data, name: ADSB_PROVIDERS[i].name };
       } catch (err) {
-        lastError = err;
+        failures.push(`${ADSB_PROVIDERS[i].name} ${browserReason(err)}`);
       }
     }
-    // The browser usually cannot ask the feeds itself, so the API's reason is the useful one.
-    throw proxyError ? new Error(`Power Globe API: ${proxyError.message}`) : lastError;
+    // What the API and this browser were each told, so it is clear which way is blocked.
+    throw new Error([proxyError && `Power Globe API: ${proxyError.message}`, `from this browser: ${failures.join(', ')}`].filter(Boolean).join('; '));
   }
 
   async function once(key, task) {
@@ -274,8 +282,8 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
       return await fetchJson(OPENSKY_URL);
     } catch (err) {
       if (!proxyError) throw err;
-      const reported = new Error(`Power Globe API: ${proxyError.message}`);
-      reported.status = proxyError.status;
+      const reported = new Error(`Power Globe API: ${proxyError.message}; from this browser: OpenSky ${browserReason(err)}`);
+      reported.status = err.status === 429 ? 429 : proxyError.status;
       throw reported;
     }
   }

@@ -18,6 +18,7 @@
     "globe.gl": "^2.46.2",
     "satellite.js": "^7.1.0",
     "three": "^0.186.1",
+    "three-slippy-map-globe": "^1.0.6",
     "topojson-client": "^3.1.0",
     "world-atlas": "^2.0.2"
   },

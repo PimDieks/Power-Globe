@@ -7,6 +7,8 @@ name: Deploy the Power Globe API
 # allowance of worldwide flights, two more (from the account's API client, credentials.json):
 #   OPENSKY_CLIENT_ID      its clientId
 #   OPENSKY_CLIENT_SECRET  its clientSecret
+# and for the Aviation map, an openAIP API key (https://www.openaip.net, free account):
+#   OPENAIP_API_KEY
 
 on:
   push:
@@ -35,22 +37,24 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: api
-      # Hand the OpenSky account to the API as Worker secrets (kept encrypted by Cloudflare).
+      # Hand the optional accounts to the API as Worker secrets (kept encrypted by Cloudflare).
       - if: steps.check.outputs.ready == 'true'
-        name: Store the OpenSky account
+        name: Store the API's accounts
         working-directory: api
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           OPENSKY_CLIENT_ID: ${{ secrets.OPENSKY_CLIENT_ID }}
           OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
+          OPENAIP_API_KEY: ${{ secrets.OPENAIP_API_KEY }}
         run: |
-          if [ -z "$OPENSKY_CLIENT_ID" ] || [ -z "$OPENSKY_CLIENT_SECRET" ]; then
-            echo "::notice::No OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET secrets: the API asks OpenSky anonymously."
-            exit 0
-          fi
-          printf '%s' "$OPENSKY_CLIENT_ID" | npx --yes wrangler@3 secret put OPENSKY_CLIENT_ID
-          printf '%s' "$OPENSKY_CLIENT_SECRET" | npx --yes wrangler@3 secret put OPENSKY_CLIENT_SECRET
+          for name in OPENSKY_CLIENT_ID OPENSKY_CLIENT_SECRET OPENAIP_API_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::notice::No $name secret; the API works without it."
+              continue
+            fi
+            printf '%s' "${!name}" | npx --yes wrangler@3 secret put "$name"
+          done
       # Try every route as the site would, and print what each answers, so problems with the
       # services behind it show up in this log.
       - if: steps.check.outputs.ready == 'true'
@@ -59,8 +63,11 @@ jobs:
         run: |
           sleep 10
           base=https://power-globe-api.pimdieks.workers.dev
-          for path in / /flights/global "/flights/area?lat=52.3&lon=4.76&nm=50" /flights/military "/metar?ids=EHAM" /satellites/stations "/forecast?latitude=52.3&longitude=4.76&hourly=temperature_2m&forecast_days=1"; do
-            code=$(curl -s -o /tmp/body -w '%{http_code}' -H 'Origin: https://pimdieks.github.io' "$base$path")
-            echo "$code $path :: $(head -c 300 /tmp/body | tr '\n' ' ')"
+          for path in / /flights/global "/flights/area?lat=52.3&lon=4.76&nm=50" /flights/military "/metar?ids=EHAM" /satellites/stations "/forecast?latitude=52.3&longitude=4.76&hourly=temperature_2m&forecast_days=1" /tiles/openaip/8/131/84.png; do
+            read -r code type < <(curl -s -o /tmp/body -w '%{http_code} %{content_type}' -H 'Origin: https://pimdieks.github.io' "$base$path")
+            case "$type" in
+              image/*) echo "$code $path :: $type, $(wc -c < /tmp/body) bytes" ;;
+              *) echo "$code $path :: $(head -c 300 /tmp/body | tr '\n' ' ')" ;;
+            esac
           done
 

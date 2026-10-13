@@ -55,19 +55,20 @@ export function airportLabelTier(airport, altitude) {
   return airport.large && airport.scheduled;
 }
 
+const inBounds = (a, b) => a.lat >= b.south && a.lat <= b.north && wrapLng(a.lng - b.west) >= 0 && wrapLng(a.lng - b.west) <= b.span;
+
 // Airports to label in view, most important first (large, then best connected).
 export function airportsToLabel(airports, pov, aspect) {
   const b = viewBounds(pov, aspect);
   return airports
-    .filter(
-      (a) =>
-        a.lat >= b.south && a.lat <= b.north && wrapLng(a.lng - b.west) >= 0 && wrapLng(a.lng - b.west) <= b.span && airportLabelTier(a, pov.altitude),
-    )
+    .filter((a) => inBounds(a, b) && airportLabelTier(a, pov.altitude))
     .sort((a, c) => Number(c.large) - Number(a.large) || c.routes - a.routes || Number(c.scheduled) - Number(a.scheduled))
     .slice(0, MAX_AIRPORT_LABELS * 3);
 }
 
-export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, onSelect }) {
+// `getProblems()`: the wind check's airports with wind trouble, [{ airport, status }]; zoomed
+// in, their airfield labels take the place of the wind check's markers.
+export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getProblems = () => [], onSelect }) {
   const runways = setupRunways(globe);
   const weather = new Map();
   let airports = null;
@@ -194,20 +195,35 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, onSele
     }
     // Where each airfield is: its code (and closer in, its name), on the airport when that is
     // free, else just above; left out where a more important airport's label already is.
+    // Airports the wind check flags come first, always labelled, in their status colour.
     const named = pov.altitude < 0.15;
-    for (const airport of labelled) {
+    const bounds = viewBounds(pov, aspect());
+    const flagged = new Map(getProblems().filter((p) => inBounds(p.airport, bounds)).map((p) => [p.airport.ident, p.status]));
+    const candidates = [...getProblems().map((p) => p.airport).filter((a) => flagged.has(a.ident)), ...labelled.filter((a) => !flagged.has(a.ident))];
+    for (const airport of candidates) {
       if (withWind.has(airport.ident)) continue;
-      const { status } = statusOf(airport, time, limits);
+      const flag = flagged.get(airport.ident);
+      const status = flag ?? statusOf(airport, time, limits).status;
       const code = airport.iata || airport.ident;
       const text = named ? `${code} ${shortName(airport)}` : code;
+      // Room for the plane, and for a flagged airport its status badge.
+      const extra = flag ? 50 : 30;
       wanted.push({
-        label: { key: `${airport.ident}:airport`, kind: 'airport', airport, status, text, title: `${airport.name}: open the runway check` },
+        label: {
+          key: `${airport.ident}:airport`,
+          kind: 'airport',
+          airport,
+          status,
+          flag: Boolean(flag),
+          text,
+          title: flag ? `${airport.name}: ${STATUS[flag].label} in the wind check; open the runway check` : `${airport.name}: open the runway check`,
+        },
         anchor: frame.toXY(airport),
         direction: { x: 0, y: 1 },
-        w: (7.4 * text.length + 30) * mpp,
+        w: (7.4 * text.length + extra) * mpp,
         h: 22 * mpp,
-        distances: [-11, 4, 14],
-        optional: true,
+        distances: flag ? [-11, 4, 14, 24, 36] : [-11, 4, 14],
+        optional: !flag,
       });
     }
     runways.draw(strips, mpp);
