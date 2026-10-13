@@ -1,13 +1,40 @@
 :root {
-  --panel-bg: rgba(12, 16, 28, 0.5);
-  --panel-border: rgba(255, 255, 255, 0.07);
-  --text: #e8ecf3;
-  --muted: #9aa5b8;
+  /* Panels are nearly opaque so text keeps its contrast over any part of the map. */
+  --panel-bg: rgba(10, 14, 24, 0.86);
+  --panel-border: rgba(255, 255, 255, 0.12);
+  --text: #f2f5fa;
+  /* Secondary text: about 10:1 contrast on the panel background. */
+  --muted: #c0c9d8;
   --accent: #9bd1ff;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --gap: 20px;
+  /* Distance from the bottom of the screen to the top of the timeline; kept up to date by main.js. */
+  --timeline-top: 100px;
+  --touch: 36px;
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  font-weight: 300;
+  font-weight: 400;
   color: var(--text);
+}
+
+@media (pointer: coarse) {
+  :root {
+    /* Comfortable tap targets on touch screens. */
+    --touch: 44px;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --panel-bg: #070a12;
+    --panel-border: rgba(255, 255, 255, 0.6);
+    --muted: #e3e8ef;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --panel-bg: #0b0f1a;
+  }
 }
 
 * {
@@ -28,15 +55,31 @@ body {
   overflow: hidden;
 }
 
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Stacking, bottom to top: globe, wind overlay, caption, panels. */
+
 #globe {
   position: fixed;
   inset: 0;
+  z-index: 0;
 }
 
 /* Zoomed-in wind particles, drawn over the globe at screen resolution. */
 .flow-overlay {
   position: fixed;
   inset: 0;
+  z-index: 1;
   width: 100%;
   height: 100%;
   pointer-events: none;
@@ -46,6 +89,7 @@ body {
 
 .panel {
   position: fixed;
+  z-index: 10;
   background: var(--panel-bg);
   backdrop-filter: blur(14px) saturate(1.2);
   -webkit-backdrop-filter: blur(14px) saturate(1.2);
@@ -55,6 +99,13 @@ body {
   transition:
     opacity 1.2s var(--ease),
     transform 1.2s var(--ease);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .panel {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
 }
 
 /* When nobody is interacting the controls drift away and only the globe remains. */
@@ -76,15 +127,47 @@ body.idle #details {
   transform: translateX(12px);
 }
 
+@media (prefers-contrast: more) {
+  /* Keep everything on screen for people who asked for more contrast. */
+  body.idle .panel,
+  body.idle .attribution {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  body.idle #controls,
+  body.idle #details {
+    transform: none;
+  }
+
+  body.idle #timeline {
+    transform: translateX(-50%);
+  }
+}
+
 #controls {
-  top: 20px;
-  left: 20px;
-  width: min(300px, calc(100vw - 40px));
+  top: var(--gap);
+  left: var(--gap);
+  width: min(320px, calc(100vw - 2 * var(--gap)));
+  max-height: calc(100vh - var(--timeline-top) - 2 * var(--gap));
+  max-height: calc(100dvh - var(--timeline-top) - 2 * var(--gap));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 #controls summary {
   list-style: none;
   cursor: pointer;
+  min-height: var(--touch);
+  display: flex;
+  align-items: center;
+  margin: -6px 0;
+  border-radius: 8px;
+}
+
+#controls summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 #controls summary::-webkit-details-marker {
@@ -93,14 +176,13 @@ body.idle #details {
 
 #controls summary::after {
   content: '';
-  position: absolute;
-  top: 22px;
-  right: 20px;
-  width: 6px;
-  height: 6px;
-  border-right: 1.5px solid var(--muted);
-  border-bottom: 1.5px solid var(--muted);
-  transform: rotate(45deg);
+  margin-left: auto;
+  margin-right: 4px;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--text);
+  border-bottom: 2px solid var(--text);
+  transform: rotate(45deg) translate(-2px, -2px);
   transition: transform 0.4s var(--ease);
 }
 
@@ -108,41 +190,42 @@ body.idle #details {
   transform: rotate(-45deg);
 }
 
-#controls:not([open]) h1 {
-  margin: 0;
+#controls[open] summary {
+  margin-bottom: 8px;
 }
 
 h1 {
-  margin: 0 0 14px;
-  font-size: 0.8rem;
-  font-weight: 500;
-  letter-spacing: 0.32em;
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.3em;
   text-transform: uppercase;
 }
 
 h2 {
-  margin: 16px 0 8px;
-  font-size: 0.68rem;
-  font-weight: 500;
+  margin: 18px 0 8px;
+  font-size: 0.75rem;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.16em;
   color: var(--muted);
 }
 
 .button-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
 }
 
 button {
   font: inherit;
-  font-size: 0.8rem;
+  font-size: 0.875rem;
   color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 999px;
-  padding: 5px 12px;
+  min-height: var(--touch);
+  padding: 6px 14px;
   cursor: pointer;
   transition:
     background 0.3s,
@@ -151,7 +234,7 @@ button {
 }
 
 button:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.14);
 }
 
 button:focus-visible,
@@ -161,15 +244,26 @@ input:focus-visible {
 }
 
 button[aria-checked='true'] {
-  background: rgba(155, 209, 255, 0.16);
-  border-color: rgba(155, 209, 255, 0.55);
+  background: rgba(155, 209, 255, 0.24);
+  border-color: var(--accent);
   color: #fff;
+  font-weight: 600;
 }
 
 button:disabled,
 input:disabled {
-  opacity: 0.4;
+  opacity: 0.5;
   cursor: default;
+}
+
+.icon-button {
+  width: var(--touch);
+  height: var(--touch);
+  min-width: var(--touch);
+  padding: 0;
+  display: grid;
+  place-items: center;
+  flex: none;
 }
 
 #legend {
@@ -177,36 +271,39 @@ input:disabled {
 }
 
 .legend-bar {
-  height: 6px;
-  border-radius: 3px;
+  height: 8px;
+  border-radius: 4px;
 }
 
 .legend-labels {
   display: flex;
   justify-content: space-between;
-  font-size: 0.7rem;
+  font-size: 0.8rem;
   color: var(--muted);
-  margin-top: 5px;
+  margin-top: 6px;
 }
 
 .toggle {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-  font-size: 0.82rem;
+  gap: 10px;
+  min-height: var(--touch);
+  font-size: 0.9rem;
   cursor: pointer;
 }
 
 .toggle input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
   accent-color: var(--accent);
 }
 
 #pattern-legend {
-  margin-top: 8px;
-  font-size: 0.72rem;
+  margin-top: 6px;
+  font-size: 0.8rem;
   color: var(--muted);
-  line-height: 1.7;
+  line-height: 1.8;
 }
 
 .swatch {
@@ -223,9 +320,9 @@ input:disabled {
 }
 
 .swatch.ring {
-  width: 8px;
-  height: 8px;
-  border: 1.5px solid;
+  width: 10px;
+  height: 10px;
+  border: 2px solid;
   border-radius: 50%;
 }
 
@@ -233,40 +330,52 @@ input:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
   margin-top: 14px;
-  font-size: 0.72rem;
+  font-size: 0.8rem;
   color: var(--muted);
 }
 
 /* Details */
 
 #details {
-  top: 20px;
-  right: 20px;
-  width: min(280px, calc(100vw - 40px));
-  font-size: 0.85rem;
+  top: var(--gap);
+  right: var(--gap);
+  width: min(300px, calc(100vw - 2 * var(--gap)));
+  max-height: calc(100vh - var(--timeline-top) - 2 * var(--gap));
+  max-height: calc(100dvh - var(--timeline-top) - 2 * var(--gap));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-size: 0.9rem;
+}
+
+.details-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -4px -6px 6px 0;
 }
 
 #details h2 {
-  margin: 0 0 4px;
-  font-size: 0.95rem;
-  font-weight: 400;
-  letter-spacing: 0.02em;
+  margin: 8px 0 0;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
   text-transform: none;
   color: var(--text);
 }
 
 #details p {
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.85rem;
 }
 
 #details dl {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 4px 12px;
+  gap: 6px 12px;
   margin: 0;
 }
 
@@ -290,46 +399,41 @@ input:disabled {
 .sparkline path {
   fill: none;
   stroke: var(--accent);
-  stroke-width: 1.5;
+  stroke-width: 2;
   stroke-linejoin: round;
 }
 
 .sparkline line {
-  stroke: rgba(255, 255, 255, 0.6);
+  stroke: rgba(255, 255, 255, 0.75);
   stroke-dasharray: 2 3;
 }
 
 /* Timeline */
 
 #timeline {
-  bottom: 32px;
+  bottom: 36px;
   left: 50%;
   transform: translateX(-50%);
-  width: min(620px, calc(100vw - 40px));
+  width: min(640px, calc(100vw - 2 * var(--gap)));
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 10px 16px;
+  gap: 12px;
+  padding: 8px 14px;
   border-radius: 999px;
-}
-
-#play {
-  width: 34px;
-  height: 34px;
-  padding: 0;
-  flex: none;
 }
 
 #time-slider {
   flex: 1;
   min-width: 0;
+  min-height: var(--touch);
+  margin: 0;
   accent-color: var(--accent);
 }
 
 #time-label {
   flex: none;
   min-width: 11ch;
-  font-size: 0.8rem;
+  font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
 }
 
@@ -337,12 +441,16 @@ input:disabled {
 
 #caption {
   position: fixed;
+  z-index: 2;
   left: 24px;
-  bottom: 22px;
-  font-size: 0.7rem;
-  letter-spacing: 0.22em;
+  bottom: 24px;
+  font-size: 0.75rem;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: rgba(232, 236, 243, 0.55);
+  color: rgba(242, 245, 250, 0.88);
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.9),
+    0 0 10px rgba(0, 0, 0, 0.6);
   pointer-events: none;
   transition: opacity 1.2s var(--ease);
 }
@@ -357,82 +465,129 @@ body:not(.idle) #caption {
 
 .attribution {
   position: fixed;
-  bottom: 8px;
-  right: 14px;
-  max-width: calc(100vw - 28px);
+  z-index: 10;
+  bottom: 6px;
+  right: 10px;
+  max-width: calc(100vw - 20px);
+  padding: 3px 10px;
+  border-radius: 8px;
+  background: rgba(8, 11, 20, 0.78);
   text-align: right;
-  font-size: 0.6rem;
-  color: var(--muted);
+  font-size: 0.7rem;
+  color: #d3d9e3;
   transition: opacity 1.2s var(--ease);
 }
 
 .attribution a {
-  color: var(--muted);
+  color: inherit;
 }
 
 /* City names on the map. The element itself is a zero-size anchor at the city's position. */
 
 .city-label {
+  position: relative;
   width: 0;
   height: 0;
   pointer-events: none;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: #fff;
+  text-shadow:
+    0 0 2px #000,
+    0 0 4px rgba(0, 0, 0, 0.9),
+    0 0 10px rgba(0, 0, 0, 0.6);
+  text-indent: 8px;
+  line-height: 0;
 }
 
 .city-label::before {
   content: '';
   position: absolute;
-  left: -2px;
-  top: -2px;
-  width: 4px;
-  height: 4px;
+  left: -3px;
+  top: -3px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.85);
-  box-shadow: 0 0 6px rgba(0, 0, 0, 0.8);
-}
-
-.city-label {
-  position: relative;
-  font-size: 10px;
-  font-weight: 400;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  white-space: nowrap;
-  color: rgba(255, 255, 255, 0.82);
-  text-shadow:
-    0 0 3px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.6);
-  text-indent: 7px;
-  line-height: 0;
+  background: #fff;
+  box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.7);
 }
 
 .city-label.tier-1 {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.92);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .tooltip {
-  font-size: 0.8rem;
-  line-height: 1.35;
+  font-size: 0.85rem;
+  line-height: 1.4;
 }
 
+/* Phones: one column. The timeline sits at the bottom above the credits; the controls and the
+   details panel use the space above it, one at a time, and scroll if they need more. */
 @media (max-width: 640px) {
+  :root {
+    --gap: 12px;
+  }
+
+  #controls,
+  #details {
+    left: var(--gap);
+    right: var(--gap);
+    width: auto;
+  }
+
   #details {
     top: auto;
-    bottom: 150px;
+    bottom: calc(var(--timeline-top) + 8px);
+    max-height: calc(100vh - var(--timeline-top) - 3 * var(--gap));
+    max-height: calc(100dvh - var(--timeline-top) - 3 * var(--gap));
   }
 
   #timeline {
-    bottom: 48px;
-  }
-
-  #timeline {
+    left: var(--gap);
+    right: var(--gap);
+    width: auto;
+    transform: none;
+    /* Just above the credits bar; main.js keeps --credits-height up to date. */
+    bottom: calc(var(--credits-height, 60px) + 8px);
     flex-wrap: wrap;
+    gap: 4px 12px;
     border-radius: 18px;
+  }
+
+  body.idle #timeline {
+    transform: translateY(12px);
   }
 
   #time-slider {
     order: 3;
     flex-basis: 100%;
+  }
+
+  .attribution {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    max-width: none;
+    border-radius: 0;
+    padding: 6px 12px calc(env(safe-area-inset-bottom, 0px) + 6px);
+    text-align: center;
+    line-height: 1.4;
+  }
+
+  #caption {
+    left: var(--gap);
+    right: var(--gap);
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+  }
+}
+
+@media (max-width: 640px) and (prefers-contrast: more) {
+  body.idle #timeline {
+    transform: none;
   }
 }
 

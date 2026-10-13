@@ -46,6 +46,8 @@ const MODES = [
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const largeScreen = window.innerWidth * window.devicePixelRatio >= 1400;
 const narrowScreen = window.innerWidth < 640;
+// On phones the controls and the details panel share the screen, so only one is open at a time.
+const phoneLayout = window.matchMedia('(max-width: 640px)');
 
 const els = {
   globe: document.getElementById('globe'),
@@ -58,6 +60,14 @@ const els = {
   status: document.getElementById('status'),
   refresh: document.getElementById('refresh'),
   details: document.getElementById('details'),
+  detailsTitle: document.getElementById('details-title'),
+  detailsBody: document.getElementById('details-body'),
+  detailsClose: document.getElementById('details-close'),
+  playIcon: document.getElementById('play-icon'),
+  playText: document.getElementById('play-text'),
+  announcer: document.getElementById('announcer'),
+  timeline: document.getElementById('timeline'),
+  credits: document.querySelector('.attribution'),
   play: document.getElementById('play'),
   slider: document.getElementById('time-slider'),
   timeLabel: document.getElementById('time-label'),
@@ -241,6 +251,7 @@ function drawStep(step) {
   );
 
   els.slider.value = String(step);
+  els.slider.setAttribute('aria-valuetext', formatTime(times[step]));
   els.timeLabel.textContent = formatTime(times[step]);
   renderCaption();
   renderDetails();
@@ -352,8 +363,8 @@ function tick(now) {
 
 function setPlaying(playing) {
   state.playing = playing;
-  els.play.textContent = playing ? '❚❚' : '▶';
-  els.play.setAttribute('aria-label', playing ? 'Pause forecast' : 'Play forecast');
+  els.playIcon.textContent = playing ? '❚❚' : '▶';
+  els.playText.textContent = playing ? 'Pause forecast' : 'Play forecast';
 }
 
 function seek(step) {
@@ -471,26 +482,51 @@ function onView(pov) {
 }
 globe.onZoom(onView);
 
+const coords = (lat, lng) =>
+  `${Math.abs(lat).toFixed(2)}° ${lat >= 0 ? 'N' : 'S'}, ${Math.abs(lng).toFixed(2)}° ${lng >= 0 ? 'E' : 'W'}`;
+
+// Tell screen readers once, rather than making a region that changes every frame "live".
+function announce(message) {
+  els.announcer.textContent = '';
+  // A fresh text node after clearing makes screen readers read repeated messages too.
+  requestAnimationFrame(() => {
+    els.announcer.textContent = message;
+  });
+}
+
 async function showDetails(lat, lng) {
   state.autoRotate = false;
   controls.autoRotate = false;
   const detail = { lat, lng, data: null };
   state.detail = detail;
+  if (phoneLayout.matches) els.controls.open = false;
   els.details.classList.remove('hidden');
-  els.details.innerHTML = `<h2>${lat.toFixed(2)}°, ${lng.toFixed(2)}°</h2><p>Loading…</p>`;
+  els.detailsTitle.textContent = coords(lat, lng);
+  els.detailsBody.innerHTML = '<p>Loading…</p>';
   try {
     const data = await loadPointForecast(lat, lng);
     // Ignore the response if another spot was clicked meanwhile.
     if (state.detail === detail) {
       detail.data = data;
       renderDetails();
+      const index = detailIndex(data);
+      announce(
+        `Weather at ${coords(lat, lng)}: ${describeWeatherCode(data.weather_code?.[index])}, ` +
+          `${fmt(data.temperature_2m?.[index], '°C')}.`,
+      );
     }
   } catch (err) {
     console.error(err);
     if (state.detail === detail) {
-      els.details.innerHTML = `<h2>${lat.toFixed(2)}°, ${lng.toFixed(2)}°</h2><p>Could not load weather here. ${err.message ?? ''}</p>`;
+      els.detailsBody.innerHTML = `<p>Could not load weather here. ${err.message ?? ''}</p>`;
+      announce(`Could not load weather at ${coords(lat, lng)}.`);
     }
   }
+}
+
+function closeDetails() {
+  state.detail = null;
+  els.details.classList.add('hidden');
 }
 
 // Temperature sparkline for the clicked spot, with a marker at the timeline position.
@@ -513,16 +549,21 @@ function sparkline(series, index) {
     <div class="legend-labels"><span>Temperature, next ${FORECAST_DAYS} days</span><span>${Math.round(min)} to ${Math.round(max)} °C</span></div>`;
 }
 
+// The hour in a spot's forecast matching the timeline position.
+function detailIndex(data) {
+  const time = state.forecast?.times[Math.round(state.t)];
+  return Math.max(0, data.time.indexOf(time));
+}
+
+// Updates only the panel's body, so the heading and close button keep their focus.
 function renderDetails() {
   const detail = state.detail;
   if (!detail?.data || !state.forecast) return;
-  const { data, lat, lng } = detail;
-  const time = state.forecast.times[Math.round(state.t)];
-  const index = Math.max(0, data.time.indexOf(time));
+  const { data } = detail;
+  const index = detailIndex(data);
   const value = (variable) => data[variable]?.[index];
   const rows = LAYERS.map((l) => `<dt>${l.label}</dt><dd>${fmt(value(l.variable), l.unit)}</dd>`).join('');
-  els.details.innerHTML = `
-    <h2>${lat.toFixed(2)}°, ${lng.toFixed(2)}°</h2>
+  els.detailsBody.innerHTML = `
     <p>${formatTime(data.time[index])} · ${describeWeatherCode(value('weather_code'))}</p>
     <dl>${rows}<dt>Wind direction</dt><dd>${fmt(value('wind_direction_10m'), '°')}</dd></dl>
     ${sparkline(data.temperature_2m, index)}`;
@@ -553,7 +594,27 @@ els.now.addEventListener('click', () => {
   seek(startIndex(state.forecast.times));
 });
 els.wind.addEventListener('change', invalidate);
+els.detailsClose.addEventListener('click', closeDetails);
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && state.detail) closeDetails();
+});
+els.controls.addEventListener('toggle', () => {
+  if (els.controls.open && phoneLayout.matches) closeDetails();
+});
 els.hazards.addEventListener('change', invalidate);
+
+// Panels stop above the timeline, and on phones the timeline above the credits; their heights
+// change with screen width and wrapping. Uses offsetTop, which ignores the idle fade's transform.
+function updateLayout() {
+  const root = document.documentElement.style;
+  root.setProperty('--credits-height', `${els.credits.offsetHeight}px`);
+  root.setProperty('--timeline-top', `${window.innerHeight - els.timeline.offsetTop}px`);
+}
+const layoutObserver = new ResizeObserver(updateLayout);
+layoutObserver.observe(els.timeline);
+layoutObserver.observe(els.credits);
+window.addEventListener('resize', updateLayout);
+updateLayout();
 
 flow.visible = els.wind.checked;
 onView(globe.pointOfView());

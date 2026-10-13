@@ -42,6 +42,7 @@ export class ScreenFlow {
     this.radius = globe.getGlobeRadius() * (1 + altitude);
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'flow-overlay';
+    this.canvas.setAttribute('aria-hidden', 'true');
     container.after(this.canvas);
     this.ctx = this.canvas.getContext('2d');
     this.matrix = new Matrix4();
@@ -162,8 +163,14 @@ export class ScreenFlow {
     }
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.lineWidth = this.lineWidth;
     ctx.lineCap = 'round';
+    // A soft dark halo first, so the white trails stay visible over bright imagery and clouds.
+    ctx.lineWidth = this.lineWidth * 3;
+    paths.forEach((path, n) => {
+      ctx.strokeStyle = `rgba(0, 8, 20, ${0.22 * AGE_ALPHA[n % steps]})`;
+      ctx.stroke(path);
+    });
+    ctx.lineWidth = this.lineWidth;
     paths.forEach((path, n) => {
       const alpha = AGE_ALPHA[n % steps] * (n >= steps ? SLOW_ALPHA : 1);
       ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;

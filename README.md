@@ -9,7 +9,7 @@ An open-source, interactive 3D globe that visualizes temperature and other weath
 - **Made to be watched:** the camera turns slowly, and the controls fade away after a few seconds without interaction, leaving just the globe and a small caption.
 - **Severe weather:** soft pulses mark thunderstorms, heavy rain and heavy snow.
 - **Details on click:** the forecast for any spot at the selected time, with a 5-day temperature chart.
-- **Accessible defaults:** with *reduce motion* turned on in your system settings, nothing plays or rotates automatically and the wind particles start switched off.
+- **Accessible:** panels stay readable over any part of the map (WCAG AA contrast), controls are large enough to tap, everything works with a keyboard (Escape closes the details panel), and screen readers get landmarks, a spoken summary when you pick a spot and the date as you move the timeline. It follows your system settings: *reduce motion* stops autoplay, rotation and wind particles; *increase contrast* and *reduce transparency* make the panels solid and keep them on screen.
 - **No API key needed:** weather data comes from the free [Open-Meteo](https://open-meteo.com/) API.
 
 ## Getting started
