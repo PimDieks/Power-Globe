@@ -278,6 +278,8 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   let nextMilitary = 0;
   let nextArea = 0;
   let lastArea = null;
+  // Whether the last request for the area failed. Its retry waits FEED_RETRY_MS whatever the view does.
+  let areaFailed = false;
   const inFlight = new Set();
   let shown = [];
   // Bumped when new aircraft data arrives or the toggles change, to rebuild the shown list.
@@ -391,10 +393,12 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
         const { data, name } = await fromProviders((p) => p.area(center.lat, center.lng, nm), `/flights/area?lat=${center.lat}&lon=${center.lng}&nm=${nm}`);
         addAircraft(fromAdsb(data), name);
         lastArea = { ...center, nm };
+        areaFailed = false;
         status.area = `In view from ${name}, ${timeText()}`;
         nextArea = Date.now() + AREA_MS;
       } catch (err) {
         console.error(err);
+        areaFailed = true;
         status.area = `Flights in view unavailable (${explain(err)})`;
         nextArea = Date.now() + FEED_RETRY_MS;
       }
@@ -617,7 +621,9 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
       if (settings.flights && wall >= nextGlobal) loadGlobal();
       if (settings.military && wall >= nextMilitary) loadMilitary();
       if (settings.flights || settings.military) {
-        const moved = lastArea && greatCircleNm(lastArea, pov) > lastArea.nm / 2;
+        // A view that has moved on is asked for at once, except after a failure: the area then stays
+        // the one before it, so it would look moved on every frame and ask again and again.
+        const moved = lastArea && !areaFailed && greatCircleNm(lastArea, pov) > lastArea.nm / 2;
         if (wall >= nextArea || moved) loadArea(pov);
       }
     }
@@ -725,6 +731,12 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     return satellites.tles[item.index]?.name ?? 'Satellite';
   }
 
+  // The selected aircraft's latest report (see aircraft.js), for a camera that follows it, or null
+  // when an aircraft is not selected or is no longer received.
+  function selectedAircraft() {
+    return selected?.kind === 'aircraft' ? (store.byId.get(selected.id) ?? null) : null;
+  }
+
   // Details of the selected aircraft or satellite, as HTML, or null if it is gone.
   function detailsHtml() {
     const now = Date.now();
@@ -752,7 +764,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
 
   applySettings();
 
-  return { frame, pick, select, deselect, detailsHtml, title, get selected() { return selected; } };
+  return { frame, pick, select, deselect, detailsHtml, title, selectedAircraft, get selected() { return selected; } };
 }
 
 // Normalised device coordinates of a point, or null if it is behind the camera.
