@@ -1,70 +1,74 @@
-import { gunzipSync } from 'node:zlib';
 import { describe, expect, it, vi } from 'vitest';
-import { RELAYED_HOSTS as WORKER_HOSTS } from '../api/worker.js';
-import { RELAYED_HOSTS, createRelay } from '../relay/relay.mjs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createRelay, relayEnv } from '../relay/relay.mjs';
+import { relayHealth } from '../src/relay.js';
 
-const KEY = 'relay-secret-123456';
-const reply = (body, init) => new Response(typeof body === 'string' ? body : JSON.stringify(body), init);
-const get = (path, headers = {}) => ({ method: 'GET', path, headers: { 'x-relay-key': KEY, ...headers } });
+// A minimal stand-in for Node's request and response.
+async function call(handle, path, { method = 'GET', origin = 'https://pimdieks.github.io' } = {}) {
+  const res = {
+    status: 0,
+    headers: {},
+    body: '',
+    writeHead(status, headers = {}) {
+      this.status = status;
+      this.headers = headers;
+      return this;
+    },
+    end(body = '') {
+      this.body = String(body);
+      return this;
+    },
+  };
+  await handle({ method, url: path, headers: origin ? { origin } : {} }, res);
+  return res;
+}
 
-describe('flight relay', () => {
-  it('relays the same feeds the API sends it', () => {
-    expect(RELAYED_HOSTS).toEqual(WORKER_HOSTS);
+const ok = (body) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
+
+describe('Flight relay', () => {
+  it('says what it is, with CORS for the site and leave for a public site to reach it', async () => {
+    const handle = createRelay(relayEnv({}, '/nonexistent'), vi.fn());
+    const res = await call(handle, '/health');
+    expect(JSON.parse(res.body)).toEqual({ name: 'Power Globe flight relay', opensky: 'anonymous' });
+    expect(res.headers['Access-Control-Allow-Origin']).toBe('https://pimdieks.github.io');
+    const pre = await call(handle, '/flights/global', { method: 'OPTIONS' });
+    expect(pre.status).toBe(204);
+    expect(pre.headers['Access-Control-Allow-Private-Network']).toBe('true');
+    expect((await call(handle, '/health', { origin: 'https://evil.example' })).status).toBe(403);
+    expect((await call(handle, '/forecast?latitude=1')).status).toBe(404);
   });
 
-  it('will not start without a proper key, and answers only requests that carry it', async () => {
-    expect(() => createRelay({ key: '' })).toThrow('RELAY_KEY');
-    expect(() => createRelay({ key: 'short' })).toThrow('RELAY_KEY');
-    const fetchFn = vi.fn(async () => reply({ ac: [] }));
-    const relay = createRelay({ key: KEY, fetchFn });
-    expect((await relay({ method: 'GET', path: '/' })).status).toBe(200);
-    expect((await relay({ method: 'GET', path: '/api.adsb.lol/v2/mil', headers: {} })).status).toBe(401);
-    expect((await relay(get('/api.adsb.lol/v2/mil', { 'x-relay-key': 'relay-secret-12345X' }))).status).toBe(401);
-    expect(fetchFn).not.toHaveBeenCalled();
+  it('asks a feed once while its answer is fresh, and serves the last good answer when it fails', async () => {
+    let fail = false;
+    const fetchFn = vi.fn(async () => (fail ? new Response('busy', { status: 429 }) : ok({ ac: [{ hex: 'abc' }] })));
+    const handle = createRelay(relayEnv({}, '/nonexistent'), fetchFn);
+    const first = await call(handle, '/flights/area?lat=52.3&lon=4.76&nm=50');
+    expect(first.status).toBe(200);
+    expect(JSON.parse(first.body)).toMatchObject({ source: 'adsb.lol', data: { ac: [{ hex: 'abc' }] } });
+    await call(handle, '/flights/area?lat=52.3&lon=4.76&nm=50');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    vi.useFakeTimers({ now: Date.now() + 60_000, toFake: ['Date'] });
+    fail = true;
+    const later = await call(handle, '/flights/area?lat=52.3&lon=4.76&nm=50');
+    vi.useRealTimers();
+    expect(later.status).toBe(200);
+    expect(JSON.parse(later.body).data.ac[0].hex).toBe('abc');
   });
 
-  it('asks only the flight feeds, and only what they are asked for', async () => {
-    const fetchFn = vi.fn(async () => reply({ ac: [] }));
-    const relay = createRelay({ key: KEY, fetchFn, spacingMs: 0 });
-    for (const path of ['/evil.example/x', '/api.adsb.lol.evil.example/v2/mil', '/api.adsb.lol@evil.example/v2/mil', '/api.adsb.lol:8080/v2/mil']) {
-      expect((await relay(get(path))).status).toBe(404);
-    }
-    expect((await relay(get('/api.adsb.lol//evil.example/v2/mil'))).status).toBe(200);
-    expect(new URL(fetchFn.mock.calls[0][0]).host).toBe('api.adsb.lol');
-    expect((await relay({ ...get('/api.adsb.lol/v2/mil'), method: 'POST' })).status).toBe(405);
-    expect((await relay({ ...get('/auth.opensky-network.org/token', { 'content-type': 'application/x-www-form-urlencoded' }), method: 'POST', body: 'grant_type=x' })).status).toBe(200);
-    const [, init] = fetchFn.mock.calls[1];
-    expect(init).toMatchObject({ method: 'POST', body: 'grant_type=x', headers: { 'content-type': 'application/x-www-form-urlencoded' } });
-    expect(init.headers['x-relay-key']).toBeUndefined();
+  it("reads the OpenSky account from the account page's credentials.json", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-'));
+    const file = join(dir, 'credentials.json');
+    writeFileSync(file, JSON.stringify({ clientId: 'id', clientSecret: 'secret' }));
+    expect(relayEnv({}, file)).toMatchObject({ OPENSKY_CLIENT_ID: 'id', OPENSKY_CLIENT_SECRET: 'secret' });
+    expect(relayEnv({ OPENSKY_CLIENT_ID: 'a', OPENSKY_CLIENT_SECRET: 'b' }, file)).toMatchObject({ OPENSKY_CLIENT_ID: 'a' });
   });
 
-  it('passes the answer back as the feed gave it, compressed when it can be', async () => {
-    const big = { ac: Array.from({ length: 100 }, (_, i) => ({ hex: `a${i}` })) };
-    const fetchFn = vi.fn(async (url) => (url.includes('opensky') ? reply('slow down', { status: 429, headers: { 'Retry-After': '30' } }) : reply(big, { headers: { 'Content-Type': 'application/json' } })));
-    const relay = createRelay({ key: KEY, fetchFn, spacingMs: 0 });
-    const res = await relay(get('/api.adsb.lol/v2/point/52.25/4.75/50', { authorization: 'Bearer t', 'accept-encoding': 'gzip, br', cookie: 'x' }));
-    expect(fetchFn.mock.calls[0][0]).toBe('https://api.adsb.lol/v2/point/52.25/4.75/50');
-    expect(fetchFn.mock.calls[0][1].headers).toEqual({ authorization: 'Bearer t' });
-    expect(res.headers).toMatchObject({ 'content-type': 'application/json', 'content-encoding': 'gzip' });
-    expect(JSON.parse(gunzipSync(res.body))).toEqual(big);
-    const limited = await relay(get('/opensky-network.org/api/states/all?extended=1'));
-    expect(limited).toMatchObject({ status: 429, headers: { 'retry-after': '30' } });
-    expect(limited.body.toString()).toBe('slow down');
-    const down = createRelay({ key: KEY, fetchFn: async () => Promise.reject(new Error('timed out')) });
-    expect((await down(get('/api.adsb.lol/v2/mil'))).status).toBe(504);
-  });
-
-  it('asks each feed at most once a second, and turns requests away rather than queue them long', async () => {
-    let clock = 0;
-    const wait = vi.fn(async () => {});
-    const relay = createRelay({ key: KEY, fetchFn: async () => reply({ ac: [] }), now: () => clock, wait, maxWaitMs: 2000 });
-    const statuses = [];
-    for (let i = 0; i < 4; i++) statuses.push((await relay(get('/api.adsb.lol/v2/mil'))).status);
-    expect(statuses).toEqual([200, 200, 200, 429]);
-    expect(wait.mock.calls.map(([ms]) => ms)).toEqual([1000, 2000]);
-    // Another feed has its own turn.
-    expect((await relay(get('/opendata.adsb.fi/api/v2/mil'))).status).toBe(200);
-    clock = 3000;
-    expect((await relay(get('/api.adsb.lol/v2/mil'))).status).toBe(200);
+  it('is recognised by the site only when it answers as the relay', async () => {
+    await expect(relayHealth('http://localhost:8787', async () => ok({ name: 'Power Globe flight relay', opensky: 'account' }))).resolves.toMatchObject({ opensky: 'account' });
+    await expect(relayHealth('http://localhost:8787', async () => ok({ name: 'something else' }))).rejects.toThrow('not a Power Globe flight relay');
+    await expect(relayHealth('http://localhost:8787', async () => new Response('', { status: 404 }))).rejects.toThrow('answered 404');
   });
 });

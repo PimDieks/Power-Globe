@@ -9,7 +9,7 @@ name: Deploy the Power Globe API
 #   OPENSKY_CLIENT_SECRET  its clientSecret
 # and for the Aviation map, an openAIP API key (https://www.openaip.net, free account):
 #   OPENAIP_API_KEY
-# and, when a flight relay runs (relay/relay.mjs, see "Flight relay" in the README):
+# and, when a flight relay runs (relay/api-relay.mjs, see "Flight relay for the API" in the README):
 #   FLIGHT_RELAY_URL       its public address, like https://pi.example.ts.net
 #   FLIGHT_RELAY_KEY       the RELAY_KEY it was started with
 

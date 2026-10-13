@@ -13,7 +13,7 @@
 //                                 navaids), cached 1 day; needs OPENAIP_API_KEY
 //
 // The flight feeds limit or refuse Cloudflare's servers, whose addresses many sites share. With
-// a flight relay (relay/relay.mjs) running on a machine of one's own, such as a Raspberry Pi at
+// a flight relay (relay/api-relay.mjs) running on a machine of one's own, such as a Raspberry Pi at
 // home, they are asked through that instead.
 //
 // Nothing upstream is ever asked more than its cache allows: every answer is cached at the edge
@@ -53,7 +53,7 @@ export const ADSB_FEEDS = [
   { name: 'adsb.fi', military: 'https://opendata.adsb.fi/api/v2/mil', area: (lat, lon, nm) => `https://opendata.adsb.fi/api/v2/lat/${lat}/lon/${lon}/dist/${nm}` },
 ];
 
-// Asked through the flight relay when there is one; the same hosts as in relay/relay.mjs.
+// Asked through the flight relay when there is one; the same hosts as in relay/api-relay.mjs.
 export const RELAYED_HOSTS = ['opensky-network.org', 'auth.opensky-network.org', 'api.adsb.lol', 'api.airplanes.live', 'opendata.adsb.fi'];
 const relayOn = (env) => Boolean(env.FLIGHT_RELAY_URL && env.FLIGHT_RELAY_KEY);
 
