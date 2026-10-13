@@ -171,14 +171,21 @@ function airportElement(airport, status, onClick) {
   return el;
 }
 
-// A label at a runway end ("27 ✓"), or the wind at an airport with an arrow pointing downwind.
+// A label at a runway end ("27 ✓"), the wind at an airport with an arrow pointing downwind, or
+// where an airfield is ("✈ AMS Schiphol", coloured by its wind status once known).
 // Hidden from screen readers: the airport panel says the same.
 function runwayLabelElement(label, onSelect) {
   const el = document.createElement('div');
-  el.className = label.kind === 'wind' ? 'wind-label' : `runway-label status-${label.status}`;
+  el.className =
+    label.kind === 'wind' ? 'wind-label' : label.kind === 'airport' ? `airport-label status-${label.status}` : `runway-label status-${label.status}`;
   el.setAttribute('aria-hidden', 'true');
   el.title = label.title ?? '';
   const span = document.createElement('span');
+  if (label.kind === 'airport') {
+    const icon = document.createElement('i');
+    icon.textContent = '✈';
+    span.append(icon);
+  }
   if (label.kind === 'wind' && label.direction != null) {
     const arrow = document.createElement('i');
     arrow.textContent = '↑';

@@ -3,6 +3,7 @@
 import { airportWeather, conditionsAt, loadAirports } from './airports.js';
 import { STATUS, assessAirport, formatWind } from './runways.js';
 import { viewBounds } from './detail.js';
+import { CITIES, labelTier } from './cities.js';
 import { destination, localFrame, placeLabels, runwayEnds, runwayStatus, setupRunways } from './runwaymap.js';
 
 // Runways show below this camera altitude (globe radii); a 3 km runway is then over 10 px long.
@@ -43,14 +44,39 @@ export function airportsInView(airports, pov, aspect) {
   return inView.sort((a, b2) => d2(a) - d2(b2)).slice(0, MAX_AIRPORTS);
 }
 
+// Airport labels show below this camera altitude: the view is then a map of a region.
+export const AIRPORT_LABEL_ALTITUDE = 0.6;
+const MAX_AIRPORT_LABELS = 80;
+
+// Which airports get a label at a zoom: the big ones first, smaller ones as the view closes in.
+export function airportLabelTier(airport, altitude) {
+  if (altitude < 0.08) return true;
+  if (altitude < 0.25) return airport.large || (airport.scheduled && airport.routes > 0);
+  return airport.large && airport.scheduled;
+}
+
+// Airports to label in view, most important first (large, then best connected).
+export function airportsToLabel(airports, pov, aspect) {
+  const b = viewBounds(pov, aspect);
+  return airports
+    .filter(
+      (a) =>
+        a.lat >= b.south && a.lat <= b.north && wrapLng(a.lng - b.west) >= 0 && wrapLng(a.lng - b.west) <= b.span && airportLabelTier(a, pov.altitude),
+    )
+    .sort((a, c) => Number(c.large) - Number(a.large) || c.routes - a.routes || Number(c.scheduled) - Number(a.scheduled))
+    .slice(0, MAX_AIRPORT_LABELS * 3);
+}
+
 export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, onSelect }) {
   const runways = setupRunways(globe);
   const weather = new Map();
   let airports = null;
   let shown = [];
+  let labelled = [];
   let pov = null;
   let timer = null;
   let request = 0;
+  let active = false;
 
   function aspect() {
     return window.innerWidth / window.innerHeight;
@@ -60,27 +86,31 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, onSele
   function view(next) {
     pov = next;
     clearTimeout(timer);
-    if (next.altitude >= RUNWAY_ALTITUDE) {
-      if (shown.length) clear();
+    if (next.altitude >= AIRPORT_LABEL_ALTITUDE) {
+      if (active) clear();
       return;
     }
     timer = setTimeout(update, SETTLE_MS);
   }
 
   function clear() {
+    active = false;
     shown = [];
+    labelled = [];
     runways.draw([], 1);
     mapFeatures.setRunwayLabels([]);
   }
 
   async function update() {
-    if (!pov || pov.altitude >= RUNWAY_ALTITUDE) return;
+    if (!pov || pov.altitude >= AIRPORT_LABEL_ALTITUDE) return;
     airports ??= await loadAirports().catch(() => null);
     if (!airports) return;
-    shown = airportsInView(airports, pov, aspect());
+    active = true;
+    labelled = airportsToLabel(airports, pov, aspect());
+    shown = pov.altitude < RUNWAY_ALTITUDE ? airportsInView(airports, pov, aspect()) : [];
     render();
-    // Weather for the nearest airports not looked up yet: the site's own data where it has
-    // them, else Open-Meteo.
+    // Weather for the nearest airports with runways shown and not looked up yet: the site's
+    // own data where it has them, else Open-Meteo.
     const missing = shown.filter((a) => !weather.has(a.ident)).slice(0, MAX_WEATHER);
     if (!missing.length) return;
     const id = ++request;
@@ -96,28 +126,35 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, onSele
     }
   }
 
-  // Colour every runway in view and place the labels, for the timeline's time.
+  // Airport status at the timeline's time: per runway end, and the airport's best.
+  function statusOf(airport, time, limits) {
+    const conditions = conditionsAt(weather.get(airport.ident), time);
+    if (!conditions) return { conditions: null, endStatus: new Map(), status: 'unknown' };
+    const result = assessAirport(airport, conditions, limits);
+    return { conditions, endStatus: new Map(result.ends.map((e) => [e.ident, e.status])), status: result.status };
+  }
+
+  // Draw the runways in view and place every label, for the timeline's time.
   function render() {
-    if (!pov || pov.altitude >= RUNWAY_ALTITUDE) return;
+    if (!active || !pov) return;
     const time = getTime();
     const limits = getLimits();
     const mpp = metresPerPixel(pov.altitude, window.innerHeight);
-    const showLabels = pov.altitude < LABEL_ALTITUDE;
+    const showEnds = pov.altitude < LABEL_ALTITUDE;
     const frame = localFrame(pov);
     const strips = [];
     const segments = [];
     const wanted = [];
+    const withWind = new Set();
     for (const airport of shown) {
-      const conditions = conditionsAt(weather.get(airport.ident), time);
-      const endStatus = new Map();
-      if (conditions) for (const end of assessAirport(airport, conditions, limits).ends) endStatus.set(end.ident, end.status);
+      const { conditions, endStatus } = statusOf(airport, time, limits);
       for (const runway of airport.runways) {
         const ends = runwayEnds(airport, runway);
         strips.push({ ends, widthFt: runway.widthFt, status: runwayStatus(runway, endStatus) });
-        if (!showLabels) continue;
         const [a, b] = ends.map(frame.toXY);
         // As drawn: at least 5 px wide, plus its outline.
         segments.push({ a, b, r: Math.max(runway.widthFt * 0.3048, 5 * mpp) / 2 + 1.5 * mpp });
+        if (!showEnds) continue;
         const length = Math.hypot(b.x - a.x, b.y - a.y) || 1;
         const along = { x: (b.x - a.x) / length, y: (b.y - a.y) / length };
         // Each end's label goes beyond its threshold, on the extended centreline if that is free.
@@ -135,11 +172,12 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, onSele
           });
         });
       }
-      if (showLabels && conditions) {
+      if (showEnds && conditions) {
+        withWind.add(airport.ident);
         const text = `${airport.iata || airport.ident} · ${formatWind(conditions)}`;
         wanted.push({
           label: {
-            key: `${airport.ident}:wind:${Math.round(conditions.direction)}:${Math.round(conditions.speed)}:${Math.round(conditions.gust ?? 0)}`,
+            key: `${airport.ident}:wind`,
             kind: 'wind',
             airport,
             text,
@@ -154,13 +192,57 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, onSele
         });
       }
     }
+    // Where each airfield is: its code (and closer in, its name), on the airport when that is
+    // free, else just above; left out where a more important airport's label already is.
+    const named = pov.altitude < 0.15;
+    for (const airport of labelled) {
+      if (withWind.has(airport.ident)) continue;
+      const { status } = statusOf(airport, time, limits);
+      const code = airport.iata || airport.ident;
+      const text = named ? `${code} ${shortName(airport)}` : code;
+      wanted.push({
+        label: { key: `${airport.ident}:airport`, kind: 'airport', airport, status, text, title: `${airport.name}: open the runway check` },
+        anchor: frame.toXY(airport),
+        direction: { x: 0, y: 1 },
+        w: (7.4 * text.length + 30) * mpp,
+        h: 22 * mpp,
+        distances: [-11, 4, 14],
+        optional: true,
+      });
+    }
     runways.draw(strips, mpp);
-    // Runway ends first, so they get the spots nearest their runways; then the winds.
-    wanted.sort((p, q) => (p.label.kind === 'wind') - (q.label.kind === 'wind'));
-    const centres = placeLabels(wanted, segments, mpp, { gap: 4 });
-    const labels = wanted.map((w, i) => ({ ...w.label, ...frame.toLatLng(centres[i]) }));
+    // Runway ends first, so they get the spots nearest their runways; then winds, then airports.
+    const order = { runway: 0, wind: 1, airport: 2 };
+    wanted.sort((p, q) => order[p.label.kind] - order[q.label.kind]);
+    // City names on the map (see map.js): a dot with the name to its right, 11 px capitals.
+    const tier = labelTier(pov.altitude);
+    const taken = CITIES.filter((c) => c.tier <= tier).map((c) => {
+      const { x, y } = frame.toXY(c);
+      return { x0: x - 5 * mpp, x1: x + (9 * c.name.length + 12) * mpp, y0: y - 8 * mpp, y1: y + 8 * mpp };
+    });
+    const centres = placeLabels(wanted, segments, mpp, { gap: 4, taken });
+    const labels = [];
+    let airportsPlaced = 0;
+    wanted.forEach((w, i) => {
+      if (!centres[i]) return;
+      if (w.label.kind === 'airport' && ++airportsPlaced > MAX_AIRPORT_LABELS) return;
+      labels.push({ ...w.label, ...frame.toLatLng(centres[i]) });
+    });
     mapFeatures.setRunwayLabels(labels, onSelect);
   }
 
   return { view, refresh: render };
+}
+
+// The distinctive part of an airport's name: "Amsterdam Airport Schiphol" → "Schiphol".
+export function shortName(airport) {
+  const name = airport.name
+    .replace(/\b(international|intl\.?|regional|municipal|airport|airfield|aerodrome|air base|airbase|field)\b/gi, '')
+    .replace(/[–-]\s*$/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  const city = airport.city?.trim();
+  const rest = city && name.toLowerCase().startsWith(city.toLowerCase()) && name.length > city.length + 2 ? name.slice(city.length).trim() : name;
+  const short = rest.replace(/^[-–/,]\s*/, '') || airport.city || airport.name;
+  return short.length > 22 ? `${short.slice(0, 21)}…` : short;
 }

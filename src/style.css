@@ -980,14 +980,16 @@ input:disabled {
 /* Runway ends and airport winds on the map. Zero-size anchors like the city labels. */
 
 .runway-label,
-.wind-label {
+.wind-label,
+.airport-label {
   position: relative;
   width: 0;
   height: 0;
 }
 
 .runway-label span,
-.wind-label span {
+.wind-label span,
+.airport-label span {
   position: absolute;
   left: 0;
   top: 0;
@@ -1013,6 +1015,27 @@ input:disabled {
   border: 1px solid rgba(155, 209, 255, 0.6);
   pointer-events: auto;
   cursor: pointer;
+}
+
+.airport-label span {
+  font-weight: 600;
+  color: #fff;
+  background: rgba(10, 14, 24, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+/* The plane shows the airport's wind status once known: green, amber or red. */
+.airport-label i {
+  display: inline-block;
+  margin-right: 4px;
+  font-style: normal;
+  color: var(--status, #e6ebf2);
+}
+
+.airport-label.status-unknown i {
+  --status: #e6ebf2;
 }
 
 .wind-label i {

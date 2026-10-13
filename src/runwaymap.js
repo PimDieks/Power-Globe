@@ -161,12 +161,14 @@ const overlaps = (r, s) => r.x0 < s.x1 && r.x1 > s.x0 && r.y0 < s.y1 && r.y1 > s
 // is a segment `a`–`b` with half width `r`. `px` is metres per screen pixel. Candidates go out
 // from the anchor, first straight along the direction, then turning to either side and moving
 // further out. A label with no free spot takes the first one clear of other labels, else its
-// first candidate. Returns label centres.
-export function placeLabels(labels, runways, px, { gap = 3 } = {}) {
-  const placed = [];
+// first candidate; an `optional` label is left out instead (null). A label's own `distances`
+// (pixels) can keep it close to its anchor. Returns label centres.
+export function placeLabels(labels, runways, px, { gap = 3, taken = [] } = {}) {
+  // `taken`: rectangles already used on screen (e.g. city names), in the same metres.
+  const placed = [...taken];
   const ANGLES = [0, 25, -25, 50, -50, 80, -80, 115, -115, 150, -150, 180];
   const DISTANCES = [6, 14, 24, 36, 52, 72, 100, 140];
-  return labels.map(({ anchor, direction, w, h }) => {
+  return labels.map(({ anchor, direction, w, h, distances = DISTANCES, optional = false }) => {
     const rect = (c) => ({ x0: c.x - w / 2 - gap * px, x1: c.x + w / 2 + gap * px, y0: c.y - h / 2 - gap * px, y1: c.y + h / 2 + gap * px });
     const clearOfLabels = (c) => !placed.some((s) => overlaps(rect(c), s));
     const free = (c) => {
@@ -178,7 +180,7 @@ export function placeLabels(labels, runways, px, { gap = 3 } = {}) {
     let first = null;
     let firstClear = null;
     let chosen = null;
-    for (const d of DISTANCES) {
+    for (const d of distances) {
       for (const angle of ANGLES) {
         const t = (angle * Math.PI) / 180;
         const dir = { x: direction.x * Math.cos(t) - direction.y * Math.sin(t), y: direction.x * Math.sin(t) + direction.y * Math.cos(t) };
@@ -194,6 +196,7 @@ export function placeLabels(labels, runways, px, { gap = 3 } = {}) {
       }
       if (chosen) break;
     }
+    if (!chosen && optional) return null;
     chosen ??= firstClear ?? first;
     placed.push(rect(chosen));
     return chosen;
