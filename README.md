@@ -19,6 +19,12 @@ npm run build    # production build in dist/
 npm run preview  # serve the production build locally
 ```
 
+## Deployment
+
+Every push to `main` builds the site and deploys it to GitHub Pages via
+`.github/workflows/deploy.yml`. In the repository settings, set **Pages → Source** to
+**GitHub Actions** once.
+
 ## How it works
 
 | File | Purpose |
