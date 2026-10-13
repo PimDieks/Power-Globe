@@ -54,6 +54,8 @@ and the UI pick it up automatically.
 
 ## Data and attribution
 
+Precipitation is shown as a rate, mm per hour averaged over the 3 hours up to the time shown, on the map, in the storm markers and in the details panel alike.
+
 - Weather data: [Open-Meteo.com](https://open-meteo.com/), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The free API is for non-commercial use, with a fair-use limit of about 10,000 calls per day.
 - Satellite tiles: [Esri World Imagery](https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9) (Esri, Maxar, Earthstar Geographics and the GIS User Community), used under [Esri's terms of use](https://www.esri.com/en-us/legal/terms/full-master-agreement).
 - Backdrop image: NASA Blue Marble (public domain), via the [three-globe](https://github.com/vasturiano/three-globe) examples (MIT).

@@ -158,21 +158,43 @@ export async function fetchHourly(points, { threeHourly = false, onProgress } = 
 
 const round1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
 
+// Hours between consecutive entries of a series: 1 for hourly data, 3 when the API
+// aggregated it to 3-hour steps.
+const seriesHours = (times) => (times.length > 1 ? (parseTime(times[1]) - parseTime(times[0])) / 3_600_000 : 1);
+
 // Indices of the times falling on a multiple of `stepHours` (00:00, 03:00, ... GMT), or all
 // of them when the API already aggregated the series to that step.
 function stepIndices(times, stepHours) {
-  const gapHours = times.length > 1 ? (parseTime(times[1]) - parseTime(times[0])) / 3_600_000 : 1;
-  if (gapHours >= stepHours) return times.map((_, i) => i);
+  if (seriesHours(times) >= stepHours) return times.map((_, i) => i);
   return times.flatMap((t, i) => (Number(t.slice(11, 13)) % stepHours === 0 ? [i] : []));
 }
 
+// Precipitation is shown everywhere as a rate: mm per hour, averaged over the `hours` hours up
+// to and including entry `index` of an hourly series (Open-Meteo gives each hour's total).
+export function precipitationRate(hourly, index, hours = STEP_HOURS) {
+  const window = hourly.slice(Math.max(0, index - hours + 1), index + 1).filter((v) => v != null);
+  return window.length ? window.reduce((a, b) => a + b, 0) / window.length : null;
+}
+
 // Reshape per-location series into values[variable][timeIndex][pointIndex] at `stepHours`.
+// Precipitation becomes a rate over the step (see precipitationRate), whether the API sent
+// 3-hour totals or plain hourly data.
 export function toForecast(points, hourly, stepHours = STEP_HOURS) {
   const keep = hourly.map((h) => stepIndices(h.time, stepHours));
   const times = keep[0].map((i) => hourly[0].time[i]);
   const values = {};
   for (const v of VARIABLES) {
-    values[v] = times.map((_, k) => hourly.map((h, p) => round1(h[v]?.[keep[p][k]])));
+    values[v] = times.map((_, k) =>
+      hourly.map((h, p) => {
+        const i = keep[p][k];
+        if (v !== 'precipitation') return round1(h[v]?.[i]);
+        const hours = seriesHours(h.time);
+        // Aggregated data holds one total per step; hourly data needs averaging over the step.
+        if (hours <= 1) return round1(precipitationRate(h[v] ?? [], i, stepHours));
+        const total = h[v]?.[i];
+        return total == null ? null : round1(total / hours);
+      }),
+    );
   }
   return { times, points, values };
 }

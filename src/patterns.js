@@ -6,7 +6,7 @@ export const HAZARDS = {
   snow: { label: 'Heavy snow', rgb: '231, 245, 255' },
 };
 
-// Severe-weather class for a WMO weather code and hourly precipitation (mm), or null.
+// Severe-weather class for a WMO weather code and precipitation rate (mm/h), or null.
 export function classifyHazard(code, precipitation) {
   if (code === 95 || code === 96 || code === 99) return 'storm';
   if (code === 75 || code === 86) return 'snow';

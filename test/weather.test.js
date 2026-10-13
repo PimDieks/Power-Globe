@@ -6,6 +6,7 @@ import {
   chunk,
   fetchHourly,
   gridShape,
+  precipitationRate,
   resetApiBudget,
   shapePoints,
   startIndex,
@@ -214,6 +215,39 @@ describe('toForecast', () => {
     const hourly = fakeHourly(1);
     hourly.precipitation = [null];
     expect(toForecast([{ lat: 0, lng: 0 }], [hourly], 3).values.precipitation).toEqual([[null]]);
+    const threeHourly = { ...fakeHourly(2), time: ['2026-10-13T00:00', '2026-10-13T03:00'] };
+    threeHourly.precipitation = [null, 6];
+    expect(toForecast([{ lat: 0, lng: 0 }], [threeHourly], 3).values.precipitation).toEqual([[null], [2]]);
+  });
+});
+
+describe('precipitation as a rate', () => {
+  // Hourly totals (mm) from 00:00 to 06:00.
+  const hourlyRain = [0, 1, 2, 3, 0, 0, 6];
+
+  it('averages the 3 hours up to the time shown', () => {
+    expect(precipitationRate(hourlyRain, 3)).toBe(2);
+    expect(precipitationRate(hourlyRain, 6)).toBe(2);
+    // At the start of the series only the hours available count.
+    expect(precipitationRate(hourlyRain, 0)).toBe(0);
+    expect(precipitationRate([null, null], 1)).toBeNull();
+  });
+
+  it('gives the same number on the map whether the API sent hourly or 3-hour data', () => {
+    const point = [{ lat: 0, lng: 0 }];
+    const hourly = { ...fakeHourly(7), precipitation: hourlyRain };
+    // What Open-Meteo returns aggregated to 3 hours: totals of the 3 hours up to each time.
+    const threeHourly = {
+      ...fakeHourly(3),
+      time: ['2026-10-13T00:00', '2026-10-13T03:00', '2026-10-13T06:00'],
+      precipitation: [0, 6, 6],
+    };
+    const fromHourly = toForecast(point, [hourly], 3).values.precipitation;
+    const fromThreeHourly = toForecast(point, [threeHourly], 3).values.precipitation;
+    expect(fromHourly.slice(1)).toEqual([[2], [2]]);
+    expect(fromThreeHourly.slice(1)).toEqual(fromHourly.slice(1));
+    // And the details panel, which uses the hourly series, agrees.
+    expect(precipitationRate(hourlyRain, 3)).toBe(fromThreeHourly[1][0]);
   });
 });
 
