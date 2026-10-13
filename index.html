@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Power Globe</title>
-    <meta name="description" content="An open-source globe showing the weather forecast, with a runway wind check for airports: crosswind, headwind and gusts." />
+    <meta name="description" content="An open-source globe showing the weather forecast, with a runway wind check for airports: crosswind, tailwind and gusts." />
     <link rel="stylesheet" href="/src/style.css" />
     <!-- Open connections early: weather loads at once, imagery as soon as you zoom. -->
     <link rel="preconnect" href="https://api.open-meteo.com" crossorigin />
@@ -85,7 +85,7 @@
         </button>
       </div>
       <p>
-        Major airports where wind and gusts put every runway near or over your limits, nearest first. Model forecast:
+        Major airports where wind and gusts put every runway near or over your crosswind or tailwind limits. Model forecast:
         always check the METAR and TAF.
       </p>
       <details class="limits-box">
@@ -99,11 +99,17 @@
           <div class="limit-inputs">
             <label><span>Crosswind</span><input id="limit-crosswind" type="number" min="0" max="99" step="1" inputmode="numeric" /></label>
             <label><span>Tailwind</span><input id="limit-tailwind" type="number" min="0" max="99" step="1" inputmode="numeric" /></label>
-            <label><span>Headwind</span><input id="limit-headwind" type="number" min="0" max="99" step="1" inputmode="numeric" /></label>
           </div>
         </fieldset>
         <label class="toggle"><input type="checkbox" id="windcheck-marginal" checked /> Show marginal (over 80% of a limit)</label>
       </details>
+      <label class="check-order">
+        <span>Check first</span>
+        <select id="windcheck-order">
+          <option value="near">Nearest to the view</option>
+          <option value="connected">Most connected airports</option>
+        </select>
+      </label>
       <div class="status-row">
         <span id="windcheck-status" role="status"></span>
         <button id="windcheck-retry" type="button" hidden>Retry</button>
@@ -130,7 +136,8 @@
       Imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics
       and the GIS User Community; NASA Blue Marble ·
       Borders <a href="https://www.naturalearthdata.com/" target="_blank" rel="noopener">Natural Earth</a> ·
-      Airports <a href="https://ourairports.com/" target="_blank" rel="noopener">OurAirports</a>
+      Airports <a href="https://ourairports.com/" target="_blank" rel="noopener">OurAirports</a>, routes
+      <a href="https://openflights.org/data.php" target="_blank" rel="noopener">OpenFlights</a> (ODbL)
     </footer>
 
     <script type="module" src="/src/main.js"></script>

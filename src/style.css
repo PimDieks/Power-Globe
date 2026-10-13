@@ -648,6 +648,35 @@ input:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+.check-order {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.check-order select {
+  min-height: var(--touch);
+  padding: 4px 8px;
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+}
+
+.check-order select option {
+  color: #000;
+}
+
+.check-order select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .limits-box {
   margin: 0 0 4px;
   border: 1px solid var(--panel-border);
@@ -722,7 +751,7 @@ input:disabled {
 
 .limit-inputs {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 8px;
 }
 

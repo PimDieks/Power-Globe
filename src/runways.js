@@ -1,14 +1,15 @@
 // Runway wind analysis: headwind, tailwind and crosswind on each runway end, judged against
-// operating limits. All speeds in knots, directions in degrees true.
+// crosswind and tailwind limits. All speeds in knots, directions in degrees true.
 
 const DEG = Math.PI / 180;
 
-// Typical maximum wind components for different kinds of operation. Real limits depend on the
-// aircraft type, the operator and the runway condition; these are starting points to adjust.
+// Typical maximum crosswind and tailwind for different kinds of operation. Headwind is shown but
+// not limited: taking off and landing into the wind is what runways are for. Real limits depend
+// on the aircraft type, the operator and the runway condition; these are starting points to adjust.
 export const PRESETS = {
-  light: { label: 'Light aircraft', crosswind: 15, tailwind: 5, headwind: 30 },
-  regional: { label: 'Regional', crosswind: 25, tailwind: 10, headwind: 40 },
-  airliner: { label: 'Airliner', crosswind: 35, tailwind: 10, headwind: 50 },
+  light: { label: 'Light aircraft', crosswind: 15, tailwind: 5 },
+  regional: { label: 'Regional', crosswind: 25, tailwind: 10 },
+  airliner: { label: 'Airliner', crosswind: 35, tailwind: 10 },
 };
 export const DEFAULT_LIMITS = { ...PRESETS.regional };
 
@@ -47,7 +48,6 @@ export function assessRunwayEnd(heading, wind, limits) {
   const checks = [
     ['crosswind', crosswind, limits.crosswind],
     ['tailwind', tailwind, limits.tailwind],
-    ['headwind', headwind, limits.headwind],
   ];
   const over = checks.filter(([, value, limit]) => value > limit).map(([name]) => name);
   const near = checks.filter(([, value, limit]) => value > limit * CAUTION_SHARE && value <= limit).map(([name]) => name);
@@ -61,13 +61,6 @@ export function assessRunwayEnd(heading, wind, limits) {
     peak: { headwind, tailwind, crosswind },
     // How close the worst component is to its limit (1 = at the limit).
     load: Math.max(...checks.map(([, value, limit]) => share(value, limit))),
-    // For choosing between runway ends: crosswind and tailwind count, headwind only once it
-    // nears its limit, since landing and taking off into the wind is what runways are for.
-    strain: Math.max(
-      share(crosswind, limits.crosswind),
-      share(tailwind, limits.tailwind),
-      share(headwind, limits.headwind) > CAUTION_SHARE ? share(headwind, limits.headwind) : 0,
-    ),
   };
 }
 
@@ -81,7 +74,8 @@ export function assessAirport(airport, wind, limits) {
     ])
     .filter(Boolean)
     .map((end) => ({ ...end, ...assessRunwayEnd(end.heading, wind, limits) }))
-    .sort((a, b) => STATUS[a.status].rank - STATUS[b.status].rank || a.strain - b.strain || a.load - b.load);
+    // Of equally good ends, the one most into the wind.
+    .sort((a, b) => STATUS[a.status].rank - STATUS[b.status].rank || a.load - b.load || b.headwind - a.headwind);
   const best = ends[0];
   return { status: best?.status ?? 'unknown', best, ends };
 }

@@ -11,7 +11,7 @@ export const fold = (text) =>
     .trim();
 
 // One airport from a row of airports.json (see its "fields" and "runwayFields").
-export function toAirport([ident, iata, name, city, country, lat, lng, elevationFt, large, scheduled, runways]) {
+export function toAirport([ident, iata, name, city, country, lat, lng, elevationFt, large, scheduled, runways, routes = 0]) {
   return {
     ident,
     iata,
@@ -31,6 +31,8 @@ export function toAirport([ident, iata, name, city, country, lat, lng, elevation
       lengthFt,
       surface,
     })),
+    // Airports it has scheduled routes to: a measure of how busy it is.
+    routes,
     words: fold(`${name} ${city}`).split(/[^a-z0-9]+/).filter(Boolean),
   };
 }
@@ -54,7 +56,7 @@ export function loadAirports() {
 
 // Airports matching a code, name or city, best match first: exact ICAO or IATA code, then codes
 // starting with the query, then names or cities with a word starting with it, then anywhere.
-// Larger airports win ties.
+// Larger and better connected airports win ties.
 export function searchAirports(airports, query, limit = 8) {
   const q = fold(query);
   if (q.length < 2) return [];
@@ -70,7 +72,7 @@ export function searchAirports(airports, query, limit = 8) {
     scored.push([score, a]);
   }
   return scored
-    .sort(([sa, a], [sb, b]) => sa - sb || Number(b.large) - Number(a.large) || Number(b.scheduled) - Number(a.scheduled) || a.ident.localeCompare(b.ident))
+    .sort(([sa, a], [sb, b]) => sa - sb || Number(b.large) - Number(a.large) || b.routes - a.routes || a.ident.localeCompare(b.ident))
     .slice(0, limit)
     .map(([, a]) => a);
 }

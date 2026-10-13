@@ -64,12 +64,13 @@ export function verdictText({ status, best, ends }) {
 }
 
 export const limitsText = (limits) =>
-  `crosswind ${limits.crosswind} kt, tailwind ${limits.tailwind} kt, headwind ${limits.headwind} kt`;
+  `crosswind ${limits.crosswind} kt, tailwind ${limits.tailwind} kt`;
 
 // The airport details panel at `time`: conditions, verdict, every runway end and the outlook.
 export function airportDetailsHtml({ airport, hourly, time, limits, limitsLabel, formatTime, formatHour }) {
   const now = conditionsAt(hourly, time);
-  const head = `<p class="airport-place">${escapeHtml(airportPlace(airport))} · ${Math.round(airport.elevationFt)} ft</p>`;
+  const routes = airport.routes ? ` · routes to ${airport.routes} airports` : '';
+  const head = `<p class="airport-place">${escapeHtml(airportPlace(airport))} · ${Math.round(airport.elevationFt)} ft${routes}</p>`;
   if (!now) {
     return `${head}<p>No forecast for ${escapeHtml(formatTime(time))} here yet.</p>`;
   }

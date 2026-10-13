@@ -1,11 +1,14 @@
 // Builds public/data/airports.json from OurAirports (https://ourairports.com/data/, public domain):
-// medium and large airports with their open runways and runway headings.
+// medium and large airports with their open runways and runway headings, and how connected each
+// one is: the number of airports it has scheduled routes to, from the OpenFlights route database
+// (https://openflights.org/data.php, Open Database License).
 //
 //   node scripts/build-airports.mjs            downloads the latest data
-//   node scripts/build-airports.mjs <dir>      uses airports.csv and runways.csv from <dir>
+//   node scripts/build-airports.mjs <dir>      uses airports.csv, runways.csv and routes.dat from <dir>
 import { readFile, writeFile } from 'node:fs/promises';
 
 const SOURCE = 'https://raw.githubusercontent.com/davidmegginson/ourairports-data/main';
+const ROUTES_SOURCE = 'https://raw.githubusercontent.com/jpatokal/openflights/master/data';
 const OUT = new URL('../public/data/airports.json', import.meta.url);
 
 // Minimal CSV parser for OurAirports' quoted, comma-separated files.
@@ -68,7 +71,24 @@ function numberHeading(ident) {
   return n >= 1 && n <= 36 ? (n * 10) % 360 : null;
 }
 
-export function buildAirports(airportRows, runwayRows) {
+// Airports connected to each airport by at least one route, by code (IATA or ICAO, as the
+// route data has them). OpenFlights routes.dat: airline, airline id, from, from id, to, to id, ...
+export function routeCounts(routesText) {
+  const partners = new Map();
+  const link = (a, b) => {
+    if (!partners.has(a)) partners.set(a, new Set());
+    partners.get(a).add(b);
+  };
+  for (const line of routesText.split(/\r?\n/)) {
+    const [, , from, , to] = line.split(',');
+    if (!from || !to || from === to) continue;
+    link(from, to);
+    link(to, from);
+  }
+  return new Map([...partners].map(([code, set]) => [code, set.size]));
+}
+
+export function buildAirports(airportRows, runwayRows, routes = new Map()) {
   const runwaysByAirport = new Map();
   for (const r of runwayRows) {
     if (r.closed === '1' || !r.le_ident || /^H/i.test(r.le_ident)) continue;
@@ -100,27 +120,34 @@ export function buildAirports(airportRows, runwayRows) {
       a.type === 'large_airport' ? 1 : 0,
       a.scheduled_service === 'yes' ? 1 : 0,
       runways.sort((x, y) => y[4] - x[4]),
+      Math.max(routes.get(a.iata_code) ?? 0, routes.get(code) ?? 0),
     ]);
   }
-  // Large airports first, so the wind check can take a prefix.
-  return airports.sort((x, y) => y[8] - x[8] || y[9] - x[9] || x[0].localeCompare(y[0]));
+  // Large airports first, then the best connected.
+  return airports.sort((x, y) => y[8] - x[8] || y[9] - x[9] || y[11] - x[11] || x[0].localeCompare(y[0]));
 }
 
-async function load(dir, name) {
+async function load(dir, name, source = SOURCE) {
   if (dir) return readFile(`${dir}/${name}`, 'utf8');
-  const res = await fetch(`${SOURCE}/${name}`);
+  const res = await fetch(`${source}/${name}`);
   if (!res.ok) throw new Error(`Could not download ${name}: ${res.status}`);
   return res.text();
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const dir = process.argv[2];
-  const [airports, runways] = await Promise.all([load(dir, 'airports.csv'), load(dir, 'runways.csv')]);
-  const data = buildAirports(parseCsv(airports), parseCsv(runways));
+  const [airports, runways, routes] = await Promise.all([
+    load(dir, 'airports.csv'),
+    load(dir, 'runways.csv'),
+    load(dir, 'routes.dat', ROUTES_SOURCE),
+  ]);
+  const data = buildAirports(parseCsv(airports), parseCsv(runways), routeCounts(routes));
   const json = JSON.stringify({
-    source: 'OurAirports (https://ourairports.com/data/), public domain',
+    source:
+      'Airports and runways: OurAirports (https://ourairports.com/data/), public domain. ' +
+      'Routes: OpenFlights (https://openflights.org/data.php), Open Database License (ODbL).',
     built: new Date().toISOString().slice(0, 10),
-    fields: ['ident', 'iata', 'name', 'city', 'country', 'lat', 'lon', 'elevationFt', 'large', 'scheduled', 'runways'],
+    fields: ['ident', 'iata', 'name', 'city', 'country', 'lat', 'lon', 'elevationFt', 'large', 'scheduled', 'runways', 'routes'],
     runwayFields: ['leIdent', 'leHeadingT', 'heIdent', 'heHeadingT', 'lengthFt', 'surface'],
     airports: data,
   });

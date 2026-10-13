@@ -4,14 +4,14 @@ import { conditionsAt, fold, searchAirports, toAirport } from '../src/airports.j
 import { addHours, airportDetailsHtml, alongText, acrossText, escapeHtml, verdictText, windProblems } from '../src/airportview.js';
 import { presetFor, readLimits } from '../src/windcheck.js';
 import { buildAirportUrl, fetchAirportHourly, resetApiBudget } from '../src/weather.js';
-import { buildAirports, parseCsv } from '../scripts/build-airports.mjs';
+import { buildAirports, parseCsv, routeCounts } from '../scripts/build-airports.mjs';
 
 const SCHIPHOL = toAirport([
   'EHAM', 'AMS', 'Amsterdam Airport Schiphol', 'Amsterdam', 'NL', 52.3086, 4.7639, -11, 1, 1,
   [['18R', 183, '36L', 3, 12467, 'ASP'], ['09', 87, '27', 267, 11329, 'ASP'], ['06', 58, '24', 238, 11283, 'ASP']],
 ]);
 const SINGLE = toAirport(['XSNG', '', 'Single Runway Field', 'Nowhere', 'GB', 51, 0, 300, 0, 1, [['09', 90, '27', 270, 6000, 'ASP']]]);
-const LIMITS = { crosswind: 25, tailwind: 10, headwind: 40 };
+const LIMITS = { crosswind: 25, tailwind: 10 };
 
 describe('windComponents', () => {
   it('splits wind into headwind and crosswind from the right', () => {
@@ -53,9 +53,11 @@ describe('assessRunwayEnd', () => {
     expect(end.crosswindSide).toBe('L');
   });
 
-  it('flags tailwind and strong headwind', () => {
+  it('limits tailwind but not headwind', () => {
     expect(assessRunwayEnd(90, { direction: 270, speed: 15 }, LIMITS).reasons).toEqual(['tailwind']);
-    expect(assessRunwayEnd(270, { direction: 270, speed: 45 }, LIMITS).reasons).toEqual(['headwind']);
+    const intoWind = assessRunwayEnd(270, { direction: 270, speed: 45, gust: 60 }, LIMITS);
+    expect(intoWind.status).toBe('ok');
+    expect(intoWind.headwind).toBeCloseTo(45);
   });
 
   it('knows when there is no data', () => {
@@ -197,14 +199,15 @@ describe('airport panels', () => {
 describe('limits', () => {
   it('falls back to the defaults when nothing valid is saved', () => {
     const storage = (value) => ({ getItem: () => value });
-    expect(readLimits(storage(null))).toEqual({ crosswind: 25, tailwind: 10, headwind: 40 });
-    expect(readLimits(storage('{"crosswind":-1,"tailwind":10,"headwind":40}'))).toEqual({ crosswind: 25, tailwind: 10, headwind: 40 });
-    expect(readLimits(storage('{"crosswind":20,"tailwind":5,"headwind":30}'))).toEqual({ crosswind: 20, tailwind: 5, headwind: 30 });
+    expect(readLimits(storage(null))).toEqual({ crosswind: 25, tailwind: 10 });
+    expect(readLimits(storage('{"crosswind":-1,"tailwind":10}'))).toEqual({ crosswind: 25, tailwind: 10 });
+    // Limits saved before headwind was dropped still load.
+    expect(readLimits(storage('{"crosswind":20,"tailwind":5,"headwind":30}'))).toEqual({ crosswind: 20, tailwind: 5 });
   });
 
   it('recognises presets', () => {
-    expect(presetFor({ crosswind: 35, tailwind: 10, headwind: 50 })).toBe('airliner');
-    expect(presetFor({ crosswind: 33, tailwind: 10, headwind: 50 })).toBe('custom');
+    expect(presetFor({ crosswind: 35, tailwind: 10 })).toBe('airliner');
+    expect(presetFor({ crosswind: 33, tailwind: 10 })).toBe('custom');
   });
 });
 
@@ -240,6 +243,13 @@ describe('airport weather requests', () => {
 });
 
 describe('build-airports', () => {
+  it('counts the airports each airport has routes to', () => {
+    const routes = routeCounts('KL,1,AMS,1,JFK,2,,0,777\nDL,2,JFK,2,AMS,1,,0,767\nKL,1,AMS,1,LHR,3,,0,737\n');
+    expect(routes.get('AMS')).toBe(2);
+    expect(routes.get('JFK')).toBe(1);
+    expect(routes.get('LHR')).toBe(1);
+  });
+
   it('parses quoted CSV', () => {
     const rows = parseCsv('a,b,c\n1,"x, ""y""",3\r\n4,5,6\n');
     expect(rows).toEqual([
@@ -261,8 +271,9 @@ describe('build-airports', () => {
       runway({ le_ident: '04', he_ident: '22', closed: '1' }),
       runway({ airport_ref: '2' }),
     ];
-    const [airport, ...rest] = buildAirports(airports, runways);
+    const [airport, ...rest] = buildAirports(airports, runways, new Map([['TST', 12]]));
     expect(rest).toEqual([]);
+    expect(airport[11]).toBe(12);
     expect(airport.slice(0, 10)).toEqual(['EXXX', 'TST', 'Test', 'Town', 'NL', 50.1235, 4.5, 30, 1, 1]);
     expect(airport[10]).toEqual([
       ['09', 92, '27', 272, 8000, 'ASPH'],

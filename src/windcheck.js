@@ -6,7 +6,8 @@ import { AIRPORT_RESERVE, apiBudget } from './weather.js';
 import { problemRowHtml, windProblems } from './airportview.js';
 
 const LIMITS_KEY = 'power-globe:limits';
-const LIMIT_NAMES = ['crosswind', 'tailwind', 'headwind'];
+const ORDER_KEY = 'power-globe:check-order';
+const LIMIT_NAMES = ['crosswind', 'tailwind'];
 const MAX_LIMIT = 99;
 // Airports per round of requests, and the fewest worth sending without waiting.
 const ROUND = 100;
@@ -59,6 +60,22 @@ export function setupWindCheck({ els, getTime, getCenter, formatTime, onSelect, 
   let lastKey = '';
   let frame = 0;
 
+  // Which airports to check first: those nearest the view, or the best connected.
+  try {
+    if (localStorage.getItem(ORDER_KEY) === 'connected') els.order.value = 'connected';
+  } catch {
+    // Storage unavailable.
+  }
+  els.order.addEventListener('change', () => {
+    try {
+      localStorage.setItem(ORDER_KEY, els.order.value);
+    } catch {
+      // Remembering the order is only a convenience.
+    }
+    // A load in progress picks the new order up at its next round.
+    if (!loading && airports && weather.size < airports.length) load();
+  });
+
   els.preset.replaceChildren(
     ...[...Object.entries(PRESETS), ['custom', { label: 'Custom' }]].map(([key, { label }]) => new Option(label, key)),
   );
@@ -72,8 +89,8 @@ export function setupWindCheck({ els, getTime, getCenter, formatTime, onSelect, 
   // The folded limits box says what it holds: "Regional · X 25 · T 10 · H 40 kt".
   function showLimitsSummary() {
     els.limitsSummary.textContent =
-      `${limitsLabel(limits)} limits: crosswind ${limits.crosswind}, tailwind ${limits.tailwind}, ` +
-      `headwind ${limits.headwind} kt${els.marginal.checked ? '' : ', marginal hidden'}`;
+      `${limitsLabel(limits)} limits: crosswind ${limits.crosswind} kt, tailwind ${limits.tailwind} kt` +
+      (els.marginal.checked ? '' : ', marginal hidden');
   }
 
   function setLimits(next) {
@@ -123,17 +140,19 @@ export function setupWindCheck({ els, getTime, getCenter, formatTime, onSelect, 
       try {
         airports ??= majorAirports(await loadAirports());
         const total = airports.length;
-        setStatus(`Checking ${total} airports, nearest first…`);
+        const first = () => (els.order.value === 'connected' ? 'most connected first' : 'nearest first');
+        setStatus(`Checking ${total} airports, ${first()}…`);
         const checked = new Map();
         weather = checked;
         // The free API takes a few minutes for all of them, so go in rounds, each taking the
-        // airports nearest to the middle of the view that are still unchecked. Moving the globe
-        // while it loads moves the check along with it.
+        // unchecked airports that matter most: nearest to the middle of the view (so moving the
+        // globe while it loads moves the check along with it), or with the most routes.
         for (;;) {
           const remaining = airports.filter((a) => !checked.has(a.ident));
           if (!remaining.length) break;
           const center = getCenter?.();
-          if (center) remaining.sort((a, b) => distance(a, center) - distance(b, center));
+          if (els.order.value === 'connected') remaining.sort((a, b) => b.routes - a.routes);
+          else if (center) remaining.sort((a, b) => distance(a, center) - distance(b, center));
           // As many as the API allows right away (so nearby airports show at once), up to 100.
           const room = apiBudget() - AIRPORT_RESERVE;
           const size = room >= MIN_ROUND ? Math.min(ROUND, room) : ROUND;
@@ -141,7 +160,7 @@ export function setupWindCheck({ els, getTime, getCenter, formatTime, onSelect, 
             onData: (data) => {
               for (const [ident, hourly] of data) checked.set(ident, hourly);
               scheduleUpdate();
-              setStatus(`Checked ${checked.size} of ${total} airports, nearest first…`);
+              setStatus(`Checked ${checked.size} of ${total} airports, ${first()}…`);
             },
             onWait: (waiting) => {
               if (waiting) {
