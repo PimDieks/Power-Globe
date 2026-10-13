@@ -512,6 +512,43 @@ input:disabled {
   margin: 2px 0;
 }
 
+/* Flight relay on this computer */
+.relay {
+  margin-top: 8px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.relay summary {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.relay p {
+  margin: 6px 0;
+}
+
+.relay code {
+  font-size: 0.75rem;
+  color: var(--text);
+}
+
+.relay-form {
+  display: flex;
+  gap: 6px;
+}
+
+.relay-form input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  font: inherit;
+}
+
 .badge {
   display: inline-block;
   margin-right: 8px;

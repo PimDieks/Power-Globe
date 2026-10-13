@@ -75,6 +75,16 @@ To set it up once:
 
 Optionally, with a free OpenSky Network account, create an API client on its account page and add its `clientId` and `clientSecret` as the repository secrets `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET`; the workflow hands them to the Worker (or run `npx wrangler secret put OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` in `api/`). The worldwide flights then refresh every 2 minutes instead of 5, within the account's daily allowance. For the Aviation map, add a free [openAIP](https://www.openaip.net/) API key as the repository secret `OPENAIP_API_KEY`; the Worker serves the chart tiles with it, cached for a day, so the key never reaches the page. Without the proxy everything else works; live flights and METARs then show why they are unavailable.
 
+## Flight relay on your own computer
+
+The free flight feeds (OpenSky, adsb.lol, airplanes.live, adsb.fi) refuse requests from cloud servers, the Power Globe API's included, but answer a home connection. The flight relay runs the API's flight routes on your computer:
+
+1. With [Node.js](https://nodejs.org/) 18 or newer, in this folder: `npm run relay` (nothing to install). It listens on `http://localhost:8787`.
+2. Optionally, for an OpenSky account's larger allowance, put the API client's `credentials.json` from your OpenSky account page in `relay/` (it is never committed), or set `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET`.
+3. On the site, under **Live traffic**, open **Flight relay on this computer** and choose **Use**. Chrome may ask to allow access to devices on your local network.
+
+The relay serves only the browser on the same computer, and only while it runs; the site remembers it and falls back to the Power Globe API when it is not running. Like the API, it shares each answer while it is fresh and keeps the last good one for when a feed fails.
+
 ## Deployment
 
 Every push to `main` builds the site and deploys it to GitHub Pages via
