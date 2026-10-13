@@ -8,7 +8,9 @@ export default defineConfig({
     alias: {
       // satellite.js's main entry also loads its WebAssembly build, which needs top-level await
       // and Node modules; the satellite worker only needs the plain JavaScript SGP4 parts.
-      'satellite.js/sgp4/': fileURLToPath(new URL('./node_modules/satellite.js/dist/', import.meta.url)),
+      // No trailing slashes: Vite only trims them when both sides end in "/", and on Windows the
+      // path ends in "\", which left the alias matching nothing.
+      'satellite.js/sgp4': fileURLToPath(new URL('./node_modules/satellite.js/dist', import.meta.url)),
     },
   },
 });
