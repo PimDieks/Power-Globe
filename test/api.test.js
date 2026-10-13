@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { corsHeaders, route } from '../api/worker.js';
 import { ceilingFt, flightCategory, toObservation, visibilityMiles } from '../src/metar.js';
-import { bearingBetween, destination, runwayEnds, runwayStatus } from '../src/runwaymap.js';
+import { bearingBetween, destination, placeLabels, runwayEnds, runwayStatus } from '../src/runwaymap.js';
 import { conditionsAt, snapshotSeries, toAirport } from '../src/airports.js';
 import { assessVariable, observationHtml } from '../src/airportview.js';
 import { airportsInView, metresPerPixel } from '../src/airportmap.js';
@@ -147,5 +147,34 @@ describe('keeping the services from being overloaded', () => {
     for (let i = 0; i < RATE_LIMIT; i++) expect(overLimit(ip, 1000)).toBe(false);
     expect(overLimit(ip, 1000)).toBe(true);
     expect(overLimit(ip, 62_000)).toBe(false);
+  });
+});
+
+describe('airport labels on the map', () => {
+  it('names airports by the distinctive part of their name', async () => {
+    const { shortName } = await import('../src/airportmap.js');
+    expect(shortName({ name: 'Amsterdam Airport Schiphol', city: 'Amsterdam' })).toBe('Schiphol');
+    expect(shortName({ name: 'Frankfurt am Main Airport', city: 'Frankfurt am Main' })).toBe('Frankfurt am Main');
+    expect(shortName({ name: 'London Heathrow Airport', city: 'London' })).toBe('Heathrow');
+    expect(shortName({ name: 'Dallas Fort Worth International Airport', city: 'Dallas-Fort Worth' })).toBe('Dallas Fort Worth');
+  });
+
+  it('labels the big airports first and smaller ones closer in', async () => {
+    const { airportLabelTier } = await import('../src/airportmap.js');
+    const big = { large: true, scheduled: true, routes: 200 };
+    const regional = { large: false, scheduled: true, routes: 12 };
+    const field = { large: false, scheduled: false, routes: 0 };
+    expect([big, regional, field].map((a) => airportLabelTier(a, 0.4))).toEqual([true, false, false]);
+    expect([big, regional, field].map((a) => airportLabelTier(a, 0.15))).toEqual([true, true, false]);
+    expect([big, regional, field].map((a) => airportLabelTier(a, 0.05))).toEqual([true, true, true]);
+  });
+
+  it('leaves out an optional label with no free spot, and keeps clear of taken places', () => {
+    const label = (x) => ({ anchor: { x, y: 0 }, direction: { x: 0, y: 1 }, w: 10, h: 10, distances: [-5, 2], optional: true });
+    const [first, second] = placeLabels([label(0), label(1)], [], 1);
+    expect(first).not.toBeNull();
+    expect(second).toBeNull();
+    const [moved] = placeLabels([{ ...label(0), distances: [-5, 2, 20] }], [], 1, { taken: [{ x0: -10, x1: 10, y0: -10, y1: 8 }] });
+    expect(moved.y).toBeGreaterThan(8);
   });
 });
