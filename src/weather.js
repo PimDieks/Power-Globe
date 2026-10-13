@@ -260,15 +260,24 @@ export const AIRPORT_RESERVE = 20;
 export const AIRPORT_SNAPSHOT_STEP = 3;
 const BUDGET_POLL_MS = 2000;
 
+// Whether waiting could give the allowance room for `locations`. It cannot while Open-Meteo has
+// asked us to stop or this browser's share of the day is spent: that lasts for hours, and
+// fetchJson sends such requests to the Power Globe API instead. Only the per-minute allowance
+// refills while waiting.
+const waitingHelps = (locations, now = Date.now()) => now >= pausedUntil && DAILY_BUDGET - usedToday(now) >= locations;
+
 // Hourly airport conditions, 100 airports per request. Long lists are paced to the free API's
 // limits rather than running into them: each request waits until the allowance has room for it
-// (`onWait(true)` while waiting). `onBatch(airports, hourly)` hands over each part as it arrives.
-export async function fetchAirportHourly(airports, { onProgress, onBatch, onWait } = {}) {
+// (`onWait(true)` while waiting). `wait: false` is for the airport someone is looking at, which
+// is what the reserve is for. `onBatch(airports, hourly)` hands over each part as it arrives.
+export async function fetchAirportHourly(airports, { onProgress, onBatch, onWait, wait = true } = {}) {
   const parts = chunk(airports, CHUNK_SIZE);
   for (const [i, part] of parts.entries()) {
-    if (apiBudget() < part.length + AIRPORT_RESERVE) {
+    const room = part.length + AIRPORT_RESERVE;
+    const mustWait = () => wait && apiBudget() < room && waitingHelps(room);
+    if (mustWait()) {
       onWait?.(true);
-      while (apiBudget() < part.length + AIRPORT_RESERVE) await sleep(BUDGET_POLL_MS);
+      while (mustWait()) await sleep(BUDGET_POLL_MS);
       onWait?.(false);
     }
     spend(part.length);

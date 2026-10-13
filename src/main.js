@@ -25,9 +25,9 @@ import { airportDetailsHtml, airportPlace, verdictText } from './airportview.js'
 import { setupWindCheck } from './windcheck.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
-import { setupAirportMap } from './airportmap.js';
+import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
 import { latestObservation } from './metar.js';
-import { explain } from './api.js';
+import { explain, withTimeout } from './api.js';
 
 // Timeline playback speed, in forecast steps (3 hours each) per second.
 const STEPS_PER_SECOND = 1;
@@ -43,6 +43,9 @@ const RETRY_MS = 20_000;
 const POINT_RESERVE = 20;
 // How long zoomed-in detail waits before retrying when the API budget is low.
 const REGION_RETRY_MS = 15_000;
+// The longest the airport panel waits for its forecast: a request to Open-Meteo gives up after
+// 30 s, and the Power Globe API gets its turn after that.
+const AIRPORT_WEATHER_TIMEOUT_MS = 45_000;
 // How often the zoomed-in detail follows a moving camera.
 const REGION_FOLLOW_MS = 400;
 // Seconds for zoomed-in detail to fade in once it arrives.
@@ -126,8 +129,9 @@ const els = {
 
 const state = {
   layer: getLayer('temperature'),
-  // Whether the weather layer is drawn at all, or just the map.
-  overlay: true,
+  // Whether the weather layer is drawn at all, or just the map. It starts as just the map
+  // ("None"); picking a layer turns it on.
+  overlay: false,
   mode: 'field',
   forecast: null,
   winds: null,
@@ -148,7 +152,6 @@ const state = {
   autoRotate: !reducedMotion,
 };
 
-if (reducedMotion) els.wind.checked = false;
 // On phones the controls start folded so the globe gets the screen.
 if (narrowScreen) setControlsOpen(false);
 
@@ -250,7 +253,7 @@ const airportMap = setupAirportMap({
   onSelect: (airport) => {
     // A tap on a label should not also open the weather where it landed.
     pickedAt = performance.now();
-    showAirport(airport);
+    goToAirport(airport, { stayClose: true });
   },
 });
 
@@ -679,7 +682,7 @@ function announce(message) {
   });
 }
 
-// The layers and display options fold away; the title and search box stay visible.
+// The layers and display options fold away; the title, search box and wind check button stay visible.
 function setControlsOpen(open) {
   els.controlsBody.hidden = !open;
   els.controlsToggle.setAttribute('aria-expanded', String(open));
@@ -804,8 +807,9 @@ async function showAirport(airport, { fromList = false } = {}) {
   openSidePanel();
   windCheck.close();
   syncWindCheckButton();
-  // `observation`: undefined while the METAR loads, null if there is none.
-  const detail = { airport, hourly: null, fromList, observation: undefined };
+  // `observation`: undefined while the METAR loads, null if there is none. `error`: why there is
+  // no forecast, once it is known.
+  const detail = { airport, hourly: null, fromList, observation: undefined, error: null };
   state.detail = detail;
   mapFeatures.setMarker({ lat: airport.lat, lng: airport.lng, name: airport.iata || airport.ident });
   els.details.classList.remove('hidden');
@@ -824,10 +828,12 @@ async function showAirport(airport, { fromList = false } = {}) {
     })
     .finally(() => state.detail === detail && renderDetails());
   try {
-    // The freshest forecast for the one airport being looked at.
-    const weather = await airportWeather([airport], { preferLive: true });
+    // The freshest forecast for the one airport being looked at. Whatever happens, the panel says
+    // something within AIRPORT_WEATHER_TIMEOUT_MS rather than staying on "Loading conditions…".
+    const weather = await withTimeout(airportWeather([airport], { preferLive: true }), AIRPORT_WEATHER_TIMEOUT_MS, 'no answer in time');
     if (state.detail !== detail) return;
     detail.hourly = weather.get(airport.ident);
+    if (!detail.hourly) throw new Error('no forecast for this airport');
     renderDetails();
     const conditions = conditionsAt(detail.hourly, currentTime());
     if (conditions) {
@@ -837,7 +843,8 @@ async function showAirport(airport, { fromList = false } = {}) {
   } catch (err) {
     console.error(err);
     if (state.detail === detail) {
-      els.detailsBody.innerHTML = `<p>Could not load conditions at this airport. ${err.message ?? ''}</p>`;
+      detail.error = explain(err);
+      renderDetails();
       announce(`Could not load conditions at ${airport.name}.`);
     }
   }
@@ -891,21 +898,21 @@ function backToWindCheck() {
 }
 
 
-// Altitude to show a searched airport from: low enough to make out its runways.
-const AIRPORT_ALTITUDE = 0.004;
 // Degrees of latitude the view spans per globe radius of camera altitude (see detail.js).
 const LAT_SPAN_PER_ALTITUDE = 53;
 
-// Glide to an airport and open its conditions. On phones the details panel covers the lower
-// half of the screen, so aim the camera a little south to put the airport in the open space
-// between the search box and the panel.
-function goToAirport(airport, options) {
+// Glide to an airport and open its conditions, from a height at which its runways show.
+// `stayClose` (a label on the map) never backs out from a closer view: it only centres on the
+// airport. On phones the details panel covers the lower half of the screen, so aim the camera a
+// little south to put the airport in the open space between the search box and the panel.
+function goToAirport(airport, { stayClose = false, ...options } = {}) {
+  const altitude = stayClose ? airportFlightAltitude(globe.pointOfView().altitude) : AIRPORT_ALTITUDE;
   let lat = airport.lat;
   if (phoneLayout.matches) {
     const top = els.controls.offsetTop + els.controls.offsetHeight;
     const bottom = Math.max(top + 80, window.innerHeight * 0.45);
     const shift = (window.innerHeight / 2 - (top + bottom) / 2) / window.innerHeight;
-    lat = Math.max(-85, Math.min(85, lat - shift * LAT_SPAN_PER_ALTITUDE * AIRPORT_ALTITUDE));
+    lat = Math.max(-85, Math.min(85, lat - shift * LAT_SPAN_PER_ALTITUDE * altitude));
   }
   // Stop turning first: the camera controls keep the turn's momentum, which would otherwise carry
   // the view on past the airport after the flight.
@@ -913,7 +920,7 @@ function goToAirport(airport, options) {
   controls.autoRotate = false;
   stopCameraDrift();
   const duration = reducedMotion ? 0 : 2200;
-  globe.pointOfView({ lat, lng: airport.lng, altitude: AIRPORT_ALTITUDE }, duration);
+  globe.pointOfView({ lat, lng: airport.lng, altitude }, duration);
   setTimeout(stopCameraDrift, duration + 50);
   showAirport(airport, options);
 }
@@ -966,7 +973,7 @@ function renderDetails() {
     return;
   }
   if (detail?.airport) {
-    if (!detail.hourly) return;
+    if (!detail.hourly && !detail.error) return;
     els.detailsBody.innerHTML = airportDetailsHtml({
       airport: detail.airport,
       hourly: detail.hourly,
@@ -976,6 +983,7 @@ function renderDetails() {
       formatTime,
       formatHour,
       observation: detail.observation,
+      error: detail.error,
     });
     return;
   }

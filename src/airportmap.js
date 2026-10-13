@@ -6,6 +6,13 @@ import { viewBounds } from './detail.js';
 import { CITIES, labelTier } from './cities.js';
 import { destination, localFrame, placeLabels, runwayEnds, runwayStatus, setupRunways } from './runwaymap.js';
 
+// Altitude to fly to an airport at: low enough to make out its runways.
+export const AIRPORT_ALTITUDE = 0.004;
+
+// The altitude to fly to an airport at when the camera is at `current`: the usual one, but never
+// back out from a closer view.
+export const airportFlightAltitude = (current) => Math.min(AIRPORT_ALTITUDE, current);
+
 // Runways show below this camera altitude (globe radii); a 3 km runway is then over 10 px long.
 export const RUNWAY_ALTITUDE = 0.035;
 // Runway end and wind labels show below this one.

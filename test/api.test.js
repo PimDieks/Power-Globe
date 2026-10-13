@@ -5,6 +5,7 @@ import { bearingBetween, destination, placeLabels, runwayEnds, runwayStatus } fr
 import { conditionsAt, snapshotSeries, toAirport } from '../src/airports.js';
 import { assessVariable, observationHtml } from '../src/airportview.js';
 import { airportsInView, metresPerPixel } from '../src/airportmap.js';
+import { withTimeout } from '../src/api.js';
 
 const LIMITS = { crosswind: 25, tailwind: 10 };
 const SCHIPHOL = toAirport([
@@ -204,6 +205,25 @@ describe('keeping the services from being overloaded', () => {
   });
 });
 
+describe('never loading for ever', () => {
+  it('gives up with a reason when something does not settle in time', async () => {
+    vi.useFakeTimers();
+    try {
+      const never = new Promise(() => {});
+      const late = withTimeout(never, 45_000, 'no answer in time');
+      const caught = expect(late).rejects.toThrow('no answer in time');
+      await vi.advanceTimersByTimeAsync(45_000);
+      await caught;
+      // Without a timer left behind when it settles first.
+      expect(await withTimeout(Promise.resolve('conditions'), 45_000, 'no answer in time')).toBe('conditions');
+      await expect(withTimeout(Promise.reject(new Error('refused')), 45_000, 'no answer in time')).rejects.toThrow('refused');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('airport labels on the map', () => {
   it('names airports by the distinctive part of their name', async () => {
     const { shortName } = await import('../src/airportmap.js');
@@ -221,6 +241,14 @@ describe('airport labels on the map', () => {
     expect([big, regional, field].map((a) => airportLabelTier(a, 0.4))).toEqual([true, false, false]);
     expect([big, regional, field].map((a) => airportLabelTier(a, 0.15))).toEqual([true, true, false]);
     expect([big, regional, field].map((a) => airportLabelTier(a, 0.05))).toEqual([true, true, true]);
+  });
+
+  it('flies to an airport at the search altitude, but never back out from a closer view', async () => {
+    const { AIRPORT_ALTITUDE, airportFlightAltitude } = await import('../src/airportmap.js');
+    expect(airportFlightAltitude(0.02)).toBe(AIRPORT_ALTITUDE);
+    expect(airportFlightAltitude(2.4)).toBe(AIRPORT_ALTITUDE);
+    expect(airportFlightAltitude(0.003)).toBe(0.003);
+    expect(airportFlightAltitude(AIRPORT_ALTITUDE)).toBe(AIRPORT_ALTITUDE);
   });
 
   it('leaves out an optional label with no free spot, and keeps clear of taken places', () => {

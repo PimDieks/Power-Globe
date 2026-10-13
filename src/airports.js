@@ -136,9 +136,10 @@ let snapshotPromise = null;
 const airportSnapshot = () => (snapshotPromise ??= fetchSnapshot('api/airport-weather.json').then(snapshotSeries));
 
 // Hourly ground conditions for `airports`, fetching only those not cached: from the site's own
-// data while it is recent, else Open-Meteo, else the site's data however old. `preferLive` asks
-// Open-Meteo first (for the one airport being looked at). `onData(map)` is called as each batch
-// arrives, so a long list can fill in progressively.
+// data while it is recent, else Open-Meteo (through the Power Globe API when Open-Meteo refuses),
+// else the site's data however old. `preferLive` asks Open-Meteo first, without waiting for the
+// pacing (for the one airport being looked at). `onData(map)` is called as each batch arrives, so
+// a long list can fill in progressively.
 export async function airportWeather(airports, { onData, onProgress, onWait, preferLive = false } = {}) {
   const now = Date.now();
   const result = new Map();
@@ -165,6 +166,7 @@ export async function airportWeather(airports, { onData, onProgress, onWait, pre
     await fetchAirportHourly(missing, {
       onProgress,
       onWait,
+      wait: !preferLive,
       onBatch: (batch, hourly) => {
         batch.forEach((a, i) => {
           weatherCache.set(a.ident, { at: Date.now(), hourly: hourly[i] });

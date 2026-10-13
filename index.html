@@ -24,7 +24,6 @@
       <div class="panel" id="controls">
         <div class="panel-head">
           <h1>Power Globe</h1>
-          <button id="windcheck-open" type="button" aria-expanded="false" aria-controls="windcheck">Wind check</button>
           <button id="controls-toggle" class="icon-button" type="button" aria-expanded="true" aria-controls="controls-body">
             <span class="chevron" aria-hidden="true"></span><span class="visually-hidden">Layers and display options</span>
           </button>
@@ -48,14 +47,16 @@
           <p id="search-status" class="search-status" aria-live="polite"></p>
         </div>
 
+        <button id="windcheck-open" type="button" aria-expanded="false" aria-controls="windcheck">Wind check</button>
+
         <div id="controls-body">
           <section class="control-group" aria-labelledby="weather-title">
             <h2 id="weather-title">Weather</h2>
             <div class="button-row" id="layer-buttons" role="radiogroup" aria-label="Weather layer"></div>
             <div id="legend"></div>
             <div class="button-row" id="mode-buttons" role="radiogroup" aria-label="Show the weather layer as"></div>
-            <label class="toggle"><input type="checkbox" id="toggle-wind" checked /> Wind flow</label>
-            <label class="toggle"><input type="checkbox" id="toggle-hazards" checked /> Storms &amp; heavy precipitation</label>
+            <label class="toggle"><input type="checkbox" id="toggle-wind" /> Wind flow</label>
+            <label class="toggle"><input type="checkbox" id="toggle-hazards" /> Storms &amp; heavy precipitation</label>
             <div id="pattern-legend"></div>
             <div class="status-row">
               <span id="status" role="status">Loading forecast…</span>

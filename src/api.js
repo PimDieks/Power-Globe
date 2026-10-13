@@ -22,6 +22,16 @@ export async function fetchSnapshot(path) {
   }
 }
 
+// `promise`, or a rejection with `message` if it has not settled after `ms`, so that nothing shown
+// as loading can wait for ever. An answer that comes later is ignored.
+export function withTimeout(promise, ms, message) {
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
 // What went wrong, in words: "Failed to fetch" means the browser was not allowed to ask the
 // service (it does not accept requests from other websites) or could not reach it.
 export function explain(err) {
