@@ -1,5 +1,9 @@
-// Weather layers shown on the globe. Each layer maps an Open-Meteo "current"
-// variable to a colour scale. `stops` are [value, colour] pairs in ascending order.
+// Weather layers shown on the globe. Each layer maps an Open-Meteo variable to a colour
+// scale: `stops` are [value, colour] pairs in ascending order. Palettes are muted and
+// painterly so the globe reads as a whole rather than as a chart.
+//   opacity  how strongly the smooth field covers the Earth
+//   fade     optional [from, to] range over which the field fades in from transparent,
+//            so e.g. dry or clear areas show the Earth underneath
 
 export const LAYERS = [
   {
@@ -7,14 +11,17 @@ export const LAYERS = [
     label: 'Temperature',
     variable: 'temperature_2m',
     unit: '°C',
+    opacity: 0.52,
     stops: [
-      [-40, '#2c1c6b'],
-      [-20, '#3b5bdb'],
-      [0, '#74c0fc'],
-      [10, '#8ce99a'],
-      [20, '#ffe066'],
-      [30, '#ff922b'],
-      [45, '#c92a2a'],
+      [-40, '#1b1036'],
+      [-25, '#2b3a8c'],
+      [-10, '#3f7cc4'],
+      [0, '#7fc6d9'],
+      [10, '#bfe3c0'],
+      [18, '#f3e3a1'],
+      [26, '#f2a65e'],
+      [34, '#d9534f'],
+      [45, '#7a1f3d'],
     ],
   },
   {
@@ -22,12 +29,14 @@ export const LAYERS = [
     label: 'Wind speed',
     variable: 'wind_speed_10m',
     unit: 'km/h',
+    opacity: 0.55,
     stops: [
-      [0, '#e7f5ff'],
-      [20, '#74c0fc'],
-      [40, '#4c6ef5'],
-      [70, '#ae3ec9'],
-      [110, '#e64980'],
+      [0, '#14213d'],
+      [15, '#1f6f8b'],
+      [30, '#3fb8af'],
+      [50, '#b5e8d5'],
+      [80, '#f6d6e8'],
+      [110, '#ff8fab'],
     ],
   },
   {
@@ -35,12 +44,13 @@ export const LAYERS = [
     label: 'Precipitation',
     variable: 'precipitation',
     unit: 'mm',
+    opacity: 0.8,
+    fade: [0.05, 1.5],
     stops: [
-      [0, '#f1f3f5'],
-      [0.5, '#a5d8ff'],
-      [2, '#339af0'],
-      [5, '#1864ab'],
-      [15, '#5f3dc4'],
+      [0, '#a5d8ff'],
+      [1, '#4dabf7'],
+      [4, '#5f3dc4'],
+      [15, '#e5dbff'],
     ],
   },
   {
@@ -48,10 +58,12 @@ export const LAYERS = [
     label: 'Cloud cover',
     variable: 'cloud_cover',
     unit: '%',
+    opacity: 0.85,
+    fade: [15, 100],
     stops: [
-      [0, '#4dabf7'],
-      [50, '#adb5bd'],
-      [100, '#f8f9fa'],
+      [0, '#c5d3e8'],
+      [60, '#e9eef5'],
+      [100, '#ffffff'],
     ],
   },
   {
@@ -59,11 +71,12 @@ export const LAYERS = [
     label: 'Humidity',
     variable: 'relative_humidity_2m',
     unit: '%',
+    opacity: 0.6,
     stops: [
-      [0, '#e8590c'],
-      [40, '#fcc419'],
-      [70, '#63e6be'],
-      [100, '#1971c2'],
+      [0, '#7f4f24'],
+      [40, '#dda15e'],
+      [70, '#83c5be'],
+      [100, '#006d77'],
     ],
   },
 ];
@@ -103,14 +116,21 @@ export function colorFor(stops, value) {
   return last[1];
 }
 
-// Precomputed RGB lookup table spanning the stops' range, for fast per-pixel colouring.
-export function buildLut(stops, size = 256) {
+// Precomputed RGBA lookup table spanning the stops' range, for fast per-pixel colouring.
+// Alpha ramps up across the layer's `fade` range, if it has one.
+export function buildLut({ stops, fade }, size = 256) {
   const min = stops[0][0];
   const max = stops[stops.length - 1][0];
-  const lut = new Uint8ClampedArray(size * 3);
+  const lut = new Uint8ClampedArray(size * 4);
   for (let i = 0; i < size; i++) {
-    const [r, g, b] = hexToRgb(colorFor(stops, min + ((max - min) * i) / (size - 1)));
-    lut.set([r, g, b], i * 3);
+    const value = min + ((max - min) * i) / (size - 1);
+    const [r, g, b] = hexToRgb(colorFor(stops, value));
+    let alpha = 1;
+    if (fade) {
+      const t = Math.min(1, Math.max(0, (value - fade[0]) / (fade[1] - fade[0])));
+      alpha = t * t * (3 - 2 * t);
+    }
+    lut.set([r, g, b, Math.round(alpha * 255)], i * 4);
   }
   return lut;
 }

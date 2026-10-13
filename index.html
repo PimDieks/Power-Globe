@@ -9,8 +9,8 @@
   <body>
     <div id="globe"></div>
 
-    <header class="panel" id="controls">
-      <h1>Power Globe</h1>
+    <details class="panel" id="controls" open>
+      <summary><h1>Power Globe</h1></summary>
       <div class="button-row" id="layer-buttons" role="radiogroup" aria-label="Weather layer"></div>
       <div id="legend" aria-live="polite"></div>
 
@@ -24,7 +24,7 @@
         <span id="status">Loading forecast…</span>
         <button id="refresh" type="button">Refresh</button>
       </div>
-    </header>
+    </details>
 
     <aside class="panel hidden" id="details" aria-live="polite"></aside>
 
@@ -34,6 +34,8 @@
       <span id="time-label">–</span>
       <button id="now" type="button" disabled>Now</button>
     </div>
+
+    <div id="caption" aria-live="off"></div>
 
     <footer class="attribution">
       Weather data by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a>

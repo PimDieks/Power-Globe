@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { sampleGrid } from '../src/field.js';
-import { classifyHazard, destination, hazardRings, windStreaks } from '../src/patterns.js';
+import { cubicWeights, renderField, sampleGrid, sampleGridCubic, samplingTables } from '../src/field.js';
+import { advect, windComponents, windGrids } from '../src/flow.js';
+import { classifyHazard, hazardRings } from '../src/patterns.js';
 
 describe('sampleGrid', () => {
   // 2 rows (lat 0 and 10) x 4 columns (lng -180, -90, 0, 90).
@@ -30,40 +31,70 @@ describe('sampleGrid', () => {
   });
 });
 
-describe('destination', () => {
-  it('moves north along a meridian', () => {
-    const p = destination(0, 0, 0, 10);
-    expect(p.lat).toBeCloseTo(10);
-    expect(p.lng).toBeCloseTo(0);
+describe('bicubic field', () => {
+  const shape = { rows: 4, cols: 8, lat0: -60, step: 40 };
+  const values = Float32Array.from({ length: 32 }, (_, i) => Math.sin(i) * 20);
+
+  it('has weights that sum to one and hit grid points exactly', () => {
+    for (const t of [0, 0.25, 0.5, 0.9]) {
+      expect(cubicWeights(t).reduce((a, b) => a + b)).toBeCloseTo(1);
+    }
+    expect(cubicWeights(0)).toEqual([0, 1, 0, 0]);
+    expect(sampleGridCubic(values, shape, -20, -140)).toBeCloseTo(values[1 * 8 + 1], 5);
   });
 
-  it('moves east along the equator and wraps longitude', () => {
-    const p = destination(0, 175, 90, 10);
-    expect(p.lat).toBeCloseTo(0);
-    expect(p.lng).toBeCloseTo(-175);
+  it('renders the same values as point sampling', () => {
+    const lut = new Uint8ClampedArray(256 * 4).map((_, i) => (i % 4 === 3 ? 255 : Math.floor(i / 4)));
+    const width = 16;
+    const height = 8;
+    const out = new Uint8ClampedArray(width * height * 4);
+    renderField(values, samplingTables(shape, width, height), lut, -20, 20, out);
+    for (const [px, py] of [
+      [0, 0],
+      [5, 3],
+      [15, 7],
+    ]) {
+      const v = sampleGridCubic(values, shape, 90 - ((py + 0.5) * 180) / height, -180 + ((px + 0.5) * 360) / width);
+      const expected = Math.round(Math.min(255, Math.max(0, ((v + 20) * 255) / 40)));
+      expect(out[(py * width + px) * 4]).toBe(expected);
+    }
+  });
+
+  it('leaves pixels transparent where data is missing', () => {
+    const lut = new Uint8ClampedArray(4 * 4).fill(255);
+    const out = new Uint8ClampedArray(4 * 2 * 4).fill(255);
+    renderField(new Float32Array(32).fill(NaN), samplingTables(shape, 4, 2), lut, 0, 1, out);
+    expect(out[3]).toBe(0);
   });
 });
 
-describe('windStreaks', () => {
-  const points = [
-    { lat: 0, lng: 0 },
-    { lat: 0, lng: 10 },
-    { lat: 0, lng: 20 },
-  ];
-
-  it('points downwind and skips calm or missing wind', () => {
+describe('wind', () => {
+  it('converts meteorological direction into flow components', () => {
     // A northerly (from 0°) blows towards the south.
-    const streaks = windStreaks(points, [20, 1, null], [0, 0, 0]);
-    expect(streaks).toHaveLength(1);
-    const [start, end] = streaks[0].points;
-    expect(start).toBe(points[0]);
-    expect(end.lat).toBeCloseTo(-4);
-    expect(end.lng).toBeCloseTo(0);
+    const [u, v] = windComponents(10, 0);
+    expect(u).toBeCloseTo(0);
+    expect(v).toBeCloseTo(-10);
+    // A westerly (from 270°) blows towards the east.
+    expect(windComponents(10, 270)[0]).toBeCloseTo(10);
+    expect(windComponents(null, 0)).toEqual([NaN, NaN]);
   });
 
-  it('caps the streak length', () => {
-    const [streak] = windStreaks(points.slice(0, 1), [500], [270]);
-    expect(streak.points[1].lng).toBeCloseTo(9);
+  it('builds u/v grids per step', () => {
+    const [step] = windGrids([[10, 20]], [[270, 180]]);
+    expect(step.u[0]).toBeCloseTo(10);
+    expect(step.v[1]).toBeCloseTo(20);
+  });
+
+  it('advects particles and wraps longitude', () => {
+    const [lat, lng] = advect(0, 179, 10, 0, 1, 0.2);
+    expect(lat).toBeCloseTo(0);
+    expect(lng).toBeCloseTo(-179);
+  });
+
+  it('moves faster in longitude near the poles so motion looks even', () => {
+    const [, nearEquator] = advect(0, 0, 10, 0, 1, 0.1);
+    const [, nearPole] = advect(60, 0, 10, 0, 1, 0.1);
+    expect(nearPole).toBeCloseTo(nearEquator * 2);
   });
 });
 
