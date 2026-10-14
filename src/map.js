@@ -4,6 +4,20 @@ import { PROXY_URL } from './api.js';
 import { CITIES, labelTier } from './cities.js';
 import { STATUS } from './runways.js';
 import { retryingTextureLoad, withLoad } from './tileretry.js';
+import {
+  AREA_DEG,
+  CAPABILITIES_URL,
+  FADE_FROM_DEG,
+  MAP_LEVEL_LIMIT,
+  TileStore,
+  coversTile,
+  framesFor,
+  parseTimes,
+  passedFrames,
+  tileBounds,
+  tileUrl,
+  tilesInView,
+} from './meteosat.js';
 
 // Daily cloud imagery is used up to this tile level (about 300 m per pixel).
 const CLOUDS_MAX_LEVEL = 9;
@@ -37,13 +51,15 @@ export const BASEMAPS = {
     light: 1.1,
     credit: 'Map <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, HERE, Garmin, FAO, NOAA, USGS, OpenStreetMap contributors and the GIS User Community',
   },
-  // Yesterday's clouds as seen from space: one day of NASA's VIIRS true colour imagery (NOAA-20,
-  // public domain, via NASA GIBS), the most recent complete day. Its pixels are about 300 m
-  // across, so closer in the view continues as the satellite imagery.
+  // Clouds as seen from space. Over Europe and Africa they move with the timeline: EUMETSAT's
+  // Meteosat images, every 10 minutes (see meteosat.js). Elsewhere they are yesterday's: one day
+  // of NASA's VIIRS true colour imagery (NOAA-20, public domain, via NASA GIBS), the most recent
+  // complete day. Closer in than either has detail for, the view continues as the satellite
+  // imagery.
   clouds: {
     label: 'Clouds',
     url: (x, y, level) =>
-      level <= CLOUDS_MAX_LEVEL
+      level <= CLOUDS_MAX_LEVEL && !(level > MAP_LEVEL_LIMIT && coversTile(x, y, level))
         ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_NOAA20_CorrectedReflectance_TrueColor/default/${cloudsDay()}/GoogleMapsCompatible_Level9/${level}/${y}/${x}.jpg`
         : esri('World_Imagery')(x, y, level),
     maxLevel: 17,
@@ -51,8 +67,9 @@ export const BASEMAPS = {
     // Where the satellite saw nothing that day the imagery is pure black: see through it to
     // the whole-Earth image beneath instead.
     noDataBlack: true,
+    moving: true,
     get credit() {
-      return `Clouds on ${cloudsDay()} (UTC): <a href="https://www.earthdata.nasa.gov/data/instruments/viirs" target="_blank" rel="noopener">NASA VIIRS</a> via GIBS; close up imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics and the GIS User Community`;
+      return `Clouds over Europe and Africa: contains modified <a href="https://www.eumetsat.int/" target="_blank" rel="noopener">EUMETSAT</a> Meteosat data ${new Date().getUTCFullYear()}; elsewhere on ${cloudsDay()} (UTC): <a href="https://www.earthdata.nasa.gov/data/instruments/viirs" target="_blank" rel="noopener">NASA VIIRS</a> via GIBS; close up imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics and the GIS User Community`;
     },
   },
   // An aeronautical chart: openAIP's airspaces, airports, navaids and reporting points (through
@@ -73,8 +90,9 @@ const MAP_ALTITUDE = 1.3;
 // Satellite imagery that sharpens as you zoom in, over a whole-Earth image just beneath it.
 // The image shows wherever tiles are missing: the poles (beyond Web Mercator), while tiles
 // load, or if the tile server cannot be reached.
-// Returns { setAltitude(altitude), setStyle(key), setFollowing(on) }.
-export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCredit } = {}) {
+// Returns { setAltitude(altitude), setStyle(key), setFollowing(on), setTime(time, ahead),
+// cloudsAsOf() }. `onClouds()` is called when the moving clouds show another image.
+export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCredit, onClouds } = {}) {
   let style = BASEMAPS[initial] ?? BASEMAPS.satellite;
   globe.globeTileEngineUrl(style.url).globeTileEngineMaxLevel(style.maxLevel);
   // A second, transparent layer of tiles just above the map, for a chart drawn over it.
@@ -83,7 +101,21 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
   window.addEventListener('resize', () => {
     tilesTuned = matchTileDetailToScreen(globe, chart.engine);
   });
-  let engineHooked = false;
+  // three-globe's tile engine joins the scene only once the globe has initialised, so keep trying.
+  let baseEngine = null;
+  const findBaseEngine = () => {
+    if (!baseEngine) {
+      baseEngine = findTileEngine(globe, chart.engine);
+      if (baseEngine) {
+        seeThroughNoData(baseEngine, () => style.noDataBlack);
+        // Tiles loaded before the hook was in place.
+        if (style.noDataBlack) globe.globeTileEngineClearCache();
+      }
+    }
+    return baseEngine;
+  };
+  // Moving clouds over Europe and Africa, just above the map, for the Clouds view.
+  const moving = setupMovingClouds(globe, findBaseEngine, onClouds);
 
   const texture = new THREE.TextureLoader().load(backdropUrl);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -104,18 +136,10 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
 
   function setAltitude(value) {
     altitude = value;
-    // The tile engine joins the scene only once the globe has initialised, so keep trying.
     tilesTuned ||= matchTileDetailToScreen(globe, chart.engine);
-    if (!engineHooked) {
-      const engine = findTileEngine(globe, chart.engine);
-      if (engine) {
-        engineHooked = true;
-        seeThroughNoData(engine, () => style.noDataBlack);
-        // Tiles loaded before the hook was in place.
-        if (style.noDataBlack) globe.globeTileEngineClearCache();
-      }
-    }
+    findBaseEngine();
     chart.update();
+    moving.update();
     const t = Math.min(1, Math.max(0, (altitude - 0.4) / (MAP_ALTITUDE + 0.6 - 0.4)));
     // Not full brightness even zoomed in, so white wind trails and labels keep their contrast.
     const brightness = (0.85 - 0.3 * t) * style.light;
@@ -130,13 +154,24 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     globe.globeTileEngineClearCache();
     globe.globeTileEngineMaxLevel(style.maxLevel).globeTileEngineUrl(style.url);
     chart.set(style.chart);
+    moving.setActive(Boolean(style.moving));
     setAltitude(altitude);
     onCredit?.(style.credit);
   }
 
   chart.set(style.chart);
+  moving.setActive(Boolean(style.moving));
   onCredit?.(style.credit);
-  return { setAltitude, setStyle, setFollowing: chart.setFollowing };
+  return {
+    setAltitude,
+    setStyle,
+    setFollowing(on) {
+      chart.setFollowing(on);
+      moving.setFollowing(on);
+    },
+    setTime: moving.setTime,
+    cloudsAsOf: moving.asOf,
+  };
 }
 
 // three-globe's tile engine, once the globe has initialised (else null).
@@ -217,9 +252,12 @@ function setupChartLayer(globe) {
     return engine;
   };
   globe.scene().add(engine);
-  let lastUpdate = 0;
-  let following = false;
-  let settle = null;
+  // Tiles are asked for once the view settles, not for every level passed on the way while
+  // zooming: far fewer requests to the chart's service.
+  const settled = whenSettled(() => {
+    withRetries(() => engine.updatePov(globe.camera()));
+    showLevel();
+  });
   // Counts the times the chart was cleared, so tiles still being retried for the old one stop.
   let version = 0;
   const withRetries = (fn) => {
@@ -240,22 +278,342 @@ function setupChartLayer(globe) {
         engine.updatePov(globe.camera());
       });
     },
-    // While the camera follows an aircraft it never settles: tiles are then asked for at most
-    // once a second, counted from the last time they were.
+    setFollowing: settled.setFollowing,
+    update() {
+      if (engine.visible) settled.update();
+    },
+  };
+}
+
+// Calls `run` once the view has settled, 250 ms after the last call to `update()`, or at the
+// latest `maxWait` ms after the first call since it last ran. While the camera follows an
+// aircraft it never settles: `run` is then called at most once a second, counted from the last
+// time it was.
+function whenSettled(run, { maxWait = Infinity } = {}) {
+  let last = 0;
+  let following = false;
+  let settle = null;
+  let since = null;
+  return {
     setFollowing(on) {
       following = on;
     },
-    // Tiles are asked for once the view settles, not for every level passed on the way while
-    // zooming: far fewer requests to the chart's service.
     update() {
-      if (!engine.visible || (following && settle)) return;
+      if (following && settle) return;
+      const now = performance.now();
+      since ??= now;
       clearTimeout(settle);
-      settle = setTimeout(() => {
-        settle = null;
-        lastUpdate = performance.now();
-        withRetries(() => engine.updatePov(globe.camera()));
-        showLevel();
-      }, following ? Math.max(250, lastUpdate + 1000 - performance.now()) : 250);
+      settle = setTimeout(
+        () => {
+          settle = null;
+          since = null;
+          last = performance.now();
+          run();
+        },
+        following ? Math.max(250, last + 1000 - now) : Math.min(250, Math.max(0, since + maxWait - now)),
+      );
+    },
+    cancel() {
+      clearTimeout(settle);
+      settle = null;
+      since = null;
+    },
+  };
+}
+
+const DEG = Math.PI / 180;
+// How often the times of the images are read again while the moving clouds are shown, and after
+// a failure to read them.
+const TIMES_REFRESH_MS = 600_000;
+const TIMES_RETRY_MS = 60_000;
+
+// The point at `lat`, `lng` on a sphere of `radius`, as three-globe places it.
+const pointAt = (lat, lng, radius) => new THREE.Vector3().setFromSphericalCoords(radius, (90 - lat) * DEG, lng * DEG);
+
+// A mesh for Web Mercator tile x, y at `level`, as three-slippy-map-globe makes them: a piece of
+// a sphere, its texture stretched to match the Mercator image. Its flat facets are 2° across at
+// most, so with the radius it is given they stay above the map's tiles, whose facets are up to 5°
+// across and sag further below the sphere.
+function mercatorTile(x, y, level, radius, material) {
+  const { west, east, south, north } = tileBounds(x, y, level);
+  const width = east - west;
+  const height = north - south;
+  const geometry = new THREE.SphereGeometry(
+    radius,
+    Math.max(2, Math.ceil(width / 2)),
+    Math.max(2, Math.ceil(height / 2)),
+    (90 + west) * DEG,
+    width * DEG,
+    (90 - north) * DEG,
+    height * DEG,
+  );
+  const mercator = (lat) => Math.log(Math.tan(Math.PI / 4 + (lat * DEG) / 2));
+  const uv = geometry.attributes.uv;
+  for (let i = 0; i < uv.count; i++) {
+    const lat = south + uv.getY(i) * height;
+    uv.setY(i, (mercator(lat) - mercator(south)) / (mercator(north) - mercator(south)));
+  }
+  return new THREE.Mesh(geometry, material);
+}
+
+// Leaves the images out beyond AREA_DEG from the point beneath the satellite, fading them in from
+// FADE_FROM_DEG. That point is along +z, where three-globe puts 0° N, 0° E.
+function fadeToArea(material) {
+  const cos = (deg) => Math.cos(deg * DEG).toFixed(6);
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = `varying vec3 vSatelliteDir;
+${shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vSatelliteDir = position;')}`;
+    shader.fragmentShader = `varying vec3 vSatelliteDir;
+${shader.fragmentShader.replace(
+  '#include <map_fragment>',
+  `#include <map_fragment>
+  diffuseColor.a *= smoothstep(${cos(AREA_DEG)}, ${cos(FADE_FROM_DEG)}, normalize(vSatelliteDir).z);`,
+)}`;
+  };
+  material.customProgramCacheKey = () => 'fade-to-satellite-area';
+}
+
+// The moving clouds of the Clouds view (see meteosat.js), in a layer of tiles of their own just
+// above the map, which goes on showing yesterday's clouds beneath them and elsewhere. They show
+// the image for the timeline's time, the newest one for times after it. A new image (or the
+// tiles for a new view) takes the place of the one on show only once all its tiles in view have
+// loaded, so the clouds never flash blank or half drawn; while the timeline plays, the next
+// images load ahead. `baseEngine()` is the map's own tile engine, whose tile level this follows.
+// Returns { setActive(on), update(), setFollowing(on), setTime(time, ahead), asOf() }.
+function setupMovingClouds(globe, baseEngine, onChange) {
+  // 0.0002 globe radii is about 1.3 km above the ground.
+  const radius = globe.getGlobeRadius() * 1.0002;
+  const group = new THREE.Group();
+  group.visible = false;
+  globe.scene().add(group);
+  const loader = new THREE.ImageLoader();
+  let active = false;
+  let times = null;
+  let timesTimer = null;
+  let loadingTimes = false;
+  // The timeline's time and, while it plays, the next times it will reach (ms).
+  let time = Date.now();
+  let ahead = [];
+  // The images asked for last time, and those the timeline has passed on its way to the wanted
+  // one while they loaded (see passedFrames).
+  let lastFrames = [];
+  let passed = [];
+  // The tiles wanted for the current view, or null when there is nothing to show.
+  let view = null;
+  // On show: the image's time, and a mesh per tile by "level/x/y", with the store's key for its
+  // image as `userData.key`.
+  let shownFrame = null;
+  const meshes = new Map();
+  const shownKeys = new Set();
+
+  const store = new TileStore({
+    load: (url) =>
+      new Promise((resolve, reject) => {
+        loader.load(
+          url,
+          (image) => {
+            const texture = new THREE.Texture(image);
+            texture.colorSpace = THREE.SRGBColorSpace;
+            texture.needsUpdate = true;
+            resolve(texture);
+          },
+          undefined,
+          reject,
+        );
+      }),
+    inUse: (key) => shownKeys.has(key),
+    dispose: (texture) => texture.dispose(),
+    onSettle: () => refresh(),
+  });
+
+  function removeMesh(tile) {
+    const mesh = meshes.get(tile);
+    group.remove(mesh);
+    shownKeys.delete(mesh.userData.key);
+    // The image stays in the store; only its copy on the graphics card goes.
+    mesh.material.map?.dispose();
+    mesh.material.dispose();
+    mesh.geometry.dispose();
+    meshes.delete(tile);
+  }
+
+  function clear() {
+    for (const tile of [...meshes.keys()]) removeMesh(tile);
+    group.visible = false;
+    if (shownFrame !== null) {
+      shownFrame = null;
+      onChange?.();
+    }
+  }
+
+  // Shows `frame` for the tiles in view once all of them have loaded, and says whether it did. A
+  // tile that failed is asked for again after a pause; one that failed twice is left empty rather
+  // than hold up the rest, and not filled with an image of another time. If none loaded, what is on
+  // show stays.
+  function swap(frame) {
+    const tiles = view.tiles.map(({ x, y }) => `${view.level}/${x}/${y}`);
+    if (!tiles.length) {
+      clear();
+      return true;
+    }
+    const entries = tiles.map((tile) => store.get(`${frame}/${tile}`));
+    if (!entries.every((e) => e?.state === 'done' || e?.failures >= 2)) return false;
+    if (!entries.some((e) => e.state === 'done') && meshes.size) return false;
+    const keep = new Set(tiles.filter((_, i) => entries[i].state === 'done'));
+    for (const tile of [...meshes.keys()]) if (!keep.has(tile)) removeMesh(tile);
+    tiles.forEach((tile, i) => {
+      const { state, value: texture } = entries[i];
+      const key = `${frame}/${tile}`;
+      if (state !== 'done') return;
+      let mesh = meshes.get(tile);
+      if (mesh?.userData.key === key) return;
+      if (mesh) {
+        shownKeys.delete(mesh.userData.key);
+        mesh.material.map.dispose();
+        mesh.material.map = texture;
+      } else {
+        // Drawn a little nearer than they are too: seen from afar, depth is not precise enough to
+        // tell them from the map's tiles beneath.
+        const material = new THREE.MeshLambertMaterial({
+          map: texture,
+          transparent: true,
+          depthWrite: false,
+          polygonOffset: true,
+          polygonOffsetFactor: -2,
+          polygonOffsetUnits: -8,
+        });
+        fadeToArea(material);
+        const [level, x, y] = tile.split('/').map(Number);
+        mesh = mercatorTile(x, y, level, radius, material);
+        // Beneath the weather layers, which are drawn from -3 up.
+        mesh.renderOrder = -4;
+        mesh.raycast = () => {};
+        meshes.set(tile, mesh);
+        group.add(mesh);
+      }
+      mesh.userData.key = key;
+      shownKeys.add(key);
+    });
+    group.visible = meshes.size > 0;
+    const next = meshes.size ? frame : null;
+    if (next !== shownFrame) {
+      shownFrame = next;
+      onChange?.();
+    }
+    return true;
+  }
+
+  function refresh() {
+    if (!active || !times || !view) {
+      store.want([]);
+      if (!active || !view) clear();
+      return;
+    }
+    const frames = framesFor(time, ahead, times);
+    passed = passedFrames([...passed, ...lastFrames], frames[0], shownFrame);
+    lastFrames = frames;
+    const { level, tiles } = view;
+    store.want([...frames, ...passed].flatMap((frame) => tiles.map(({ x, y }) => ({ key: `${frame}/${level}/${x}/${y}`, url: tileUrl(x, y, level, frame) }))));
+    for (const frame of [frames[0], ...passed]) if (swap(frame)) break;
+  }
+
+  // Works out the tiles in view, one level coarser than the map's own (the images are twice as
+  // many pixels across), or none when zoomed in closer than the images have detail for.
+  function measure() {
+    const level = baseEngine()?.level;
+    const camera = globe.camera();
+    if (level == null) {
+      // The globe has not initialised yet.
+      retry = setTimeout(() => settled.update(), 1000);
+      view = null;
+      return;
+    }
+    if (level > MAP_LEVEL_LIMIT || !camera?.position) {
+      view = null;
+      return;
+    }
+    // The camera always looks at the middle of the globe. Its position is up to date before its
+    // direction is (the controls turn it on their next update), so the view is worked out from a
+    // copy turned that way. A point is in view when it is on screen and on the side of the globe
+    // facing the camera.
+    const eye = camera.clone();
+    eye.lookAt(0, 0, 0);
+    eye.updateMatrixWorld();
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(
+      new THREE.Matrix4().multiplyMatrices(eye.projectionMatrix, eye.matrixWorldInverse),
+    );
+    const r2 = radius * radius;
+    const inView = (lat, lng) => {
+      const point = pointAt(lat, lng, radius);
+      return point.dot(eye.position) > r2 && frustum.containsPoint(point);
+    };
+    const tileLevel = Math.max(0, level - 1);
+    view = { level: tileLevel, tiles: tilesInView(tileLevel, inView) };
+  }
+
+  let retry = null;
+  // The globe turns by itself when zoomed out, so the view may never settle: then the tiles in
+  // view are worked out once a second.
+  const settled = whenSettled(
+    () => {
+      clearTimeout(retry);
+      measure();
+      refresh();
+    },
+    { maxWait: 1000 },
+  );
+
+  async function loadTimes() {
+    if (loadingTimes) return;
+    loadingTimes = true;
+    clearTimeout(timesTimer);
+    let next = TIMES_REFRESH_MS;
+    try {
+      const response = await fetch(CAPABILITIES_URL);
+      if (!response.ok) throw new Error(`EUMETSAT answered ${response.status}`);
+      const parsed = parseTimes(await response.text());
+      if (!parsed) throw new Error('No image times in the EUMETSAT capabilities');
+      times = parsed;
+      refresh();
+      onChange?.();
+    } catch (err) {
+      console.warn('Moving clouds: could not read the image times', err);
+      next = TIMES_RETRY_MS;
+    }
+    loadingTimes = false;
+    if (active) timesTimer = setTimeout(loadTimes, next);
+  }
+
+  return {
+    setActive(on) {
+      if (on === active) return;
+      active = on;
+      if (on) {
+        loadTimes();
+        settled.update();
+      } else {
+        clearTimeout(timesTimer);
+        clearTimeout(retry);
+        settled.cancel();
+        view = null;
+        store.clear();
+        clear();
+      }
+    },
+    update() {
+      if (active) settled.update();
+    },
+    setFollowing: settled.setFollowing,
+    // `next` and `nextAhead` in milliseconds.
+    setTime(next, nextAhead = []) {
+      if (next === time && nextAhead.join() === ahead.join()) return;
+      time = next;
+      ahead = nextAhead;
+      if (active) refresh();
+    },
+    // The time of the image on show when the timeline is past the newest image, else null.
+    asOf() {
+      return active && times && shownFrame === times.end && time > times.end ? shownFrame : null;
     },
   };
 }
