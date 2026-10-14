@@ -330,13 +330,13 @@ describe('runwayCall', () => {
   const wind = (direction, speed, gust) => ({ time: '2026-10-14T12:00', direction, speed, gust: gust ?? speed });
   const call = (airport, w, runway = airport.runways[0], carry) => runwayCall(runway, assessHour(runwayEnds(airport), w, LIMITS, carry));
 
-  it('colours a runway by its better end and marks the downwind end as neutral', () => {
+  it('colours a runway by its better end and marks a downwind end over the tailwind limit red', () => {
     // 15 kt from 270: a headwind on 27, a tailwind of 15 (over the limit of 10) on 09.
     const result = call(two, wind(270, 15));
     expect(result.status).toBe('ok');
     expect(result.best).toBe('27');
     expect(result.ends['27']).toEqual({ status: 'ok', hint: null });
-    expect(result.ends['09']).toEqual({ status: 'neutral', hint: 'tailwind' });
+    expect(result.ends['09']).toEqual({ status: 'nogo', hint: 'tailwind' });
   });
 
   it('shows red on both ends only when every end is over a limit', () => {
@@ -349,19 +349,43 @@ describe('runwayCall', () => {
     expect(call(two, wind(0, 28), two.runways[1]).status).toBe('caution');
   });
 
-  it('is marginal on the better end, neutral on the other', () => {
-    // A 21 kt crosswind is 84% of the limit.
+  it('is marginal on both ends of a runway with a marginal crosswind', () => {
+    // A 21 kt crosswind is 84% of the limit, on either end.
     const crossing = call(one, wind(0, 21));
     expect(crossing.status).toBe('caution');
-    expect([crossing.ends['09'].status, crossing.ends['27'].status].filter((s) => s === 'caution')).toHaveLength(1);
-    expect([crossing.ends['09'].status, crossing.ends['27'].status].filter((s) => s === 'neutral')).toHaveLength(1);
+    expect(crossing.ends['09']).toEqual({ status: 'caution', hint: null });
+    expect(crossing.ends['27']).toEqual({ status: 'caution', hint: null });
   });
 
   it('judges a gust like the strips do', () => {
     // A mean wind of 10 kt gusting 30 from 090 puts a 30 kt tailwind on 27: it is the 09 end.
     const result = call(one, wind(90, 10, 30));
     expect(result.best).toBe('09');
-    expect(result.ends['27']).toEqual({ status: 'neutral', hint: 'tailwind' });
+    expect(result.ends['27']).toEqual({ status: 'nogo', hint: 'tailwind' });
+  });
+
+  it('turns the downwind end red when its tailwind is over the limit through the gusts', () => {
+    // 8 kt gusting 14 from 090: the mean tailwind on 27 is 8 kt, the gust 14 (limit 10).
+    const result = call(one, wind(90, 8, 14));
+    expect(result.status).toBe('ok');
+    expect(result.best).toBe('09');
+    expect(result.ends['09']).toEqual({ status: 'ok', hint: null });
+    expect(result.ends['27']).toEqual({ status: 'nogo', hint: 'tailwind' });
+  });
+
+  it('turns the downwind end amber when its tailwind is marginal', () => {
+    // 9 kt from 090 is a 9 kt tailwind on 27, over 80% of the limit of 10.
+    const result = call(one, wind(90, 9));
+    expect(result.ends['09']).toEqual({ status: 'ok', hint: null });
+    expect(result.ends['27']).toEqual({ status: 'caution', hint: 'tailwind' });
+  });
+
+  it('leaves a small tailwind within limits neutral, and a tailwind-free end plain', () => {
+    // 5 kt from 090: a 5 kt tailwind on 27 is well within the limit.
+    expect(call(one, wind(90, 5)).ends['27']).toEqual({ status: 'neutral', hint: 'tailwind' });
+    // 10 kt from 360 on 09/27 is a pure crosswind: no tailwind, within limits.
+    const across = call(one, wind(0, 10));
+    expect(Object.values(across.ends).filter((e) => e.status === 'neutral')).toEqual([{ status: 'neutral', hint: null }]);
   });
 
   it('shows both ends with their status in calm, and gives no hint to a mere crosswind end', () => {
@@ -369,8 +393,7 @@ describe('runwayCall', () => {
     expect(calm.ends).toEqual({ '09': { status: 'ok', hint: null }, '27': { status: 'ok', hint: null } });
     // Wind straight across the runway: no tailwind on either end, still one end is the better one.
     const across = call(one, wind(0, 10));
-    const neutral = Object.values(across.ends).find((e) => e.status === 'neutral');
-    expect(neutral.hint).toBeNull();
+    expect(Object.values(across.ends).find((e) => e.status === 'neutral').hint).toBeNull();
   });
 
   it('keeps the end in use when the headwinds are within a knot, like the strips', () => {
