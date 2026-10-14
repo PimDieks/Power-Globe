@@ -261,7 +261,7 @@ describe('the part', () => {
     const html = opsPanelHtml([trafficPart], ctx);
     expect(html).toContain('data-part="traffic"');
     expect(summaryHtml([analysePart(trafficPart, ctx)])).toContain('Waiting for flight data');
-    expect(html).toContain('<h3 id="ops-traffic-title" tabindex="-1">Traffic</h3>');
+    expect(html).toContain('<h3 id="ops-traffic-title" tabindex="-1" data-focus-key="section-traffic">Traffic</h3>');
     expect(html).toContain('data-ops-traffic');
     expect(html).toContain('No inbound traffic seen.');
     // Without the page's feed it says it could not be shown.
@@ -396,6 +396,46 @@ describe('the part', () => {
     expect(section.innerHTML).toBe('');
     timers[0]();
     expect(section.innerHTML).toContain('No inbound traffic seen.');
+  });
+
+  it('marks the map only while the map profile turns the marks on', () => {
+    const src = source();
+    const profile = { trafficMarks: false };
+    const api = { getContext: context(src), rerender: vi.fn(), mapProfile: () => profile };
+    bind(page().root, api, quiet);
+    src.list = [inbound()];
+    src.emit({ area: { lat: 52.25, lng: 4.75, nm: 200 }, name: 'adsb.lol' });
+    expect(src.overlays).toHaveLength(0);
+    profile.trafficMarks = true;
+    src.emit({ area: { lat: 52.25, lng: 4.75, nm: 200 }, name: 'adsb.lol' });
+    expect(src.overlays.at(-1)).toMatchObject({ inbound: ['inb1'] });
+  });
+
+  it('goes grey in the summary line when the feed has gone quiet, and green again when it answers', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(T0);
+      const src = source();
+      watch({ getContext: context(src), rerender: vi.fn(), refreshSummary: vi.fn() });
+      src.list = [inbound('inb1', T0)];
+      src.emit({ area: { lat: 52.25, lng: 4.75, nm: 200 }, name: 'adsb.lol' });
+      const line = (at) => summaryHtml([analysePart(trafficPart, { ...context(src)(), now: at })], at);
+      expect(line(T0 + MIN)).toContain('status-ok');
+      expect(line(T0 + MIN)).not.toContain('min old');
+      // Nobody answered for three minutes: no longer the present, whatever the last report said.
+      const quiet3 = line(T0 + 3 * MIN);
+      expect(quiet3).toContain('status-unknown');
+      expect(quiet3).toContain('min old');
+      expect(quiet3).toContain('(old data)');
+      expect(quiet3).not.toContain('status-ok');
+      // It answers again.
+      vi.setSystemTime(T0 + 4 * MIN);
+      src.list = [inbound('inb1', T0 + 4 * MIN)];
+      src.emit({ area: { lat: 52.25, lng: 4.75, nm: 200 }, name: 'adsb.lol' });
+      expect(line(T0 + 4 * MIN + 10_000)).toContain('status-ok');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   describe('in summary mode (the panel is open on another tab)', () => {

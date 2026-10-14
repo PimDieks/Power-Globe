@@ -14,9 +14,12 @@
 //
 // The summary line shows every part's fact on every tab, so facts must stay fresh with their tab
 // closed. A part that only works out its fact from `ctx` needs nothing more. A part with a source of
-// its own (polling, a watch feed) keeps it running at its normal rate while the panel is open, in a
-// light "summary mode": `watch(api)` starts it, without map overlays or the section, and `unwatch()`
-// ends it. `bind(root, api)` and `unbind(root)` (all optional) are called when the part's own tab is
+// its own (polling, a watch feed) keeps it running at its normal rate in a light "summary mode":
+// `watch(api)` starts it, without map overlays or the section, and `unwatch()` ends it. It is armed on
+// first use: the mode starts only once the part's own tab has been shown in this panel session (and
+// stays on for the next airport), so that someone who only reads the Details tab costs nothing but the
+// METAR and TAF; until then the summary says "Not watched yet, open Weather" for it. It is also ended
+// while the airport panel is not on screen (`hold()`), and again when the panel closes. `bind(root, api)` and `unbind(root)` (all optional) are called when the part's own tab is
 // shown and when it goes: `root` is the element the tab's HTML is put in, which stays the same across
 // renders, so a part listens to it for what happens in its section (events are delegated), and
 // starts and stops what belongs to the open tab, such as the map overlay. A part's source runs while
@@ -26,7 +29,8 @@
 // being typed in.
 //
 // `overlay` names what the part draws on the map while its tab is bound ('lightning', 'trafficMarks' or
-// 'roads', see mapprofile.js, which says for each tab what the map around the airport shows).
+// 'roads'); it draws it only if `api.mapProfile()` turns it on (see mapprofile.js, which says for each
+// tab what the map around the airport shows).
 //
 // `api` is { getContext(), rerender(), setTime(time, { quiet }), refreshSummary(), mapProfile() }: the
 // context now, drawing the tab again, setting the timeline, drawing the summary line again (a part
@@ -170,6 +174,13 @@ export function summaryFact(part, fact, now) {
   return { ...fact, status: 'unknown', text: `${fact.text}, ${minutes} min old`, stale: true };
 }
 
+// What the summary says of a part with a summary mode that nothing has asked to watch yet.
+export const unwatchedFact = (part) => ({
+  text: `Not watched yet, open ${TOPIC_TABS.find((tab) => tab.id === part.tab).label}`,
+  status: 'unknown',
+  notWatched: true,
+});
+
 // The summary line: one button per part that has a fact, in registry order.
 export function summaryHtml(entries, now = Date.now()) {
   const items = entries
@@ -190,7 +201,7 @@ export function sectionsHtml(entries, ctx) {
     .map(({ part, data, failed }) => {
       const html = failed ? FAILED_HTML : attempt(part, 'html', () => part.html(data, ctx));
       const id = `ops-${escapeHtml(part.id)}-title`;
-      return `<section class="ops-section" data-part="${escapeHtml(part.id)}" aria-labelledby="${id}"><h3 id="${id}" tabindex="-1">${escapeHtml(part.title)}</h3>${html === FAILED ? FAILED_HTML : html}</section>`;
+      return `<section class="ops-section" data-part="${escapeHtml(part.id)}" aria-labelledby="${id}"><h3 id="${id}" tabindex="-1" data-focus-key="section-${escapeHtml(part.id)}">${escapeHtml(part.title)}</h3>${html === FAILED ? FAILED_HTML : html}</section>`;
     })
     .join('');
 }
@@ -219,6 +230,11 @@ export function createOpsHost({ root, summaryRoot, getContext, requestRender, se
   let timer = null;
   // What each part is doing, by id: 'bind' for its tab being shown, 'watch' for summary mode.
   const modes = new Map();
+  // The parts whose own tab has been shown in this panel session: only they are watched in summary
+  // mode. It is kept for the next airport and cleared when the panel closes.
+  const armed = new Set();
+  // The airport panel is not on screen (an aircraft picked from it is): no summary mode meanwhile.
+  let held = false;
   // A field marked data-editing that has been typed in and not yet left: the tab is not drawn
   // again meanwhile (which would take what was typed away), but once, when it is left.
   let editing = false;
@@ -232,13 +248,17 @@ export function createOpsHost({ root, summaryRoot, getContext, requestRender, se
     if (key) el.querySelector(`[data-focus-key="${CSS.escape(key)}"]`)?.focus();
   };
 
+  // What each part makes of `ctx`; a part with a summary mode that is not armed yet is not asked.
+  const analyseAll = (ctx) =>
+    known.map((part) => (part.watch && part.tab !== tab && !armed.has(part.id) ? { part, fact: unwatchedFact(part), idle: true } : analysePart(part, ctx)));
+
   const drawSummary = (ctx) => {
     const now = Number.isFinite(ctx.now) ? ctx.now : Date.now();
-    draw(summaryRoot, summaryHtml(known.map((part) => analysePart(part, ctx)), now));
+    draw(summaryRoot, summaryHtml(analyseAll(ctx), now));
   };
 
   const refreshSummary = () => {
-    if (!mounted || !drawn) return;
+    if (!mounted || !drawn || held) return;
     let ctx;
     try {
       ctx = getContext();
@@ -275,11 +295,13 @@ export function createOpsHost({ root, summaryRoot, getContext, requestRender, se
     section.querySelector('h3')?.focus({ preventScroll: true });
   };
 
-  // Gives every part the mode its tab calls for: its own tab being shown binds it, any other tab
-  // keeps a part with a summary mode watching. The new mode starts before the old one ends.
+  // Gives every part the mode its tab calls for: its own tab being shown binds it (and arms it), any
+  // other tab keeps an armed part with a summary mode watching. The new mode starts before the old
+  // one ends.
   function applyModes() {
+    for (const part of known) if (part.tab === tab) armed.add(part.id);
     for (const part of known) {
-      const want = part.tab === tab ? 'bind' : part.watch ? 'watch' : null;
+      const want = part.tab === tab ? 'bind' : part.watch && armed.has(part.id) && !held ? 'watch' : null;
       const have = modes.get(part.id) ?? null;
       if (want === have) continue;
       if (want === 'bind') attempt(part, 'bind', () => part.bind?.(root, api));
@@ -313,6 +335,7 @@ export function createOpsHost({ root, summaryRoot, getContext, requestRender, se
       }
       const changed = tab !== id;
       tab = id;
+      held = false;
       applyModes();
       // The airport map follows the tab (see mapprofile.js).
       if (changed) onProfile(mapProfileFor(id));
@@ -324,6 +347,8 @@ export function createOpsHost({ root, summaryRoot, getContext, requestRender, se
       editing = false;
       skipped = false;
       drawn = false;
+      held = false;
+      armed.clear();
       tab = null;
       clearTimer(timer);
       timer = null;
@@ -334,6 +359,13 @@ export function createOpsHost({ root, summaryRoot, getContext, requestRender, se
       endModes();
       onProfile(null);
       if (summaryRoot) summaryRoot.innerHTML = '';
+    },
+    // The airport panel is off screen while an aircraft picked from it is shown: the summary modes end
+    // (the part of the tab the aircraft came from goes on), and `show` brings them back.
+    hold() {
+      if (!mounted || held) return;
+      held = true;
+      applyModes();
     },
     // Another airport is being opened: the old one is let go of at once and its summary goes, without
     // waiting for the new one to be drawn.
@@ -347,7 +379,7 @@ export function createOpsHost({ root, summaryRoot, getContext, requestRender, se
     // element (marked data-focus-key) across it.
     render(ctx) {
       drawn = true;
-      const entries = known.map((part) => analysePart(part, ctx));
+      const entries = analyseAll(ctx);
       draw(summaryRoot, summaryHtml(entries, Number.isFinite(ctx.now) ? ctx.now : Date.now()));
       if (!isTopicTab(tab)) return;
       if (editing && root.contains(document.activeElement)) {

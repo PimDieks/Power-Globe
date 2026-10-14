@@ -2,6 +2,7 @@
 // the hours and a colour strip per runway, as HTML, and the handling of the hours (hover, keys,
 // dragging across them, the clock). It is a part for ops.js.
 import { componentsText, escapeHtml, limitsText } from './airportview.js';
+import { FORECAST_STALE_MS } from './opsfact.js';
 import { STATUS, formatWind } from './runways.js';
 import { favouredRuns, noOutlookText, outlookLines, outlookStale, runwayFact, runwayOutlook } from './opsrunway.js';
 
@@ -241,8 +242,10 @@ export const runwayPart = {
   // What the part reads from the context.
   needs: ['airport', 'hourly', 'limits', 'limitsLabel', 'time', 'now', 'formatClock', 'formatClockShort', 'formatTick', 'zone'],
   analyse: (ctx) => runwayOutlook({ airport: ctx.airport, hourly: ctx.hourly, now: ctx.now, limits: ctx.limits }),
+  // Worked out from the forecast, which is fetched once when the airport is opened.
+  staleAfterMs: FORECAST_STALE_MS,
   fact: (outlook, ctx) =>
-    outlook.reason ? { text: outlook.reason === 'noRunways' ? 'No runway data' : 'No forecast', status: 'unknown' } : runwayFact(outlook, ctx.formatClock),
+    outlook.reason ? { text: outlook.reason === 'noRunways' ? 'No runway data' : 'No forecast', status: 'unknown' } : { ...runwayFact(outlook, ctx.formatClock), asOf: ctx.hourlyAsOf },
   html: runwaySectionHtml,
   bind,
   unbind,

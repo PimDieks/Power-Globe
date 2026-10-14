@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FRAME_MS, LightningMonitor, RAMP, analyseImage, decodeBlob, makeGeometry, summarise, unavailable } from '../src/lightning.js';
 import { OPS_PARTS, analysePart, createOpsHost, opsPanelHtml, summaryHtml } from '../src/ops.js';
 import { LEVEL_STATUS, RISK_STATUS, analyseLightning, lightningFact, motionLine, riskFields, trendText } from '../src/opslightning.js';
-import { bind, compassSvg, lightningInnerHtml, lightningPart, lightningSectionHtml, releaseLightning, setLightningOverlay, unbind, unwatch, watch } from '../src/opslightningview.js';
+import { bind, compassSvg, lightningInnerHtml, lightningPart, lightningSectionHtml, START_DELAY_MS, releaseLightning, setLightningOverlay, unbind, unwatch, watch } from '../src/opslightningview.js';
 
 const MIN = 60_000;
 const at = (iso) => Date.parse(iso);
@@ -543,7 +543,7 @@ describe('summary mode (the panel is open on another tab)', () => {
     const overlay = fakeOverlay();
     const state = { context: { airport: EHAM, hourly: null, now: NOW, zone: 'CEST' } };
     const api = { getContext: () => state.context, rerender: vi.fn(), setTime: vi.fn(), refreshSummary: vi.fn() };
-    const deps = { createMonitor: monitors.createMonitor, overlay };
+    const deps = { createMonitor: monitors.createMonitor, overlay, delayMs: 0 };
     return { ...monitors, overlay, api, deps, state };
   }
   const draw = (airport = EHAM) => lightningPart.analyse({ airport, hourly: null, now: NOW, zone: 'CEST' });
@@ -601,6 +601,88 @@ describe('summary mode (the panel is open on another tab)', () => {
 
   it('does nothing when it is ended with nothing watched', () => {
     expect(() => unwatch()).not.toThrow();
+  });
+
+  it('waits a moment after an airport is opened before it asks for anything, and not at all if another is opened meanwhile', () => {
+    vi.useFakeTimers();
+    try {
+      const s = setup();
+      const deps = { ...s.deps, delayMs: START_DELAY_MS, setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: (t) => clearTimeout(t) };
+      watch(s.api, deps);
+      draw();
+      expect(s.made[0].started).toEqual([]);
+      vi.advanceTimersByTime(START_DELAY_MS - 1);
+      expect(s.made[0].started).toEqual([]);
+      // Another airport is opened before the wait is over: only that one is asked for.
+      draw({ ident: 'EGLL', lat: 51.47, lng: -0.45 });
+      vi.advanceTimersByTime(START_DELAY_MS);
+      expect(s.made[0].started).toEqual([{ lat: 51.47, lon: -0.45 }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts at once when the tab is shown while it waits, and with the tab shown from the start', () => {
+    vi.useFakeTimers();
+    try {
+      const s = setup();
+      const deps = { ...s.deps, delayMs: START_DELAY_MS, setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: (t) => clearTimeout(t) };
+      watch(s.api, deps);
+      draw();
+      bind(fakeRoot(), s.api, deps);
+      expect(s.made[0].started).toHaveLength(1);
+      vi.advanceTimersByTime(START_DELAY_MS * 2);
+      expect(s.made[0].started).toHaveLength(1);
+      unbind();
+      unwatch();
+      // Bound from the start: no wait.
+      const t = setup();
+      bind(fakeRoot(), t.api, { ...t.deps, delayMs: START_DELAY_MS });
+      draw();
+      expect(t.made[0].started).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('asks for nothing while the page is hidden, and goes on when it is shown again', () => {
+    const listeners = new Map();
+    const doc = { hidden: false, addEventListener: (t, f) => listeners.set(t, f), removeEventListener: (t) => listeners.delete(t) };
+    vi.stubGlobal('document', doc);
+    try {
+      const s = setup();
+      watch(s.api, s.deps);
+      draw();
+      expect(s.made[0].started).toHaveLength(1);
+      doc.hidden = true;
+      listeners.get('visibilitychange')();
+      expect(s.made[0].stopped).toBe(1);
+      // Drawing another airport while hidden does not start anything either.
+      draw({ ident: 'EGLL', lat: 51.47, lng: -0.45 });
+      expect(s.made[0].started).toHaveLength(1);
+      doc.hidden = false;
+      listeners.get('visibilitychange')();
+      expect(s.made[0].started.map((a) => a.lat)).toEqual([EHAM.lat, 51.47]);
+      // Ending the watch takes the listener away.
+      unwatch();
+      expect(listeners.size).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('draws the rings and image only while the map profile turns them on', () => {
+    const s = setup();
+    const profile = { lightning: false };
+    const api = { ...s.api, mapProfile: () => profile };
+    bind(fakeRoot(), api, s.deps);
+    draw();
+    expect(s.overlay.calls).toEqual([]);
+    s.made[0].options.onUpdate(none());
+    expect(s.overlay.calls).toEqual([]);
+    profile.lightning = true;
+    s.made[0].options.onUpdate(none());
+    expect(s.overlay.calls.map((c) => c[0])).toEqual(['show']);
   });
 });
 

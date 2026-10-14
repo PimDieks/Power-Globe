@@ -810,10 +810,11 @@ input:disabled {
 
 /* The summary line above the tabs: the key facts of every part, each a button that shows its part. */
 .details-summary {
+  /* One row of facts is kept free while the airport loads, so that the tabs do not jump. */
+  min-height: 28px;
   margin: 0 0 8px;
 }
 
-.details-summary:empty,
 .details-summary[hidden] {
   display: none;
 }
@@ -855,6 +856,49 @@ input:disabled {
 @media (pointer: coarse) {
   .ops-fact-button {
     min-height: 30px;
+  }
+}
+
+/* Phones: the summary is one row that scrolls sideways, so that it leaves the panel its room, and
+   the four tabs are kept narrow enough to be seen whole at 320 px. */
+@media (max-width: 640px) {
+  .details-summary {
+    min-height: 30px;
+  }
+
+  .ops-facts {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+
+  .ops-facts li {
+    flex: none;
+  }
+
+  .ops-fact-button {
+    white-space: nowrap;
+  }
+
+  .detail-tab {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-inline: 2px;
+    font-size: 0.84rem;
+  }
+}
+
+/* A short phone has little room above the timeline: while an airport panel is open the search card
+   steps aside (the close button brings it back), so that the panel keeps room for its tab. */
+@media (max-width: 640px) and (max-height: 700px) {
+  body:has(#details.with-tabs:not(.hidden)) #controls {
+    display: none;
+  }
+
+  #details.with-tabs {
+    max-height: calc(100vh - var(--timeline-top) - 2 * var(--gap));
+    max-height: calc(100dvh - var(--timeline-top) - 2 * var(--gap));
   }
 }
 

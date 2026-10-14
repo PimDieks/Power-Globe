@@ -8,6 +8,9 @@ const satellite = { kind: 'satellite', index: 3 };
 describe('the way back from an aircraft picked on the Traffic tab', () => {
   it('remembers the airport when an aircraft is picked while its Traffic tab is open, and not otherwise', () => {
     expect(opsReturnFor({ detail: airport, detailTab: 'traffic', opsReturn: null }, aircraft)).toBe(airport);
+    // Any topic tab has the way back, not only Traffic.
+    expect(opsReturnFor({ detail: airport, detailTab: 'weather', opsReturn: null }, aircraft)).toBe(airport);
+    expect(opsReturnFor({ detail: airport, detailTab: 'access', opsReturn: null }, aircraft)).toBe(airport);
     // The other tabs, a spot, nothing open, or a satellite: nothing to go back to.
     expect(opsReturnFor({ detail: airport, detailTab: 'details', opsReturn: null }, aircraft)).toBeNull();
     expect(opsReturnFor({ detail: { lat: 1, lng: 2 }, detailTab: 'traffic', opsReturn: null }, aircraft)).toBeNull();

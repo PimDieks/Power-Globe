@@ -73,6 +73,7 @@ describe('switching tabs shows and hides the right overlays', () => {
         return m;
       },
       overlay: { show: () => lightningMap.push('show'), hide: () => lightningMap.push('hide') },
+      delayMs: 0,
     };
     const lightning = { ...lightningPart, bind: (r, api) => lightningPart.bind(r, api, deps), watch: (api) => lightningPart.watch(api, deps) };
     // The page's flight feed and its marks.
@@ -109,20 +110,23 @@ describe('switching tabs shows and hides the right overlays', () => {
     const s = setup();
     s.host.show('details');
     s.host.render(s.ctx());
-    s.feed();
-    // Details: both parts look at their data for the summary line, and nothing is drawn.
-    expect(s.monitors[0].started).toBe(1);
+    // Details: nothing has been asked to watch yet, and nothing is drawn.
+    expect(s.monitors).toHaveLength(0);
+    expect(s.source.watchArea).not.toHaveBeenCalled();
     expect(s.lightningMap).toEqual([]);
-    expect(marked(s.marks)).toBe(false);
     expect(s.profiles.at(-1)).toBe(MAP_PROFILES.details);
 
     s.host.show('weather');
-    expect(s.lightningMap).toEqual(['show']);
+    s.host.render(s.ctx());
     s.feed();
+    expect(s.monitors[0].started).toBe(1);
+    expect(s.lightningMap).toEqual(['show']);
     expect(marked(s.marks)).toBe(false);
     expect(s.profiles.at(-1)).toBe(MAP_PROFILES.weather);
 
     s.host.show('traffic');
+    s.host.render(s.ctx());
+    s.feed();
     expect(s.lightningMap).toEqual(['show', 'hide']);
     expect(marked(s.marks)).toBe(true);
     expect(s.marks.at(-1).inbound).toEqual(['inb1']);

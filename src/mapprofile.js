@@ -13,8 +13,9 @@
 //   roads         road colours and jams (for the Access part, which draws them while its tab is open)
 //
 // A part that draws on the map declares `overlay` (its own key among the last three) and draws it
-// while its tab is bound, which is where the profile turns it on; a test keeps the two in step. The
-// aircraft sprites themselves are the user's flight layer and are left alone on every tab.
+// only while its tab is bound and `api.mapProfile()` has that key on, so the table is the one place
+// that says what is drawn (a test also keeps it in step with the parts' tabs). The aircraft sprites
+// themselves are the user's flight layer and are left alone on every tab.
 export const MAP_PROFILES = {
   details: { runwayStatus: true, windLabels: true, runwayUse: false, lightning: false, trafficMarks: false, roads: false },
   weather: { runwayStatus: true, windLabels: true, runwayUse: false, lightning: true, trafficMarks: false, roads: false },

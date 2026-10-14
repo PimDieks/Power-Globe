@@ -127,7 +127,7 @@ describe('the Ops parts registry', () => {
   it('gives each part a section with a heading to focus, in order', () => {
     const html = opsPanelHtml([part('a'), part('b')], {});
     expect(html.indexOf('section a')).toBeLessThan(html.indexOf('section b'));
-    expect(html).toContain('<h3 id="ops-a-title" tabindex="-1">Part a</h3>');
+    expect(html).toContain('<h3 id="ops-a-title" tabindex="-1" data-focus-key="section-a">Part a</h3>');
     expect(html).toContain('aria-labelledby="ops-b-title"');
     expect(html).not.toContain('ops-facts');
   });
@@ -298,34 +298,92 @@ describe('the parts of the panel at work, bound and watched with the tab', () =>
     return { host, root, summaryRoot, timers, cleared, ctx };
   }
 
-  it('runs a part with a summary mode while the panel is open on any tab, and binds it only on its own', () => {
+  it('watches nothing until a part\'s own tab has been shown: a Details-only reader costs nothing', () => {
     const weather = fakePart('w', 'weather');
     const traffic = fakePart('t', 'traffic');
     const { host } = setup([weather, traffic]);
     host.show('details');
-    expect(weather.state.running && traffic.state.running).toBe(true);
-    expect([weather.state.bound, traffic.state.bound]).toEqual([false, false]);
+    host.show('access');
+    for (const f of [weather, traffic]) {
+      expect(f.log).toEqual([]);
+      expect(f.state.running).toBeFalsy();
+    }
+  });
+
+  it('arms a part when its tab is bound, and then watches it on every other tab', () => {
+    const weather = fakePart('w', 'weather');
+    const traffic = fakePart('t', 'traffic');
+    const { host } = setup([weather, traffic]);
+    host.show('details');
     host.show('weather');
     expect([weather.state.bound, traffic.state.bound]).toEqual([true, false]);
-    expect([weather.state.watching, traffic.state.watching]).toEqual([false, true]);
+    expect([weather.state.watching, traffic.state.watching]).toEqual([false, false]);
     host.show('traffic');
     expect([weather.state.bound, traffic.state.bound]).toEqual([false, true]);
     expect([weather.state.watching, traffic.state.watching]).toEqual([true, false]);
     host.show('access');
     expect([weather.state.bound, traffic.state.bound]).toEqual([false, false]);
     expect([weather.state.watching, traffic.state.watching]).toEqual([true, true]);
+    host.show('details');
+    expect(weather.state.running && traffic.state.running).toBe(true);
+  });
+
+  it('arms at once for the tab the panel opens on (a remembered tab)', () => {
+    const traffic = fakePart('t', 'traffic');
+    const weather = fakePart('w', 'weather');
+    const { host } = setup([weather, traffic]);
+    host.show('traffic');
+    expect([traffic.state.bound, weather.state.running]).toEqual([true, undefined]);
+    host.show('details');
+    expect(traffic.state.watching).toBe(true);
+    expect(weather.state.running).toBeFalsy();
+  });
+
+  it('keeps the arming for the next airport, and clears it when the panel closes', () => {
+    const weather = fakePart('w', 'weather');
+    const { host } = setup([weather]);
+    host.show('weather');
+    host.show('details');
+    host.release();
+    host.show('details');
+    expect(weather.state.watching).toBe(true);
+    host.stop();
+    expect(weather.state.running).toBe(false);
+    host.show('details');
+    expect(weather.state.watching).toBe(false);
+    expect(weather.state.started).toBe(1);
+  });
+
+  it('says "Not watched yet, open Weather" for a part that is not armed, and does not ask it', () => {
+    const weather = fakePart('w', 'weather');
+    const traffic = fakePart('t', 'traffic');
+    const analyse = vi.fn(() => ({}));
+    traffic.part.analyse = analyse;
+    const { host, summaryRoot, ctx } = setup([weather, traffic]);
+    host.show('details');
+    host.render(ctx);
+    expect(summaryRoot.innerHTML).toContain('Not watched yet, open Weather');
+    expect(summaryRoot.innerHTML).toContain('Not watched yet, open Traffic');
+    expect(summaryRoot.innerHTML).toContain('(not watched yet). Shows w in the Weather tab.');
+    expect(summaryRoot.innerHTML).toContain('status-unknown');
+    expect(analyse).not.toHaveBeenCalled();
+    // Once its tab has been shown it has its own fact.
+    host.show('traffic');
+    host.show('details');
+    host.render(ctx);
+    expect(summaryRoot.innerHTML).toContain('fact t');
+    expect(summaryRoot.innerHTML).toContain('Not watched yet, open Weather');
   });
 
   it('does not stop and start a part\'s source when the tab changes: the new mode starts before the old one ends', () => {
     const weather = fakePart('w', 'weather');
     const { host } = setup([weather]);
-    host.show('details');
     host.show('weather');
     host.show('traffic');
     host.show('weather');
     expect(weather.state.started).toBe(1);
     expect(weather.state.stopped).toBe(0);
-    expect(weather.log).toEqual(['watch', 'bind', 'unwatch', 'watch', 'unbind', 'bind', 'unwatch']);
+    expect(weather.log).toEqual(['bind', 'watch', 'unbind', 'bind', 'unwatch']);
   });
 
   it('calls bind and watch once, however often the panel asks for the same tab', () => {
@@ -353,6 +411,7 @@ describe('the parts of the panel at work, bound and watched with the tab', () =>
     const traffic = fakePart('t', 'traffic');
     const { host, summaryRoot, cleared } = setup([weather, traffic]);
     host.show('weather');
+    host.show('traffic');
     host.stop();
     for (const f of [weather, traffic]) {
       expect(f.state.running).toBe(false);
@@ -364,10 +423,34 @@ describe('the parts of the panel at work, bound and watched with the tab', () =>
     host.stop();
     expect(weather.state.stopped).toBe(1);
     expect(cleared).toHaveLength(1);
-    // Opened again, it starts afresh.
+    // Opened again, it starts afresh: nothing is armed.
     host.show('traffic');
-    expect(weather.state.started).toBe(2);
+    expect(weather.state.started).toBe(1);
     expect(traffic.state.bound).toBe(true);
+  });
+
+  it('ends the summary modes while the panel is held, keeps the bound tab, and brings them back on the way back', () => {
+    const weather = fakePart('w', 'weather');
+    const traffic = fakePart('t', 'traffic');
+    const { host, summaryRoot, ctx } = setup([weather, traffic]);
+    host.show('weather');
+    host.show('traffic');
+    host.render(ctx);
+    expect([weather.state.watching, traffic.state.bound]).toEqual([true, true]);
+    host.hold();
+    // What the aircraft was picked from goes on; the summary line's watching is over.
+    expect([weather.state.watching, weather.state.running, traffic.state.bound]).toEqual([false, false, true]);
+    host.hold();
+    expect(weather.log.filter((l) => l === 'unwatch')).toHaveLength(1);
+    host.refreshSummary();
+    // Back on the airport panel (any tab): the watch is on again.
+    host.show('traffic');
+    expect([weather.state.watching, weather.state.running]).toEqual([true, true]);
+    expect(weather.state.started).toBe(2);
+    // Held with nothing shown does nothing.
+    host.stop();
+    host.hold();
+    expect(weather.state.running).toBe(false);
   });
 
   it('lets every part go of the open airport at once on release, and clears the summary line', () => {
@@ -375,6 +458,7 @@ describe('the parts of the panel at work, bound and watched with the tab', () =>
     const traffic = fakePart('t', 'traffic');
     const { host, summaryRoot } = setup([weather, traffic]);
     host.show('weather');
+    host.show('traffic');
     host.render({ now: 1 });
     expect(summaryRoot.innerHTML).toContain('fact w');
     host.release();
@@ -409,16 +493,20 @@ describe('the parts of the panel at work, bound and watched with the tab', () =>
     const weather = fakePart('w', 'weather');
     const traffic = fakePart('t', 'traffic');
     const { host, root, summaryRoot } = setup([weather, traffic]);
+    host.show('weather');
     host.show('details');
     host.render({ now: 1 });
     expect(summaryRoot.innerHTML).toContain('fact w');
-    expect(summaryRoot.innerHTML).toContain('fact t');
+    expect(summaryRoot.innerHTML).toContain('Not watched yet, open Traffic');
     expect(root.innerHTML).toBe('');
     host.show('traffic');
     host.render({ now: 1 });
     expect(root.innerHTML).toContain('<p>t</p>');
     expect(root.innerHTML).not.toContain('<p>w</p>');
     expect(summaryRoot.innerHTML).toContain('fact w');
+    expect(summaryRoot.innerHTML).toContain('fact t');
+    // Each section's heading can be given back focus after a redraw.
+    expect(root.innerHTML).toContain('data-focus-key="section-t"');
   });
 
   it('says the Access tab is coming while no part is in it', () => {
@@ -522,6 +610,18 @@ describe('the runway part in the Ops tab', () => {
   it('shows the timeline hour in the readout, or the first hour when the timeline is elsewhere', () => {
     expect(opsPanelHtml(OPS_PARTS, ctx())).toMatch(/<p class="ops-readout" data-default="14:00 · /);
     expect(opsPanelHtml(OPS_PARTS, ctx({ time: '2026-12-01T00:00' }))).toMatch(/<p class="ops-readout" data-default="12:00 · /);
+  });
+
+  it('goes grey when the forecast it was worked out from is old, and not before', () => {
+    const line = (hourlyAsOf) => summaryHtml([analysePart(OPS_PARTS[0], ctx({ hourlyAsOf }))], now);
+    expect(line(now - 2 * 3_600_000)).toContain('status-ok');
+    expect(line(now - 2 * 3_600_000)).not.toContain('old');
+    const old = line(now - 4 * 3_600_000);
+    expect(old).toContain('status-unknown');
+    expect(old).toContain('RWY 27 → 24 at 15:00 UTC, 240 min old');
+    expect(old).toContain('(old data)');
+    // A forecast with no fetch time is taken as it comes.
+    expect(line(undefined)).toContain('status-ok');
   });
 
   it('says why there is no chart', () => {

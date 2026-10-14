@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { airportWeather, toAirport } from '../src/airports.js';
 import { WEATHER_RETRY_MS, labelCandidates, setupAirportMap } from '../src/airportmap.js';
+import { MAP_PROFILES } from '../src/mapprofile.js';
 
 vi.mock('../src/airports.js', async (importOriginal) => ({
   ...(await importOriginal()),
@@ -8,7 +9,8 @@ vi.mock('../src/airports.js', async (importOriginal) => ({
   airportWeather: vi.fn(),
 }));
 // Runways are drawn with three.js, which needs a globe.
-vi.mock('../src/runwaymap.js', async (importOriginal) => ({ ...(await importOriginal()), setupRunways: () => ({ draw() {} }) }));
+const drawStrips = vi.hoisted(() => vi.fn());
+vi.mock('../src/runwaymap.js', async (importOriginal) => ({ ...(await importOriginal()), setupRunways: () => ({ draw: drawStrips }) }));
 
 describe('weather for the airports in view', () => {
   const field = (ident, lat, lng) => toAirport([ident, '', `Field ${ident}`, 'Nowhere', 'GB', lat, lng, 10, 0, 1, [['09', 90, '27', 270, 6000, 'ASP']]]);
@@ -262,5 +264,93 @@ describe('the label of the selected airport', () => {
     map.refresh();
     expect(setRunwayLabels.mock.calls.at(-1)[0]).toHaveLength(1);
     expect(setRunwayLabels.mock.calls.at(-1)[0][0]).toMatchObject({ selected: true, flag: true, status: 'nogo' });
+  });
+});
+
+describe('what the map shows around the open airport for the tab shown (its map profile)', () => {
+  const FIELD = toAirport(['XPRO', 'PRO', 'Profile Field', 'Nowhere', 'GB', 51, 0, 10, 1, 1, [['09', 90, '27', 270, 6000, 'ASP']]]);
+  // Close enough to see runway ends and wind labels.
+  const CLOSE = { lat: 51, lng: 0, altitude: 0.005 };
+  const NOW = '2026-10-13T12:00';
+  const hourly = { time: [NOW, '2026-10-13T13:00'], wind_direction_10m: [270, 270], wind_speed_10m: [8, 8], wind_gusts_10m: [8, 8] };
+
+  async function open() {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { innerWidth: 1000, innerHeight: 800 });
+    const { loadAirports } = await import('../src/airports.js');
+    loadAirports.mockResolvedValue([FIELD]);
+    airportWeather.mockImplementation(async (list, { onData }) => onData(new Map([['XPRO', hourly]])));
+    drawStrips.mockClear();
+    const setRunwayLabels = vi.fn();
+    const map = setupAirportMap({ globe: {}, mapFeatures: { setRunwayLabels }, getTime: () => NOW, getLimits: () => ({ crosswind: 25, tailwind: 10 }) });
+    map.view(CLOSE);
+    await vi.advanceTimersByTimeAsync(400);
+    map.select(FIELD);
+    return {
+      map,
+      strips: () => drawStrips.mock.calls.at(-1)[0],
+      labels: () => setRunwayLabels.mock.calls.at(-1)[0],
+      runwayTexts: () => setRunwayLabels.mock.calls.at(-1)[0].filter((l) => l.kind === 'runway').map((l) => l.text).sort(),
+    };
+  }
+  const use = { 27: { tag: 'ARR', title: 'Arrivals, last seen 1 min ago' } };
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('draws the runway colours, the wind label and the status on the runway ends with no profile, as it always did', async () => {
+    const { strips, labels, runwayTexts } = await open();
+    expect(strips().map((s) => s.status)).toEqual(['ok']);
+    expect(labels().some((l) => l.kind === 'wind')).toBe(true);
+    expect(runwayTexts()).toEqual(['09 ✓', '27 ✓']);
+  });
+
+  it('draws plain runways, bare runway names and no wind label in the Traffic and Access tabs, the airport label plain too', async () => {
+    const { map, strips, labels, runwayTexts } = await open();
+    for (const profile of [MAP_PROFILES.traffic, MAP_PROFILES.access]) {
+      map.setProfile(profile);
+      expect(strips().map((s) => s.status)).toEqual(['unknown']);
+      expect(labels().some((l) => l.kind === 'wind')).toBe(false);
+      expect(runwayTexts()).toEqual(['09', '27']);
+      expect(labels().filter((l) => l.kind === 'runway').every((l) => l.status === 'unknown')).toBe(true);
+      const airport = labels().find((l) => l.kind === 'airport');
+      expect(airport).toMatchObject({ selected: true, status: 'unknown', flag: false });
+    }
+  });
+
+  it('brings the colours and the wind label back in the Weather and Details tabs, and when the profile goes', async () => {
+    const { map, strips, labels, runwayTexts } = await open();
+    map.setProfile(MAP_PROFILES.traffic);
+    for (const profile of [MAP_PROFILES.weather, MAP_PROFILES.details, null]) {
+      map.setProfile(MAP_PROFILES.traffic);
+      map.setProfile(profile);
+      expect(strips().map((s) => s.status)).toEqual(['ok']);
+      expect(labels().some((l) => l.kind === 'wind')).toBe(true);
+      expect(runwayTexts()).toEqual(['09 ✓', '27 ✓']);
+    }
+  });
+
+  it('labels the runway ends traffic uses (ARR, DEP) only in the Traffic tab', async () => {
+    const { map, runwayTexts } = await open();
+    map.setRunwayUse('XPRO', use);
+    // No profile: as before the tabs, the label says it with the status.
+    expect(runwayTexts()).toEqual(['09 ✓', '27 ✓ ARR']);
+    map.setProfile(MAP_PROFILES.traffic);
+    expect(runwayTexts()).toEqual(['09', '27 ARR']);
+    for (const profile of [MAP_PROFILES.weather, MAP_PROFILES.details, MAP_PROFILES.access]) {
+      map.setProfile(profile);
+      expect(runwayTexts().join(' ')).not.toContain('ARR');
+    }
+  });
+
+  it('draws nothing of it for an airport that is not the open one', async () => {
+    const { map, strips, runwayTexts } = await open();
+    map.select(null);
+    map.setProfile(MAP_PROFILES.traffic);
+    expect(strips().map((s) => s.status)).toEqual(['ok']);
+    expect(runwayTexts()).toEqual(['09 ✓', '27 ✓']);
   });
 });

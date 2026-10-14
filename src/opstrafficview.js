@@ -212,9 +212,11 @@ function follow(ctx) {
   }
 }
 
-// Marks the map for the report, while the tab is shown.
+// Marks the map for the report, while the tab is shown and its map profile turns the marks on.
 function publish() {
   if (!session?.view || !session.airport) return;
+  const profile = session.api.mapProfile?.();
+  if (profile && !profile.trafficMarks) return;
   const report = session.monitor.report(Date.now());
   session.source.setOverlay(overlayFor(report, session.airport));
 }

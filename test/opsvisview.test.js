@@ -400,6 +400,24 @@ describe('the part at work in the panel', () => {
   });
 });
 
+describe('the fact in the summary line', () => {
+  const full = (extra) => ({ hourly: hourly(Array.from({ length: 30 }, () => 10_000)), observation: fog, taf: parseTaf(sample('EFRO')), ...extra });
+
+  it('goes grey when the oldest of the forecast and the METAR it was worked out from is old', () => {
+    const hour = 3_600_000;
+    const stale = (extra) => summaryHtml([analysePart(visibilityPart, ctx(full(extra)))], NOW);
+    expect(stale({ hourlyAsOf: NOW - hour, observationAsOf: NOW - hour })).not.toContain('(old data)');
+    expect(stale({ hourlyAsOf: NOW - hour, observationAsOf: NOW - 4 * hour })).toContain('240 min old');
+    expect(stale({ hourlyAsOf: NOW - 5 * hour, observationAsOf: NOW - hour })).toContain('(old data)');
+    expect(stale({ hourlyAsOf: NOW - 5 * hour, observationAsOf: NOW - hour })).toContain('status-unknown');
+  });
+
+  it('ignores a METAR stamp when there is no METAR', () => {
+    const html = summaryHtml([analysePart(visibilityPart, ctx(full({ observation: null, hourlyAsOf: NOW - 3_600_000, observationAsOf: NOW - 9 * 3_600_000 })))], NOW);
+    expect(html).not.toContain('old data');
+  });
+});
+
 describe('times in the section', () => {
   it('are written by the formatters of the context (local time with the zone for the fact)', () => {
     const out = html({ observation: fog, taf: parseTaf(sample('EFRO')), formatClock, formatClockShort, formatTick });
