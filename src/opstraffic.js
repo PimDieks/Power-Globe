@@ -20,10 +20,10 @@ export const INBOUND_RANGE_NM = 200;
 // heading the same way, were bound for Brussels, Dusseldorf or Cologne.
 export const INBOUND_GUESS_NM = 100;
 // An aircraft further than 40 NM out is at least this high, per mile of distance, if it is on its
-// way to land here (below that it has come down for somewhere else); from 10 to 40 NM half as much.
+// way to land here (below that it has come down for somewhere else); from 5 to 40 NM half as much.
 export const MIN_FT_PER_NM = 100;
 // Light aircraft (by ICAO type) are not arrivals to plan for at an airport like this one.
-export const LIGHT_TYPES = /^(DA\d\d|SR2\d|C1\d\d|PA(18|2\d|3[0-4]|44)|P28\w?|TB\d\d|M20\w?|AA5\w?|G115|DR40|RV\d+|EV97)$/;
+export const LIGHT_TYPES = /^(DA\d\d|SR2\d|C1\d\d|PA(18|2\d|3[0-4]|44)|P28\w?|P32\w?|TB\d\d|M20\w?|AA5\w?|G115|DR40|RV\d+|EV97)$/;
 export const INBOUND_HORIZON_MIN = 60;
 // Above this height an aircraft counts as inbound only if it is descending.
 export const INBOUND_LEVEL_FT = 15_000;
@@ -490,7 +490,7 @@ export class OpsTraffic {
         if (vs != null && vs > DESCENT_FPM) continue;
         if ((agl / 1000) * NM_PER_1000_FT > miles + DESCENT_MARGIN_NM) continue;
         // ... and one this low so far out has already come down for another airport.
-        if (miles > 10 && agl < (miles > 40 ? MIN_FT_PER_NM : MIN_FT_PER_NM / 2) * miles) continue;
+        if (miles > 5 && agl < (miles > 40 ? MIN_FT_PER_NM : MIN_FT_PER_NM / 2) * miles) continue;
         const circuit = miles < 15 && agl < 5000;
         const allowed = miles > 40 ? 45 : miles > 15 ? 90 : circuit ? 180 : 90;
         if (offsetDeg > allowed) continue;
