@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { toAirport } from '../src/airports.js';
-import { assessHour, favouredRuns, noOutlookText, outlookLines, outlookTimes, runwayFact, runwayOutlook } from '../src/opsrunway.js';
+import { assessHour, favouredRuns, noCarry, noOutlookText, outlookLines, outlookStale, outlookTimes, runwayFact, runwayOutlook, runwayRows } from '../src/opsrunway.js';
 import { assessAirport, runwayEnds } from '../src/runways.js';
 
 const LIMITS = { crosswind: 25, tailwind: 10 };
@@ -36,6 +36,7 @@ describe('outlookTimes', () => {
 describe('assessHour', () => {
   const ends = runwayEnds(two);
   const wind = (direction, speed, gust) => ({ time: '2026-10-14T12:00', direction, speed, gust: gust ?? speed });
+  const carry = (favoured) => ({ ...noCarry(), favoured });
 
   it('favours the end with the most headwind', () => {
     const hour = assessHour(ends, wind(270, 15), LIMITS);
@@ -61,13 +62,13 @@ describe('assessHour', () => {
   it('keeps the previous end when another has no more than a knot more headwind', () => {
     // 15 kt from 250: 14.8 kt head on 24, 14.1 kt on 27.
     expect(assessHour(ends, wind(250, 15), LIMITS).favoured).toBe('24');
-    expect(assessHour(ends, wind(250, 15), LIMITS, '27').favoured).toBe('27');
+    expect(assessHour(ends, wind(250, 15), LIMITS, carry('27')).favoured).toBe('27');
     // A clearly better end wins.
-    expect(assessHour(ends, wind(240, 15), LIMITS, '27').favoured).toBe('24');
+    expect(assessHour(ends, wind(240, 15), LIMITS, carry('27')).favoured).toBe('24');
   });
 
   it('does not keep a previous end that is over a limit', () => {
-    expect(assessHour(ends, wind(90, 15), LIMITS, '27').favoured).toBe('09');
+    expect(assessHour(ends, wind(90, 15), LIMITS, carry('27')).favoured).toBe('09');
   });
 
   it('includes gusts in the limits', () => {
@@ -239,5 +240,87 @@ describe('runwayOutlook', () => {
     copy.wind_gusts_10m = copy.time.map(() => 12);
     const outlook = runwayOutlook({ airport: two, hourly: copy, now: NOW, limits: LIMITS });
     expect(outlook.hours.every((h) => h.state === 'favoured')).toBe(true);
+  });
+});
+
+describe('runways, the runway in use and the clock', () => {
+  const ends = runwayEnds(two);
+  const wind = (direction, speed, gust) => ({ time: '2026-10-14T12:00', direction, speed, gust: gust ?? speed });
+
+  it('groups the ends into runways and colours each by its better end', () => {
+    expect(runwayRows(ends)).toEqual([
+      { label: '09/27', idents: ['09', '27'] },
+      { label: '06/24', idents: ['06', '24'] },
+    ]);
+    // 15 kt from 270 is a tailwind of 15 on 09 (over the limit) and a headwind on 27: the runway is fine.
+    const hour = assessHour(ends, wind(270, 15), LIMITS);
+    expect(hour.runways.map((r) => [r.label, r.status, r.best])).toEqual([['09/27', 'ok', '27'], ['06/24', 'ok', '24']]);
+    expect(hour.ends.find((e) => e.ident === '09').status).toBe('nogo');
+    // Out of limits only when both ends are.
+    const bad = assessHour(ends, wind(340, 30), LIMITS);
+    expect(bad.runways.every((r) => r.status === 'nogo')).toBe(true);
+  });
+
+  it('keeps the runway in use as the better end within a knot, and picks the nearer limit when none is usable', () => {
+    const row = runwayEnds(one);
+    // 5 kt from 000: a crosswind of 5 on both ends, no headwind to tell them apart.
+    expect(assessHour(row, wind(0, 5), LIMITS, { favoured: null, best: { '09/27': '27' } }).runways[0].best).toBe('27');
+    expect(assessHour(row, wind(0, 5), LIMITS, { favoured: null, best: { '09/27': '09' } }).runways[0].best).toBe('09');
+    // Over the limit at both ends: still one of them is named.
+    const over = assessHour(row, wind(350, 40), LIMITS);
+    expect(over.runways[0].status).toBe('nogo');
+    expect(['09', '27']).toContain(over.runways[0].best);
+  });
+
+  it('counts calm only when the gusts are calm too', () => {
+    expect(assessHour(ends, wind(270, 0.4, 0.4), LIMITS).state).toBe('calm');
+    expect(assessHour(ends, { time: 't', direction: 270, speed: 0.4 }, LIMITS).state).toBe('calm');
+    expect(assessHour(ends, wind(270, 0.4, 6), LIMITS).state).toBe('favoured');
+  });
+
+  it('keeps the runway in use through a calm hour and through a gap', () => {
+    // 250 at 15 kt is a tie between 27 and 24, so the runway in use decides.
+    const tie = [250, 15];
+    const calm = outlookFor(two, [[270, 15], [270, 0], tie, ...steady(tie, 27)]);
+    expect(calm.hours.slice(0, 3).map((h) => h.favoured)).toEqual(['27', null, '27']);
+    const gap = hourly([[270, 15], [270, 15], tie, ...steady(tie, 27)]);
+    gap.wind_speed_10m[1] = null;
+    gap.wind_direction_10m[1] = null;
+    const withGap = runwayOutlook({ airport: two, hourly: gap, now: NOW, limits: LIMITS });
+    expect(withGap.hours.slice(0, 3).map((h) => h.state)).toEqual(['favoured', 'missing', 'favoured']);
+    expect(withGap.hours[2].favoured).toBe('27');
+    // Without the runway in use, the same wind favours the end with the most headwind.
+    expect(outlookFor(two, steady(tie)).hours[0].favoured).toBe('24');
+  });
+
+  it('gives the same favoured ends for the same hours whenever the panel is opened', () => {
+    const rows = [...steady([270, 15], 3), ...steady([250, 15], 27)];
+    const early = outlookFor(two, rows, { now: Date.parse('2026-10-14T14:55:00Z') });
+    const late = outlookFor(two, rows, { now: Date.parse('2026-10-14T15:05:00Z') });
+    expect(early.hours[0].time).toBe('2026-10-14T14:00');
+    expect(late.hours[0].time).toBe('2026-10-14T15:00');
+    const favoured = (outlook) => Object.fromEntries(outlook.hours.map((h) => [h.time, h.favoured]));
+    const a = favoured(early);
+    const b = favoured(late);
+    for (const time of Object.keys(b)) if (time in a) expect(b[time]).toBe(a[time]);
+    // The tie after the shift goes the way the runway in use was going, not to a fresh pick.
+    expect(late.hours[0].favoured).toBe('27');
+  });
+
+  it('knows when a new hour has begun', () => {
+    expect(outlookStale('2026-10-14T12:00', Date.parse('2026-10-14T12:59:00Z'))).toBe(false);
+    expect(outlookStale('2026-10-14T12:00', Date.parse('2026-10-14T13:00:00Z'))).toBe(true);
+  });
+});
+
+describe('the order of the ends of an airport', () => {
+  it('puts the end nearest its limits first among equally good ends, not the one with most headwind', () => {
+    // Wind from the north at 10 kt. Y (heading 089) has a headwind of 0.2 and a crosswind of 10 (load 0.4);
+    // X (heading 260) a tailwind of 1.7 and a crosswind of 9.8 (load 0.39). Both are within limits.
+    const airport = { runways: [{ le: 'Y', leHeading: 89, he: '', heHeading: null }, { le: 'X', leHeading: 260, he: '', heHeading: null }] };
+    const result = assessAirport(airport, { direction: 0, speed: 10, gust: 10 }, LIMITS);
+    expect(result.ends.map((e) => e.status)).toEqual(['ok', 'ok']);
+    expect(result.ends.map((e) => e.ident)).toEqual(['X', 'Y']);
+    expect(result.best.ident).toBe('X');
   });
 });
