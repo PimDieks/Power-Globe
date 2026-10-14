@@ -15,6 +15,15 @@ const MIN_MS = 60_000;
 
 // Inbound: aircraft this close, and expected to land within this long, are listed.
 export const INBOUND_RANGE_NM = 200;
+// Without a route saying so, only aircraft this close are taken as inbound: checked against the route
+// database for Schiphol, nearly all of those within 100 NM came here, and most of those further out,
+// heading the same way, were bound for Brussels, Dusseldorf or Cologne.
+export const INBOUND_GUESS_NM = 100;
+// An aircraft further than 40 NM out is at least this high, per mile of distance, if it is on its
+// way to land here (below that it has come down for somewhere else); from 10 to 40 NM half as much.
+export const MIN_FT_PER_NM = 100;
+// Light aircraft (by ICAO type) are not arrivals to plan for at an airport like this one.
+export const LIGHT_TYPES = /^(DA\d\d|SR2\d|C1\d\d|PA(18|2\d|3[0-4]|44)|P28\w?|TB\d\d|M20\w?|AA5\w?|G115|DR40|RV\d+|EV97)$/;
 export const INBOUND_HORIZON_MIN = 60;
 // Above this height an aircraft counts as inbound only if it is descending.
 export const INBOUND_LEVEL_FT = 15_000;
@@ -466,17 +475,24 @@ export class OpsTraffic {
       const alt = finite(ac.altitudeFt) ? ac.altitudeFt : null;
       const vs = this.#verticalRate(e);
       const speed = finite(ac.speedKt) && ac.speedKt > 0 ? ac.speedKt : null;
+      // At the surface of the airport, though not reported on the ground: arrived (or about to take off).
+      if (alt != null && miles < 3 && alt - this.elevationFt < 100) continue;
 
       if (here) {
         if (offsetDeg != null && offsetDeg > ROUTE_MAX_OFFSET_DEG) continue;
       } else {
-        if (offsetDeg == null || alt == null) continue;
+        // Further out, an aircraft heading this way is as likely bound for another airport on the
+        // same line, so it counts only when its route says it comes here.
+        if (miles > INBOUND_GUESS_NM || offsetDeg == null || alt == null) continue;
+        if (LIGHT_TYPES.test(ac.type ?? '') || ac.category === 'Light aircraft') continue;
         const agl = alt - this.elevationFt;
         if (agl > INBOUND_LEVEL_FT && !(vs != null && vs <= -DESCENT_FPM)) continue;
         if (vs != null && vs > DESCENT_FPM) continue;
         if ((agl / 1000) * NM_PER_1000_FT > miles + DESCENT_MARGIN_NM) continue;
+        // ... and one this low so far out has already come down for another airport.
+        if (miles > 10 && agl < (miles > 40 ? MIN_FT_PER_NM : MIN_FT_PER_NM / 2) * miles) continue;
         const circuit = miles < 15 && agl < 5000;
-        const allowed = miles > 100 ? 40 : miles > 40 ? 60 : miles > 15 ? 90 : circuit ? 180 : 90;
+        const allowed = miles > 40 ? 45 : miles > 15 ? 90 : circuit ? 180 : 90;
         if (offsetDeg > allowed) continue;
         if (!speed || speed < 80) continue;
       }
@@ -613,7 +629,7 @@ export class OpsTraffic {
   #coverage(now) {
     const area = this.area;
     const away = area ? nmBetween(area, this.airport) : null;
-    const inboundNm = area ? Math.max(0, Math.min(INBOUND_RANGE_NM, area.nm - away)) : null;
+    const inboundNm = area ? Math.max(0, Math.min(INBOUND_GUESS_NM, area.nm - away)) : null;
     const gap = median(this.steps);
     const areaHolds = area ? away + HOLD_RANGE_NM <= area.nm : true;
     const areaMoves = area ? away + TAKEOFF_MAX_NM <= area.nm : true;
@@ -626,7 +642,8 @@ export class OpsTraffic {
     if (!area && !fastEnough) notes.push('Only the worldwide feed (reports every few minutes) is known to cover this airport, so holding and runway use cannot be detected reliably.');
     else if (area && !areaHolds) notes.push(`The area feed is not centred on this airport (${Math.round(away)} NM away, ${area.nm} NM wide), so holding and runway use may be missed.`);
     else if (gap != null && !fastEnough) notes.push(`Aircraft near the airport are reported only every ${Math.round(gap)} s, too slowly to see holding or landings reliably.`);
-    if (area && inboundNm < INBOUND_RANGE_NM - INBOUND_SNAP_NM) notes.push(`The area feed covers only ${Math.round(inboundNm)} NM around the airport; inbound traffic further out is seen only from the worldwide feed and may be missing.`);
+    if (area && inboundNm < INBOUND_GUESS_NM - INBOUND_SNAP_NM) notes.push(`The area feed covers only ${Math.round(inboundNm)} NM around the airport, so inbound traffic further out may be missing.`);
+    notes.push(`Beyond ${INBOUND_GUESS_NM} NM an aircraft counts as inbound only if its route is known to end here (aircraft you select on the map), as others heading this way may be bound for other airports.`);
     notes.push(
       this.since == null
         ? 'Nothing monitored yet.'

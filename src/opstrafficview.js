@@ -7,8 +7,9 @@ import { distanceKm, knownRoute } from './flightroute.js';
 import { STATUS } from './runways.js';
 import { OpsTraffic, routeHint } from './opstraffic.js';
 
-// The area watched around the airport, in nautical miles: the inbound range of opstraffic.js.
-export const WATCH_NM = 200;
+// The area watched around the airport, in nautical miles: a little more than the range in which
+// opstraffic.js takes aircraft for inbound without a route.
+export const WATCH_NM = 125;
 // The section is drawn again this often, for the minutes in it, whether or not the feed answered.
 export const REFRESH_MS = 30_000;
 // Aircraft listed before the rest are only counted, and hours shown in the bars.

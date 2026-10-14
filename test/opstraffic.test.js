@@ -154,19 +154,36 @@ describe('inbound', () => {
     const ops = new OpsTraffic(EHAM);
     ops.update(
       [
-        level(EHAM, 100, 100, { id: 'a1', callsign: 'KLM1' }),
+        level(EHAM, 100, 90, { id: 'a1', callsign: 'KLM1' }),
+        // Beyond 100 miles only the route database can say an aircraft comes here.
         level(EHAM, 40, 150, { id: 'a2', callsign: 'BAW2', altitudeFt: 36_000, speedKt: 450, verticalFpm: -2500 }),
         level(EHAM, 250, 190, { id: 'a3', callsign: 'DLH3', speedKt: 250 }),
+        level(EHAM, 60, 130, { id: 'a4', callsign: 'AFR4', altitudeFt: 30_000, speedKt: 450, verticalFpm: -1500 }),
+      ],
+      { now: T0, hints: { a2: { destination: 'EHAM' }, a3: { destination: 'EHAM' } } },
+    );
+    const { inbound } = ops.report(T0);
+    expect(inbound.list.map((a) => a.callsign)).toEqual(['KLM1', 'BAW2', 'DLH3']);
+    // 90 miles at 280 knots is 19 minutes and a bit.
+    expect(inbound.list.map((a) => a.etaMin)).toEqual([19, 20, 46]);
+    expect(inbound.within30).toBe(2);
+    expect(inbound.between30and60).toBe(1);
+    expect(inbound.list[0]).toMatchObject({ distanceNm: 90, altitudeFt: 10_000, type: 'B738', route: false });
+    expect(inbound.list[1].route).toBe(true);
+  });
+
+  it('leaves out aircraft that come down early far out, and light aircraft, unless a route says they come here', () => {
+    const ops = new OpsTraffic(EHAM);
+    ops.update(
+      [
+        // 7,000 feet at 80 miles has come down for another airport.
+        level(EHAM, 100, 80, { id: 'low', altitudeFt: 7000, verticalFpm: -800 }),
+        level(EHAM, 100, 30, { id: 'da', type: 'DA42', altitudeFt: 4000, speedKt: 120 }),
+        level(EHAM, 100, 30, { id: 'ok', type: 'A320', altitudeFt: 4000, speedKt: 200 }),
       ],
       { now: T0 },
     );
-    const { inbound } = ops.report(T0);
-    expect(inbound.list.map((a) => a.callsign)).toEqual(['BAW2', 'KLM1', 'DLH3']);
-    // 100 miles at 280 knots is 21 minutes and a bit.
-    expect(inbound.list.map((a) => a.etaMin)).toEqual([20, 22, 46]);
-    expect(inbound.within30).toBe(2);
-    expect(inbound.between30and60).toBe(1);
-    expect(inbound.list[1]).toMatchObject({ distanceNm: 100, altitudeFt: 10_000, type: 'B738', route: false });
+    expect(ops.report(T0).inbound.list.map((a) => a.id)).toEqual(['ok']);
   });
 
   it('does not list an overflight at FL350, level, even straight at the airport', () => {
@@ -483,13 +500,13 @@ describe('data limits', () => {
     expect(report.coverage.notes.join(' ')).toContain('not centred');
     const centred = new OpsTraffic(EHAM);
     const states = fly({ from: away(EHAM, 45, 40), trk: 225, gs: 220, alt: 8000, plan: racetrack(1) });
-    const ok = drive(centred, [flight(states, { id: 'w2' })], { seconds: 240, area: { lat: 52.25, lng: 4.75, nm: 125 } });
+    const ok = drive(centred, [flight(states, { id: 'w2' })], { seconds: 240, area: { lat: 52.25, lng: 4.75, nm: 75 } });
     expect(ok.coverage.holdingReliable).toBe(true);
-    expect(ok.coverage.inboundNm).toBeLessThan(200);
+    expect(ok.coverage.inboundNm).toBeLessThan(100);
     expect(ok.coverage.notes.join(' ')).toContain('covers only');
-    // An area of 200 miles snapped to the grid, a few miles off, is as good as centred.
+    // An area of 125 miles snapped to the grid, a few miles off, is as good as centred.
     const snapped = new OpsTraffic(EHAM);
-    snapped.update([], { now: T0, area: { lat: 52.25, lng: 4.75, nm: 200 } });
+    snapped.update([], { now: T0, area: { lat: 52.25, lng: 4.75, nm: 125 } });
     expect(snapped.report(T0).coverage.notes.join(' ')).not.toContain('covers only');
   });
 });
