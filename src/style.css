@@ -853,7 +853,8 @@ input:disabled {
   margin-top: 4px;
 }
 
-.ops-chart {
+.ops-chart,
+.vis-chart {
   --cell: 12px;
   font-variant-numeric: tabular-nums;
 }
@@ -878,7 +879,8 @@ input:disabled {
   padding: 2px 0;
 }
 
-.ops-track {
+.ops-track,
+.vis-track {
   display: grid;
   grid-template-columns: repeat(var(--hours), 1fr);
   gap: 1px;
@@ -895,7 +897,8 @@ input:disabled {
 }
 
 .ops-segment,
-.ops-hour {
+.ops-hour,
+.vis-hour {
   min-height: 0;
   padding: 0;
   border-radius: 3px;
@@ -915,7 +918,8 @@ input:disabled {
   color: var(--text);
 }
 
-.ops-hour {
+.ops-hour,
+.vis-hour {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -925,11 +929,13 @@ input:disabled {
 }
 
 .ops-hour:hover,
+.vis-hour:hover,
 .ops-segment:hover {
   background-color: rgba(255, 255, 255, 0.16);
 }
 
-.ops-hour[aria-current='time'] {
+.ops-hour[aria-current='time'],
+.vis-hour[aria-current='time'] {
   background: rgba(255, 255, 255, 0.18);
   box-shadow: 0 0 0 1px var(--accent);
 }
@@ -981,11 +987,13 @@ input:disabled {
   pointer-events: none;
 }
 
-.ops-hour:focus-visible {
+.ops-hour:focus-visible,
+.vis-hour:focus-visible {
   outline-offset: 0;
 }
 
-.side-panel p.ops-readout {
+.side-panel p.ops-readout,
+.side-panel p.vis-readout {
   min-height: 2.7em;
   margin: 8px 0 6px;
   color: var(--text);
@@ -996,6 +1004,57 @@ input:disabled {
 .side-panel p.ops-limits {
   margin: 0 0 6px;
   font-size: 0.75rem;
+}
+
+/* The low visibility part: the METAR now as small facts, labels above their values. */
+.vis-now {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr));
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.vis-fact {
+  padding: 4px 8px;
+  border-left: 3px solid var(--status, var(--panel-border));
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 0.85rem;
+}
+
+.vis-fact span:first-child {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.vis-fact b {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A row with nothing to say in an hour: an empty outline, not "no data". */
+.ops-cell.status-none {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+/* Fog risk: a white bar along the foot of the model's cell. */
+.ops-cell.vis-fog {
+  box-shadow: inset 0 -3px 0 #fff;
+}
+
+.limits.vis-limits {
+  margin: 10px 0 8px;
+}
+
+.vis-limits .limit-inputs {
+  align-items: end;
+}
+
+.vis-reset {
+  margin-top: 8px;
+  font-size: 0.8rem;
 }
 
 .check-order {

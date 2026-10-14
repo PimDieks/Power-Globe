@@ -5,7 +5,7 @@
 // `analyse` does the work once per render and gives `data`; `fact` gives the part's one line for the
 // status strip at the top ({ text, status } or null) and `html` its section. `needs` lists the
 // names the part reads from `ctx`, which main.js builds for the open airport (airport, hourly,
-// error, observation, limits, limitsLabel, time, now and the time formatters, see opsclock.js);
+// error, observation, taf, limits, limitsLabel, time, now and the time formatters, see opsclock.js);
 // a part whose needs are not all there says so instead of failing. `bind` and `unbind` (both
 // optional) are called when the Ops tab is shown and when it goes: `root` is the element the HTML
 // is put in, which stays the same across renders, so a part listens to it for what happens in its
@@ -16,9 +16,10 @@
 import { escapeHtml } from './airportview.js';
 import { STATUS } from './runways.js';
 import { runwayPart } from './opsrunwayview.js';
+import { visibilityPart } from './opsvisview.js';
 
 // The Ops parts, in the order their sections are shown and their facts are listed.
-export const OPS_PARTS = [runwayPart];
+export const OPS_PARTS = [runwayPart, visibilityPart];
 
 export const DETAIL_TABS = [
   { id: 'details', label: 'Details' },

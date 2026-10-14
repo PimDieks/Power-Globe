@@ -35,6 +35,7 @@ import { DragTracker, dragged, followStep, startFollow, stopReason, shiftedLat, 
 import { setupPilotView, trafficPov } from './pilotview.js';
 import { CARD_REFRESH_MS, cardText, focusTarget, followLayout, freeArea, spokenDue, spokenText } from './followcard.js';
 import { latestObservation } from './metar.js';
+import { latestTaf } from './taf.js';
 import { explain } from './api.js';
 
 // Timeline playback speed: three hours of forecast a second, whatever the forecast's step.
@@ -1190,9 +1191,9 @@ async function showAirport(airport, { fromList = false } = {}) {
   openSidePanel();
   windCheck.close();
   syncWindCheckButton();
-  // `observation`: undefined while the METAR loads, null if there is none. `error`: why there is
-  // no forecast, once it is known.
-  const detail = { airport, hourly: null, fromList, observation: undefined, error: null };
+  // `observation` and `taf`: undefined while the METAR or TAF loads (the TAF is asked for when the
+  // Ops tab is shown), null if there is none. `error`: why there is no forecast, once it is known.
+  const detail = { airport, hourly: null, fromList, observation: undefined, taf: undefined, error: null };
   state.detail = detail;
   syncDetailTabs();
   // The airport's own label on the map shows it is open (see airportmap.js): no pin of its own.
@@ -1431,6 +1432,21 @@ const ops = createOpsHost({
   },
 });
 
+// Asks for the open airport's TAF, once; the Ops tab is drawn again when it arrives.
+function requestTaf(detail) {
+  if (detail.taf !== undefined || detail.tafAsked) return;
+  detail.tafAsked = true;
+  latestTaf(detail.airport.ident)
+    .then((taf) => {
+      detail.taf = taf;
+    })
+    .catch((err) => {
+      console.error(err);
+      detail.taf = { error: explain(err) };
+    })
+    .finally(() => state.detail === detail && renderDetails());
+}
+
 // What is known of the open airport, for the airport panel's tabs.
 function airportContext() {
   const detail = state.detail;
@@ -1448,6 +1464,7 @@ function airportContext() {
     formatTick,
     zone: zoneName(),
     observation: detail.observation,
+    taf: detail.taf,
     error: detail.error,
   };
 }
@@ -1462,8 +1479,10 @@ function renderDetails() {
   }
   if (detail?.airport) {
     if (!detail.hourly && !detail.error) return;
-    if (state.detailTab === 'ops') ops.render(airportContext());
-    else els.detailsBody.innerHTML = airportDetailsHtml(airportContext());
+    if (state.detailTab === 'ops') {
+      requestTaf(detail);
+      ops.render(airportContext());
+    } else els.detailsBody.innerHTML = airportDetailsHtml(airportContext());
     return;
   }
   if (!detail?.data || !state.forecast) return;
