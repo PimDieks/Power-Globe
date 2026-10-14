@@ -27,6 +27,7 @@ import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
 import { DragTracker, dragged, followStep, startFollow, stopReason, shiftedLat, visibleShift } from './follow.js';
+import { setupPilotView } from './pilotview.js';
 import { latestObservation } from './metar.js';
 import { explain } from './api.js';
 
@@ -95,6 +96,7 @@ const els = {
   searchStatus: document.getElementById('search-status'),
   detailsBack: document.getElementById('details-back'),
   detailsFollow: document.getElementById('details-follow'),
+  detailsPilot: document.getElementById('details-pilot'),
   traffic: {
     flights: document.getElementById('toggle-flights'),
     military: document.getElementById('toggle-military'),
@@ -206,6 +208,33 @@ const traffic = setupTraffic({
     state.detail = null;
     els.details.classList.add('hidden');
   },
+  announce: (message) => announce(message),
+});
+
+// The outside view from the selected aircraft. The globe stops drawing while it is open; the
+// traffic keeps being updated, so the aircraft's reports keep coming (see pilotview.js).
+const pilot = setupPilotView({
+  els: {
+    root: document.getElementById('pilot'),
+    map: document.getElementById('pilot-map'),
+    title: document.getElementById('pilot-title'),
+    status: document.getElementById('pilot-status'),
+    terrain: document.getElementById('pilot-terrain'),
+    terrainCredit: document.getElementById('pilot-terrain-credit'),
+    close: document.getElementById('pilot-close'),
+    button: els.detailsPilot,
+    detailsClose: els.detailsClose,
+    hud: {
+      alt: document.getElementById('pilot-alt'),
+      altUnit: document.getElementById('pilot-alt-unit'),
+      gs: document.getElementById('pilot-gs'),
+      trk: document.getElementById('pilot-trk'),
+    },
+  },
+  traffic,
+  background: () => [...document.body.children].filter((el) => !['pilot', 'announcer'].includes(el.id) && el.tagName !== 'SCRIPT'),
+  onOpen: () => globe.pauseAnimation(),
+  onClose: () => globe.resumeAnimation(),
   announce: (message) => announce(message),
 });
 const windCheck = setupWindCheck({
@@ -483,7 +512,8 @@ let lastTrafficRender = 0;
 function tick(now) {
   const dt = Math.min(0.1, (now - lastFrame) / 1000);
   lastFrame = now;
-  if (state.forecast) {
+  // The weather is not drawn while the pilot view covers the globe.
+  if (state.forecast && !pilot.isOpen) {
     const last = state.forecast.times.length - 1;
     if (state.playing) {
       state.t += dt * STEPS_PER_SECOND;
@@ -514,6 +544,7 @@ function tick(now) {
     console.error(err);
   }
   syncFollowButton();
+  pilot.sync();
   // Live positions change all the time; refresh the open aircraft or satellite every second.
   if (state.detail?.traffic && now - lastTrafficRender > 1000) {
     lastTrafficRender = now;
@@ -1137,7 +1168,8 @@ els.windCheckClose.addEventListener('click', () => {
 });
 window.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
-  if (state.follow) stopFollowing('Stopped following.');
+  if (pilot.isOpen) pilot.close();
+  else if (state.follow) stopFollowing('Stopped following.');
   else if (state.detail?.fromList) backToWindCheck();
   else if (state.detail) closeDetails();
   else if (!els.windCheck.panel.classList.contains('hidden')) {

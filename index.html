@@ -23,7 +23,7 @@
         An interactive globe showing the weather forecast. Drag to turn it, pinch or scroll to zoom, and tap a spot to
         see its forecast. Search for an airport to see its ground conditions and the wind on each runway, or open the
         wind check for a list of airports where wind and gusts are near or over the limits. Pick a time on the timeline.
-        Live flights, military flights and satellites can be switched on under Live traffic; tap one for its details, and follow a flight to keep it in the middle of the view.
+        Live flights, military flights and satellites can be switched on under Live traffic; tap one for its details, follow a flight to keep it in the middle of the view, or open its pilot view.
         Zoomed in, runways are coloured by whether they can be used in the wind.
       </p>
       <div class="panel" id="controls">
@@ -96,6 +96,7 @@
       <div class="details-head">
         <h2 id="details-title"></h2>
         <button id="details-follow" class="follow-button" type="button" hidden>Follow</button>
+        <button id="details-pilot" class="follow-button" type="button" hidden>Pilot view</button>
         <button id="details-close" class="icon-button" type="button">
           <span aria-hidden="true">✕</span><span class="visually-hidden">Close details</span>
         </button>
@@ -156,6 +157,32 @@
     <div id="caption" aria-hidden="true"></div>
     <!-- Announces things that happen on the map to screen readers, once. -->
     <div id="announcer" class="visually-hidden" aria-live="polite"></div>
+
+    <!-- The outside view from the selected aircraft, full screen (see pilotview.js). -->
+    <div id="pilot" class="pilot" role="dialog" aria-modal="true" aria-labelledby="pilot-title" hidden>
+      <div id="pilot-map" class="pilot-map"></div>
+      <div class="pilot-top">
+        <h2 id="pilot-title"></h2>
+        <button id="pilot-terrain" class="pilot-button" type="button" aria-pressed="true">Terrain: on</button>
+        <button id="pilot-close" class="pilot-button pilot-close" type="button">
+          <span aria-hidden="true">✕</span><span class="visually-hidden">Close the pilot view</span>
+        </button>
+      </div>
+      <p id="pilot-status" class="pilot-status" role="status"></p>
+      <div class="pilot-bottom">
+        <dl class="pilot-hud">
+          <div><dt>ALT</dt><dd id="pilot-alt">–</dd><dd id="pilot-alt-unit" class="unit">ft</dd></div>
+          <div><dt>GS</dt><dd id="pilot-gs">–</dd><dd class="unit">kt</dd></div>
+          <div><dt>TRK</dt><dd id="pilot-trk">–</dd><dd class="unit">°</dd></div>
+        </dl>
+        <p class="pilot-credits">
+          Imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics and the
+          GIS User Community<span id="pilot-terrain-credit"> · Terrain
+          <a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md" target="_blank" rel="noopener">Mapzen terrain tiles</a>
+          (EU-DEM, SRTM, USGS and others)</span> · Map <a href="https://maplibre.org/" target="_blank" rel="noopener">MapLibre</a>
+        </p>
+      </div>
+    </div>
 
     <footer class="attribution">
       Weather by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> (CC BY 4.0) ·
