@@ -8,7 +8,9 @@ import {
   MAX_TRACKED,
   OpsTraffic,
   compass,
+  detectHolding,
   routeHint,
+  sinceText,
   runwayEnds,
   statusFact,
   summaryLine,
@@ -90,10 +92,10 @@ function flight(states, { id, startSec = 0, noTrack = false, ...extra }) {
 }
 
 // Feeds the flights to a monitor every `every` seconds up to `seconds`, and returns the report.
-function drive(monitor, flights, { seconds, every = 15, area = null, from = 0, hints = null } = {}) {
+function drive(monitor, flights, { seconds, every = 15, area = null, from = 0, hints = null, qnhHpa = null } = {}) {
   for (let sec = from; sec <= seconds; sec += every) {
     const list = flights.map((f) => f(sec)).filter(Boolean).map((a) => ({ ...a, seen: T0 + sec * 1000 }));
-    monitor.update(list, { now: T0 + sec * 1000, area, hints });
+    monitor.update(list, { now: T0 + sec * 1000, area, hints, qnhHpa });
   }
   return monitor.report(T0 + seconds * 1000);
 }
@@ -516,7 +518,7 @@ describe('status and summary', () => {
     inbound: { within30: 12, between30and60: 8, total: 20 },
     holding: { count: 2, stacks: [{ count: 2, direction: 'NE', distanceNm: 38, longestMinutes: 14 }] },
     movements: { arrivals: { inUse: ['27'] }, departures: { inUse: ['24', '18C'] } },
-    coverage: { holdingReliable: true, movementsReliable: true },
+    coverage: { holdingReliable: true, holdingReady: true, movementsReliable: true },
     ...over,
   });
 
@@ -529,10 +531,27 @@ describe('status and summary', () => {
   });
 
   it('writes the summary line', () => {
-    expect(summaryLine(report())).toBe('About 12 inbound in the next 30 min, and 8 more in 30 to 60 min. 2 holding, 2 NE 38 NM out, the longest about 14 min. Landing on 27, departing from 24 and 18C (as seen).');
-    expect(summaryLine(report({ inbound: { within30: 0, between30and60: 0, total: 0 }, holding: { count: 0, stacks: [] }, movements: { arrivals: { inUse: [] }, departures: { inUse: [] } } }))).toBe(
-      'No inbound traffic seen. No aircraft holding. No runway use seen yet.',
+    expect(summaryLine(report())).toBe(
+      'About 12 inbound in the next 30 min, and at least 8 more in 30 to 60 min. 2 holding, 2 NE 38 NM out, the longest seen holding for at least 14 min. Landing on 27, departing from 24 and 18C (as seen).',
     );
+    const quiet = { inbound: { within30: 0, between30and60: 0, total: 0 }, holding: { count: 0, stacks: [] }, movements: { arrivals: { inUse: [] }, departures: { inUse: [] } } };
+    expect(summaryLine(report(quiet))).toBe('No inbound traffic seen. No aircraft holding. No runway use seen yet.');
+  });
+
+  it('does not say no aircraft are holding until monitoring has run for ten minutes, and leaves holding out of the fact', () => {
+    const early = report({ holding: { count: 0, stacks: [] }, coverage: { holdingReliable: true, holdingReady: false, movementsReliable: true } });
+    expect(summaryLine(early)).toContain('Still watching for holding');
+    expect(summaryLine(early)).not.toContain('No aircraft holding');
+    expect(statusFact(early)).toBe('12 inbound in 30 min');
+    const ops = new OpsTraffic(EHAM);
+    expect(drive(ops, [], { seconds: 9 * 60 }).coverage.holdingReady).toBe(false);
+    expect(drive(ops, [], { seconds: 10 * 60, from: 9 * 60 + 15 }).coverage.holdingReady).toBe(true);
+  });
+
+  it('gives the time monitoring began with its date when that was not today', () => {
+    const since = Date.UTC(2026, 9, 13, 21, 5);
+    expect(sinceText(since, Date.UTC(2026, 9, 13, 23, 0))).toBe('21:05 UTC');
+    expect(sinceText(since, Date.UTC(2026, 9, 14, 8, 0))).toBe('13 Oct 21:05 UTC');
   });
 
   it('names compass directions', () => {
@@ -600,5 +619,190 @@ describe('memory', () => {
     ops.reset();
     expect(ops.stats()).toEqual({ tracked: 0, withHistory: 0, points: 0, events: 0, steps: 0 });
     expect(ops.report(T0).movements.arrivals.total).toBe(0);
+  });
+});
+
+describe('the guards of holding, one by one', () => {
+  const ac = { category: 'Large aircraft', military: false };
+  const base = away(EHAM, 45, 40);
+  // The points of a flight sampled every `every` seconds, as detectHolding takes them.
+  const pointsOf = (states, every = 15) =>
+    states.filter((_, i) => i % every === 0).map((s, i) => ({ t: T0 + i * every * 1000, lat: s.lat, lng: s.lng, alt: s.alt, gs: s.gs, trk: s.trk, vs: s.vs, ground: false }));
+  const check = (points) => detectHolding(points, ac, EHAM, points.at(-1).t);
+  const lap = (legS, vs = 0) => [{ seconds: legS, vs }, { seconds: 60, turn: 3, vs }, { seconds: legS, vs }, { seconds: 60, turn: 3, vs }];
+
+  it('finds the plain racetrack that the variants below are made from', () => {
+    const states = fly({ from: base, trk: 225, gs: 220, alt: 8000, plan: repeat(3, lap(60)) });
+    expect(check(pointsOf(states))).toMatchObject({ altitudeFt: 8000 });
+  });
+
+  it('turns an aircraft that is not holding its height down (the height band)', () => {
+    // Descending 400 ft a minute for ten minutes: 4,000 ft, over the band.
+    const states = fly({ from: base, trk: 225, gs: 220, alt: 12_000, plan: repeat(3, lap(60, -400)) });
+    expect(check(pointsOf(states))).toBeNull();
+  });
+
+  it('turns an aircraft that is climbing fast down, within the band (the climb rate)', () => {
+    // 4 minutes, up 2,490 ft: inside the 2,500 ft band, but 620 ft a minute.
+    const climbing = fly({ from: base, trk: 225, gs: 220, alt: 8000, plan: [...lap(60, 622), { seconds: 5, vs: 622 }] });
+    const level = fly({ from: base, trk: 225, gs: 220, alt: 8000, plan: [...lap(60, 0), { seconds: 5 }] });
+    expect(check(pointsOf(climbing))).toBeNull();
+    expect(check(pointsOf(level))).not.toBeNull();
+  });
+
+  it('turns a pattern down that spreads over more than 12 miles from its middle (the extent)', () => {
+    const wide = fly({ from: base, trk: 225, gs: 500, alt: 12_000, plan: repeat(2, lap(240)).slice(0, 8) });
+    const shortLegs = fly({ from: base, trk: 225, gs: 500, alt: 12_000, plan: repeat(3, lap(15)) });
+    expect(check(pointsOf(wide))).toBeNull();
+    expect(check(pointsOf(shortLegs))).not.toBeNull();
+  });
+
+  it('turns an aircraft down that is reported too seldom to follow (the median gap)', () => {
+    const states = fly({ from: base, trk: 225, gs: 220, alt: 8000, plan: repeat(4, lap(60)) });
+    expect(check(pointsOf(states, 50))).toBeNull();
+    expect(check(pointsOf(states, 15))).not.toBeNull();
+  });
+
+  it('does not count a turn across a gap too long to follow (a standard-rate turn could be mistaken)', () => {
+    const at = (t, trk) => ({ t, lat: 52, lng: 4, trk });
+    expect(totalTurn([at(0, 0), at(60_000, 170)])).toBe(0);
+    expect(totalTurn([at(0, 0), at(50_000, 170)])).toBe(170);
+  });
+});
+
+describe('who counts as inbound', () => {
+  const ids = (ops, now = T0) => ops.report(now).inbound.list.map((a) => a.id);
+
+  it('leaves out an aircraft that is holding, and one that has landed (they are counted elsewhere)', () => {
+    const ops = new OpsTraffic(EHAM);
+    const states = fly({ from: away(EHAM, 45, 40), trk: 225, gs: 220, alt: 8000, plan: repeat(3, [{ seconds: 60 }, { seconds: 60, turn: 3 }, { seconds: 60 }, { seconds: 60, turn: 3 }]) });
+    const report = drive(ops, [flight(states, { id: 'hold1' })], { seconds: 11 * 60, area: { lat: EHAM.lat, lng: EHAM.lng, nm: 120 } });
+    expect(report.holding.count).toBe(1);
+    expect(report.inbound.list.map((a) => a.id)).not.toContain('hold1');
+
+    const landing = new OpsTraffic(EHAM);
+    // A minute before touchdown it is low, lined up and descending, but already counted as an arrival.
+    const r = drive(landing, [approach(EHAM, '27', { id: 'land1', touchdownSec: 300 })], { seconds: 240 });
+    expect(r.movements.arrivals.total).toBe(1);
+    expect(r.inbound.list).toEqual([]);
+  });
+
+  it('applies the FL150 rule: above it only a descent of 500 ft a minute or more counts', () => {
+    const ops = new OpsTraffic(EHAM);
+    ops.update(
+      [
+        level(EHAM, 100, 60, { id: 'hi-level', altitudeFt: 17_000, verticalFpm: 0 }),
+        level(EHAM, 100, 60, { id: 'hi-slow', altitudeFt: 17_000, verticalFpm: -400 }),
+        level(EHAM, 100, 60, { id: 'hi-down', altitudeFt: 17_000, verticalFpm: -800 }),
+        level(EHAM, 100, 60, { id: 'lo-level', altitudeFt: 14_000, verticalFpm: 0 }),
+      ],
+      { now: T0 },
+    );
+    expect(ids(ops).sort()).toEqual(['hi-down', 'lo-level']);
+  });
+
+  it('never lists an aircraft that took off here, or was on the ground here, even when it looks inbound', () => {
+    const ops = new OpsTraffic(EHAM);
+    drive(ops, [takeoff(EHAM, '18C', { id: 'dep1', startSec: 0 })], { seconds: 90 });
+    // Minutes later it is descending towards the airport, as an arrival would.
+    const back = (id) => level(EHAM, 90, 8, { id, altitudeFt: 2500, verticalFpm: -700, speedKt: 180, seen: T0 + 300_000 });
+    ops.update([back('dep1'), back('fresh')], { now: T0 + 300_000 });
+    expect(ids(ops, T0 + 300_000)).toEqual(['fresh']);
+  });
+
+  it('lets a low aircraft head any way near the airport only if it is descending', () => {
+    const ops = new OpsTraffic(EHAM);
+    // On a downwind leg: 8 miles away, heading away, low.
+    const downwind = (id, vs) => level(EHAM, 0, 8, { id, altitudeFt: 2000, verticalFpm: vs, speedKt: 150, track: 0 });
+    ops.update([downwind('level', 0), downwind('down', -500)], { now: T0 });
+    expect(ids(ops)).toEqual(['down']);
+  });
+
+  it('needs a report no older than two minutes within 100 miles', () => {
+    const ops = new OpsTraffic(EHAM);
+    ops.update([level(EHAM, 100, 50, { id: 'old', seen: T0 - 3 * MIN }), level(EHAM, 100, 50, { id: 'fresh', seen: T0 - 60_000 })], { now: T0 });
+    expect(ids(ops)).toEqual(['fresh']);
+  });
+
+  it('leaves out military aircraft unless their route says they come here', () => {
+    const ops = new OpsTraffic(EHAM);
+    ops.update([level(EHAM, 100, 50, { id: 'mil', military: true }), level(EHAM, 100, 50, { id: 'mil-here', military: true })], { now: T0, hints: { 'mil-here': { destination: 'EHAM' } } });
+    expect(ids(ops)).toEqual(['mil-here']);
+  });
+});
+
+describe('what the section may say', () => {
+  it('has no count for the later half hour: it is a minimum', () => {
+    const ops = new OpsTraffic(EHAM);
+    ops.update([level(EHAM, 40, 150, { id: 'far', altitudeFt: 36_000, speedKt: 450, verticalFpm: -2500 })], { now: T0, hints: { far: { destination: 'EHAM' } } });
+    const { inbound, summary } = ops.report(T0);
+    expect(inbound.between30and60Complete).toBe(false);
+    expect(inbound.within30).toBe(1);
+    expect(summary).toContain('About 1 inbound in the next 30 min');
+    ops.update([level(EHAM, 40, 180, { id: 'far2', altitudeFt: 36_000, speedKt: 300, verticalFpm: -2500 })], { now: T0, hints: { far2: { destination: 'EHAM' } } });
+    expect(ops.report(T0).summary).toContain('at least 1 more in 30 to 60 min');
+  });
+
+  it('counts per hour over the last day once monitoring has run longer than that, and dates the start', () => {
+    const ops = new OpsTraffic(EHAM);
+    const end = runwayEnds(EHAM).find((e) => e.ident === '27');
+    const p = away(end.thr, 87, 2.5);
+    const landing = (id, seen) => ({ id, callsign: id, category: 'Large aircraft', ...p, altitudeFt: 850, onGround: false, speedKt: 140, track: 267, verticalFpm: -700, seen });
+    // 26 hours, a tick a minute, one arrival half past each hour.
+    for (let m = 0; m <= 26 * 60; m++) {
+      const now = T0 + m * MIN;
+      ops.update(m % 60 === 30 ? [landing(`h${m}`, now)] : [], { now });
+    }
+    const end26 = T0 + 26 * 60 * MIN;
+    const report = ops.report(end26);
+    // About one an hour; dividing by the 26 hours monitored would say 0.9.
+    expect(report.movements.arrivals.perHour).toBeGreaterThan(0.97);
+    expect(report.movements.arrivals.perHour).toBeLessThan(1.05);
+    expect(report.movements.byHour.length).toBeLessThanOrEqual(25);
+    const notes = report.coverage.notes.join(' ');
+    expect(notes).toContain('since 14 Oct 12:00 UTC');
+    expect(notes).toContain('per hour figures are for the last 24 hours');
+  });
+});
+
+describe('heights with the QNH, and the landed aircraft', () => {
+  // A deep low: QNH 970 hPa puts the standard-setting altitudes about 1,170 ft above the true heights.
+  const deepLow = (f) => (sec) => {
+    const a = f(sec);
+    return a && !a.onGround ? { ...a, altitudeFt: a.altitudeFt + 1168 } : a;
+  };
+  const final = () => deepLow(approach(EHAM, '27', { id: 'low1', touchdownSec: 240 }));
+
+  it('counts a landing at a QNH of 970 that the standard-setting altitudes would hide', () => {
+    expect(drive(new OpsTraffic(EHAM), [final()], { seconds: 300, qnhHpa: 970 }).movements.arrivals.total).toBe(1);
+    expect(drive(new OpsTraffic(EHAM), [final()], { seconds: 300 }).movements.arrivals.total).toBe(0);
+  });
+
+  it('works the correction out from the QNH, and ignores one that cannot be right', () => {
+    const ops = new OpsTraffic(EHAM);
+    expect(ops.correctionFt).toBe(0);
+    ops.update([], { now: T0, qnhHpa: 970 });
+    expect(Math.round(ops.correctionFt)).toBe(-1168);
+    ops.update([], { now: T0 + 1000, qnhHpa: 5 });
+    expect(Math.round(ops.correctionFt)).toBe(-1168);
+  });
+
+  it('judges the heights of aircraft close to the airport by it: inbound too', () => {
+    const ops = new OpsTraffic(EHAM);
+    // 1,500 ft true on a 3 degree path about 4 miles out, though reading 2,668 ft.
+    const ac = { ...level(EHAM, 90, 4, { id: 'x', altitudeFt: 2668 + 0, verticalFpm: -700, speedKt: 140 }) };
+    ops.update([ac], { now: T0, qnhHpa: 970 });
+    expect(ops.report(T0).inbound.list[0]).toMatchObject({ id: 'x', altitudeFt: 2668 });
+  });
+
+  it('does not take the flicker of the ground flag in the roll-out for a take-off', () => {
+    const rolling = approach(EHAM, '27', { id: 'roll1', touchdownSec: 240 });
+    const flicker = (sec) => {
+      const a = rolling(sec);
+      return a && sec >= 270 && sec <= 285 ? { ...a, onGround: false, altitudeFt: -11 } : a;
+    };
+    const report = drive(new OpsTraffic(EHAM), [flicker], { seconds: 400 });
+    expect(report.movements.arrivals.total).toBe(1);
+    expect(report.movements.departures.total).toBe(0);
   });
 });

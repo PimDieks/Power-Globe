@@ -132,6 +132,11 @@ describe('METAR', () => {
     expect(toObservation({ wdir: 'VRB', wspd: 3 })).toMatchObject({ direction: null, variable: true });
   });
 
+  it('keeps the QNH of the report, in hectopascals, when it has one', () => {
+    expect(toObservation({ rawOb: 'EHAM ... Q0970', altim: 970 }).qnh).toBe(970);
+    expect(toObservation({ rawOb: 'EHAM ...' }).qnh).toBeNull();
+  });
+
   it('judges the runways in the observed wind', () => {
     const html = observationHtml(SCHIPHOL, toObservation({ rawOb: 'EHAM ...', obsTime: 1_760_000_000, wdir: 270, wspd: 20, wgst: 28, visib: 10, fltCat: 'VFR' }), LIMITS, 1_760_000_000_000 + 30 * 60_000);
     expect(html).toContain('30 min ago');

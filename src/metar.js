@@ -58,6 +58,8 @@ export function toObservation(m) {
     visibility,
     ceiling,
     category: FLIGHT_CATEGORIES[m.fltCat] ? m.fltCat : flightCategory(ceiling, visibility),
+    // The altimeter setting in hectopascals, if the METAR has one.
+    qnh: typeof m.altim === 'number' ? m.altim : null,
   };
 }
 

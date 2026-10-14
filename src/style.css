@@ -2189,6 +2189,11 @@ body:not(.idle) #caption {
   font-size: 1rem;
 }
 
+.ops-counts .ops-unknown b {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 .ops-flights {
   margin: 0 0 6px;
   padding: 0;
@@ -2197,7 +2202,7 @@ body:not(.idle) #caption {
 
 .ops-flight {
   display: grid;
-  grid-template-columns: minmax(5.4em, 1fr) 2.4em 3.2em 3.8em 5.6em;
+  grid-template-columns: 7em 2.4em 3.2em 3.8em 1fr;
   gap: 4px;
   white-space: nowrap;
   width: 100%;
@@ -2216,11 +2221,28 @@ body:not(.idle) #caption {
   background: rgba(255, 255, 255, 0.12);
 }
 
+/* The callsign is shown whole; on a narrow panel the type goes instead. */
 .ops-flight-call {
-  overflow: hidden;
   font-weight: 700;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ops-traffic {
+  container-type: inline-size;
+}
+
+@container (max-width: 300px) {
+  .ops-flight {
+    grid-template-columns: 7em 3.2em 3.8em 1fr;
+  }
+
+  .ops-flight > :nth-child(2) {
+    display: none;
+  }
+
+  .ops-traffic .ops-flights-holding .ops-flight {
+    grid-template-columns: 7em 3.8em 1fr;
+  }
 }
 
 .ops-flight-eta {
@@ -2229,7 +2251,7 @@ body:not(.idle) #caption {
 }
 
 .ops-flights-holding .ops-flight {
-  grid-template-columns: minmax(5.4em, 1fr) 2.4em 3.8em 3.2em;
+  grid-template-columns: 7em 2.4em 3.8em 1fr;
 }
 
 .ops-stacks {

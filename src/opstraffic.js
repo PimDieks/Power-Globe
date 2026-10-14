@@ -25,6 +25,17 @@ export const MIN_FT_PER_NM = 100;
 // Light aircraft (by ICAO type) are not arrivals to plan for at an airport like this one.
 export const LIGHT_TYPES = /^(DA\d\d|SR2\d|C1\d\d|PA(18|2\d|3[0-4]|44)|P28\w?|P32\w?|TB\d\d|M20\w?|AA5\w?|G115|DR40|RV\d+|EV97)$/;
 export const INBOUND_HORIZON_MIN = 60;
+// Within INBOUND_GUESS_NM an aircraft whose last report is older than this is not listed: it may
+// have landed, or gone out of coverage.
+export const INBOUND_MAX_AGE_MS = 2 * MIN_MS;
+// An aircraft landed this recently cannot take off again (the ground flag flickers in the roll-out).
+export const LANDED_COOLDOWN_MS = 10 * MIN_MS;
+// A departure recorded this recently is never inbound.
+export const DEPARTED_MEMORY_MS = 60 * MIN_MS;
+// Altitude reports are pressure altitude (standard setting): a hectopascal of pressure is about
+// this much height, to correct them with the airport's QNH.
+export const FT_PER_HPA = 27;
+export const STANDARD_HPA = 1013.25;
 // Above this height an aircraft counts as inbound only if it is descending.
 export const INBOUND_LEVEL_FT = 15_000;
 export const DESCENT_FPM = 500;
@@ -54,8 +65,12 @@ export const HOLD_MAX_ALT_FT = 25_000;
 export const HOLD_MAX_BAND_FT = 2500;
 export const HOLD_MAX_CLIMB_FPM = 600;
 export const HOLD_MIN_SPEED_KT = 140;
-// Reports further apart than this say nothing about turning; the median gap must be smaller.
-export const HOLD_MAX_GAP_S = 120;
+// Reports further apart than this say nothing about turning (a standard-rate turn of 3 degrees a
+// second makes 165 degrees in 55 s; longer gaps could be mistaken for a turn the other way); the
+// median gap must be smaller.
+export const HOLD_MAX_GAP_S = 55;
+// Until monitoring has run this long, no holding seen says little: a hold needs minutes of track.
+export const HOLD_READY_MS = 10 * MIN_MS;
 export const HOLD_MAX_MEDIAN_GAP_S = 45;
 export const HOLD_MIN_POINTS = 8;
 export const HOLD_MIN_SPAN_MS = 4 * MIN_MS;
@@ -211,7 +226,7 @@ export function totalTurn(points) {
 // since, turn, altitudeFt, speedKt } or null. See the HOLD_* constants. Aircraft climbing or
 // descending (a turn onto final, a departure turning out) fail the height band and the climb
 // rate; vectoring that zigzags fails the one-way turn; a pattern that wanders off fails the extent.
-export function detectHolding(points, ac, airport, now) {
+export function detectHolding(points, ac, airport, now, corrFt = 0) {
   if (NOT_HOLDING.has(ac.category) || ac.military) return null;
   const window = points.filter((p) => p.t >= now - HOLD_WINDOW_MS);
   const last = window.at(-1);
@@ -224,7 +239,7 @@ export function detectHolding(points, ac, airport, now) {
   const alts = window.map((p) => p.alt).filter(finite);
   if (alts.length < window.length * 0.7) return null;
   const midAlt = median(alts);
-  if (midAlt < (airport.elevationFt ?? 0) + HOLD_MIN_AGL_FT || midAlt > HOLD_MAX_ALT_FT) return null;
+  if (midAlt + corrFt < (airport.elevationFt ?? 0) + HOLD_MIN_AGL_FT || midAlt > HOLD_MAX_ALT_FT) return null;
   if (Math.max(...alts) - Math.min(...alts) > HOLD_MAX_BAND_FT) return null;
   const minutes = (last.t - window[0].t) / MIN_MS;
   if (Math.abs(alts.at(-1) - alts[0]) / minutes > HOLD_MAX_CLIMB_FPM) return null;
@@ -283,13 +298,17 @@ export class OpsTraffic {
     // Time monitored in each clock hour (UTC), by the start of the hour.
     this.covered = new Map();
     this.lastUpdate = null;
+    this.qnhHpa = null;
   }
 
   // Take the aircraft list as it is now. `area` is the circle the area feed last covered ({ lat,
   // lng, nm }, if any), and `hints` the route database results by aircraft id (routeHint): the
   // monitor keeps a hint for as long as it keeps the aircraft.
-  update(list, { now = Date.now(), area = null, hints = null } = {}) {
+  update(list, { now = Date.now(), area = null, hints = null, qnhHpa = null } = {}) {
     this.#clock(now);
+    // Heights near the ground are judged with the QNH, if there is one: a deep low puts the
+    // standard-setting altitudes a thousand feet or more above the true heights.
+    if (finite(qnhHpa) && qnhHpa > 850 && qnhHpa < 1100) this.qnhHpa = qnhHpa;
     if (area) this.area = { lat: area.lat, lng: area.lng ?? area.lon, nm: area.nm };
     for (const ac of list) this.#ingest(ac, now, hints?.[ac.id] ?? (hints instanceof Map ? hints.get(ac.id) : null));
     this.#prune(now);
@@ -305,6 +324,8 @@ export class OpsTraffic {
         this.covered.set(hour, (this.covered.get(hour) ?? 0) + (b - a));
         a = b;
       }
+      // Only the last day is kept, like the events.
+      for (const hour of this.covered.keys()) if (hour < hourStart(now - EVENT_MAX_AGE_MS) - 3_600_000) this.covered.delete(hour);
     }
     this.clock = Math.max(this.clock ?? now, now);
   }
@@ -368,18 +389,24 @@ export class OpsTraffic {
     return event;
   }
 
+  // How much to add to a reported (pressure) altitude for the height above sea level, from the QNH.
+  get correctionFt() {
+    return this.qnhHpa == null ? 0 : (this.qnhHpa - STANDARD_HPA) * FT_PER_HPA;
+  }
+
   // Landings and take-offs from the aircraft's newest report `p` and the one before it.
   #movement(entry, p, prev) {
     const track = this.#track(p, prev);
     const gate = this.elevationFt + LANDING_GATE_FT;
+    const alt = finite(p.alt) ? p.alt + this.correctionFt : null;
 
     // A landing that turns out to be a go-around is taken back.
-    if (entry.landing && !p.ground && finite(p.alt) && p.alt > this.elevationFt + GO_AROUND_FT && p.t - entry.landing.t < 5 * MIN_MS) {
+    if (entry.landing && !p.ground && alt != null && alt > this.elevationFt + GO_AROUND_FT && p.t - entry.landing.t < 5 * MIN_MS) {
       this.events = this.events.filter((e) => e !== entry.landing);
       entry.landing = null;
     }
 
-    if (!p.ground && track != null && finite(p.alt) && p.alt <= gate + 150 && (!entry.landing || p.t - entry.landing.t > SAME_AIRCRAFT_COOLDOWN_MS)) {
+    if (!p.ground && track != null && alt != null && alt <= gate + 150 && (!entry.landing || p.t - entry.landing.t > SAME_AIRCRAFT_COOLDOWN_MS)) {
       const descending = finite(p.vs) ? p.vs < -100 : prev != null && finite(prev.alt) && prev.alt > p.alt;
       const end =
         descending &&
@@ -396,13 +423,15 @@ export class OpsTraffic {
     }
 
     if (p.ground || !(entry.departure == null || p.t - entry.departure.t > SAME_AIRCRAFT_COOLDOWN_MS)) return;
+    // An aircraft that has just landed is not taking off: the ground flag flickers in the roll-out.
+    if (entry.landing && p.t - entry.landing.t < LANDED_COOLDOWN_MS) return;
     const near = nmBetween(this.airport, p) <= TAKEOFF_MAX_NM;
-    if (!near || (finite(p.alt) && p.alt > this.elevationFt + TAKEOFF_LOW_FT + 1000)) return;
+    if (!near || (alt != null && alt > this.elevationFt + TAKEOFF_LOW_FT + 1000)) return;
     // Seen on the ground at the airport, and flying now ...
     const wasOnGround = entry.points.some((q) => q.ground && nmBetween(this.airport, q) <= 2.5 && p.t - q.t <= 10 * MIN_MS);
     // ... or first seen low and climbing near a runway.
     const climbingOut =
-      entry.points.length === 1 && finite(p.alt) && p.alt <= this.elevationFt + TAKEOFF_LOW_FT && finite(p.vs) && p.vs >= TAKEOFF_CLIMB_FPM;
+      entry.points.length === 1 && alt != null && alt <= this.elevationFt + TAKEOFF_LOW_FT && finite(p.vs) && p.vs >= TAKEOFF_CLIMB_FPM;
     if (!wasOnGround && !climbingOut) return;
     const end = track == null ? null : matchEnd(this.ends, p, track, {
       alignDeg: TAKEOFF_ALIGN_DEG,
@@ -467,16 +496,25 @@ export class OpsTraffic {
       if (miles > INBOUND_RANGE_NM) continue;
       const here = isHere(this.airport, e.hint?.destination);
       if (e.hint?.destination && !here) continue;
+      // Military aircraft fly many things besides arriving; they count only when their route says so.
+      if (ac.military && !here) continue;
+      // One that took off here, or was seen on the ground here lately, is not coming in.
+      if (e.departure && now - e.departure.t < DEPARTED_MEMORY_MS) continue;
+      if (e.points.some((p) => p.ground && nmBetween(this.airport, p) <= 3)) continue;
+      // Close in, only a report this fresh will do: older, and it may have landed or gone out of range.
+      if (miles <= INBOUND_GUESS_NM && now - ac.seen > INBOUND_MAX_AGE_MS) continue;
 
       const prev = e.points.length > 1 ? e.points.at(-2) : null;
       const last = e.points.at(-1);
       const heading = finite(ac.track) ? ac.track : prev && last.t - prev.t <= STALE_MS && nmBetween(prev, last) >= 0.15 ? bearing(prev, last) : null;
       const offsetDeg = heading == null ? null : angleBetween(heading, bearing(pos, this.airport));
       const alt = finite(ac.altitudeFt) ? ac.altitudeFt : null;
+      // The height above sea level, for the height above the airport.
+      const trueAlt = alt == null ? null : alt + this.correctionFt;
       const vs = this.#verticalRate(e);
       const speed = finite(ac.speedKt) && ac.speedKt > 0 ? ac.speedKt : null;
       // At the surface of the airport, though not reported on the ground: arrived (or about to take off).
-      if (alt != null && miles < 3 && alt - this.elevationFt < 100) continue;
+      if (trueAlt != null && miles < 3 && trueAlt - this.elevationFt < 100) continue;
 
       if (here) {
         if (offsetDeg != null && offsetDeg > ROUTE_MAX_OFFSET_DEG) continue;
@@ -485,13 +523,14 @@ export class OpsTraffic {
         // same line, so it counts only when its route says it comes here.
         if (miles > INBOUND_GUESS_NM || offsetDeg == null || alt == null) continue;
         if (LIGHT_TYPES.test(ac.type ?? '') || ac.category === 'Light aircraft') continue;
-        const agl = alt - this.elevationFt;
+        const agl = trueAlt - this.elevationFt;
         if (agl > INBOUND_LEVEL_FT && !(vs != null && vs <= -DESCENT_FPM)) continue;
         if (vs != null && vs > DESCENT_FPM) continue;
         if ((agl / 1000) * NM_PER_1000_FT > miles + DESCENT_MARGIN_NM) continue;
         // ... and one this low so far out has already come down for another airport.
         if (miles > 5 && agl < (miles > 40 ? MIN_FT_PER_NM : MIN_FT_PER_NM / 2) * miles) continue;
-        const circuit = miles < 15 && agl < 5000;
+        // Close in and low, a descending aircraft may be on a downwind or base leg, heading any way.
+        const circuit = miles < 15 && agl < 5000 && vs != null && vs < -100;
         const allowed = miles > 40 ? 45 : miles > 15 ? 90 : circuit ? 180 : 90;
         if (offsetDeg > allowed) continue;
         if (!speed || speed < 80) continue;
@@ -521,6 +560,9 @@ export class OpsTraffic {
       within30: list.filter((a) => a.etaMin <= 30).length,
       between30and60: list.filter((a) => a.etaMin > 30).length,
       total: list.length,
+      // The later half hour is never complete: further than INBOUND_GUESS_NM only aircraft whose
+      // route is known are counted.
+      between30and60Complete: false,
       rangeNm: INBOUND_RANGE_NM,
     };
   }
@@ -538,7 +580,7 @@ export class OpsTraffic {
     const list = [];
     for (const e of this.tracked.values()) {
       if (!e.ac || e.points.length < HOLD_MIN_POINTS) continue;
-      const hold = detectHolding(e.points, e.ac, this.airport, now);
+      const hold = detectHolding(e.points, e.ac, this.airport, now, this.correctionFt);
       if (!hold) continue;
       const miles = nmBetween(this.airport, hold.centre);
       list.push({
@@ -583,8 +625,13 @@ export class OpsTraffic {
   }
 
   #movements(now) {
+    // The time monitored within the last day, from the hourly tallies (the part of the oldest hour
+    // before the day began is counted whole: an error of under an hour in 24).
+    let windowMs = 0;
+    for (const [hour, ms] of this.covered) if (hour + 3_600_000 > now - EVENT_MAX_AGE_MS) windowMs += ms;
     const make = (kind) => {
-      const events = this.events.filter((e) => e.kind === kind);
+      // Only the last day: the counts and the average are for the same stretch of time.
+      const events = this.events.filter((e) => e.kind === kind && now - e.t <= EVENT_MAX_AGE_MS);
       const runways = new Map();
       for (const e of events) {
         if (!e.runway) continue;
@@ -596,12 +643,12 @@ export class OpsTraffic {
       const used = [...runways.values()]
         .map((r) => ({ ...r, ageMin: Math.max(0, Math.round((now - r.lastAt) / MIN_MS)), active: now - r.lastAt <= RUNWAY_ACTIVE_MS }))
         .sort((a, b) => b.lastAt - a.lastAt);
-      const hours = this.monitoredMs / 3_600_000;
       return {
         total: events.length,
         lastHour: events.filter((e) => now - e.t <= 3_600_000).length,
-        // Average per hour over the time monitored, once that is long enough to mean anything.
-        perHour: this.monitoredMs >= 30 * MIN_MS ? Math.round((events.length / hours) * 10) / 10 : null,
+        // Average per hour over the time monitored in the same last day, once that is long enough
+        // to mean anything.
+        perHour: windowMs >= 30 * MIN_MS ? Math.round((events.length / (windowMs / 3_600_000)) * 10) / 10 : null,
         runways: used,
         inUse: used.filter((r) => r.active).map((r) => r.ident),
         lastAt: events.length ? Math.max(...events.map((e) => e.t)) : null,
@@ -609,7 +656,7 @@ export class OpsTraffic {
     };
     const byHour = [];
     if (this.since != null) {
-      for (let h = hourStart(this.since); h <= hourStart(now); h += 3_600_000) {
+      for (let h = Math.max(hourStart(this.since), hourStart(now - EVENT_MAX_AGE_MS)); h <= hourStart(now); h += 3_600_000) {
         const inHour = this.events.filter((e) => e.t >= h && e.t < h + 3_600_000);
         const covered = this.covered.get(h) ?? 0;
         byHour.push({
@@ -622,7 +669,7 @@ export class OpsTraffic {
         });
       }
     }
-    return { arrivals: make('arrival'), departures: make('departure'), byHour };
+    return { arrivals: make('arrival'), departures: make('departure'), byHour, windowMs, last24h: this.monitoredMs > EVENT_MAX_AGE_MS };
   }
 
   // What the feeds let this report say, and the notes to show with it.
@@ -647,7 +694,7 @@ export class OpsTraffic {
     notes.push(
       this.since == null
         ? 'Nothing monitored yet.'
-        : `Movement counts only cover the time this page has been open (since ${new Date(this.since).toISOString().slice(11, 16)} UTC${this.monitoredMs < now - this.since - MIN_MS ? ', with gaps' : ''}).`,
+        : `Counts and holding times only cover the time this page has been open (since ${sinceText(this.since, now)}${this.monitoredMs < now - this.since - MIN_MS ? ', with gaps' : ''})${this.monitoredMs > EVENT_MAX_AGE_MS ? '; per hour figures are for the last 24 hours' : ''}.`,
     );
     notes.push('Inbound times and runways in use are estimates from aircraft reports, not tower information.');
     return {
@@ -655,6 +702,8 @@ export class OpsTraffic {
       area: area ? { ...area, distanceNm: Math.round(away) } : null,
       inboundNm: inboundNm == null ? null : Math.round(inboundNm),
       holdingReliable,
+      // Whether monitoring has run long enough for "no aircraft holding" to mean something.
+      holdingReady: this.monitoredMs >= HOLD_READY_MS,
       movementsReliable,
       reportGapS: gap == null ? null : Math.round(gap),
       notes,
@@ -662,7 +711,16 @@ export class OpsTraffic {
   }
 }
 
-// The one-line fact for the Ops status strip: "12 inbound in 30 min · 2 holding".
+// When monitoring began, "10:40 UTC", with the date ("13 Oct 10:40 UTC") if that was not today.
+export function sinceText(since, now) {
+  const d = new Date(since);
+  const clock = `${d.toISOString().slice(11, 16)} UTC`;
+  if (d.toISOString().slice(0, 10) === new Date(now).toISOString().slice(0, 10)) return clock;
+  return `${d.getUTCDate()} ${d.toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' })} ${clock}`;
+}
+
+// The one-line fact for the Ops status strip: "12 inbound in 30 min · 2 holding". Holding is only
+// said when aircraft were seen holding: no holding seen says nothing in the first minutes.
 export function statusFact({ inbound, holding, coverage }) {
   const head = inbound.within30 ? `${inbound.within30} inbound in 30 min` : inbound.total ? `${inbound.total} inbound in 60 min` : 'No inbound traffic seen';
   const hold = coverage.holdingReliable && holding.count ? ` · ${holding.count} holding` : '';
@@ -676,15 +734,16 @@ export function summaryLine({ inbound, holding, movements, coverage }) {
   const parts = [];
   if (!inbound.total) parts.push('No inbound traffic seen.');
   else {
-    const later = inbound.between30and60 ? `, and ${inbound.between30and60} more in 30 to 60 min` : '';
+    // Beyond 100 NM only aircraft with a known route are counted, so the later half hour is a minimum.
+    const later = inbound.between30and60 ? `, and at least ${inbound.between30and60} more in 30 to 60 min` : '';
     parts.push(inbound.within30 ? `About ${inbound.within30} inbound in the next 30 min${later}.` : `About ${inbound.total} inbound in 30 to 60 min.`);
   }
   if (!coverage.holdingReliable) parts.push('Holding cannot be judged from this data.');
-  else if (!holding.count) parts.push('No aircraft holding.');
+  else if (!holding.count) parts.push(coverage.holdingReady ? 'No aircraft holding.' : 'Still watching for holding: it needs a few minutes of reports.');
   else {
     const where = list(holding.stacks.map((s) => `${s.count} ${s.direction} ${s.distanceNm} NM out`));
     const longest = Math.max(...holding.stacks.map((s) => s.longestMinutes));
-    parts.push(`${holding.count} holding, ${where}, the longest about ${longest} min.`);
+    parts.push(`${holding.count} holding, ${where}, the longest seen holding for at least ${longest} min.`);
   }
   const arr = movements.arrivals.inUse;
   const dep = movements.departures.inUse;

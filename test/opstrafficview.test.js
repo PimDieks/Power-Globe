@@ -47,7 +47,7 @@ function report(over = {}) {
         { hour: Date.UTC(2026, 9, 14, 11), arrivals: 12, departures: 10, monitoredMs: 60 * MIN, partial: false },
       ],
     },
-    coverage: { holdingReliable: true, movementsReliable: true, notes: ['Movement counts only cover the time this page has been open (since 10:40 UTC).'] },
+    coverage: { holdingReliable: true, holdingReady: true, movementsReliable: true, notes: ['Counts and holding times only cover the time this page has been open (since 10:40 UTC).'] },
     status: '6 inbound in 30 min · 3 holding',
     summary: 'About 6 inbound in the next 30 min, and 5 more in 30 to 60 min.',
   };
@@ -75,7 +75,7 @@ describe('the section', () => {
   it('says the summary and the counts for the two half hours', () => {
     expect(html).toContain('About 6 inbound in the next 30 min');
     expect(html).toContain('<b>6</b> in 0 to 30 min');
-    expect(html).toContain('<b>5</b> in 30 to 60 min');
+    expect(html).toContain('<b>at least 5</b> in 30 to 60 min');
   });
 
   it('lists the first eight inbound aircraft, compactly, and counts the rest', () => {
@@ -93,8 +93,8 @@ describe('the section', () => {
   });
 
   it('describes the holding stacks: where, how many, how high and for how long', () => {
-    expect(html).toContain('<b>2 aircraft</b> NE of the airport, 38 NM out, 8,000 ft to 9,000 ft, the longest about 14 min');
-    expect(html).toContain('<b>1 aircraft</b> SW of the airport, 30 NM out, 7,000 ft, the longest about 3 min');
+    expect(html).toContain('<b>2 aircraft</b> NE of the airport, 38 NM out, 8,000 ft to 9,000 ft, the longest seen holding for at least 14 min');
+    expect(html).toContain('<b>1 aircraft</b> SW of the airport, 30 NM out, 7,000 ft, the longest seen holding for at least 3 min');
   });
 
   it('names the runways in use with when they were last seen, and marks the stale one as not in use', () => {
@@ -127,6 +127,27 @@ describe('the section', () => {
     const quiet = trafficBodyHtml(data({ inbound: { list: [], total: 0, within30: 0, between30and60: 0 }, holding: { count: 0, list: [], stacks: [] } }), { formatTick });
     expect(quiet).toContain('No inbound traffic seen.');
     expect(quiet).toContain('No aircraft holding.');
+  });
+
+  it('says "not known" for the later half hour when none is counted, and "at least" when some are', () => {
+    const none = trafficBodyHtml(data({ inbound: { list: [], total: 0, within30: 4, between30and60: 0 } }), { formatTick });
+    expect(none).toContain('<b>not known</b> for 30 to 60 min');
+    expect(none).toContain('title="Aircraft further than 100 NM are only counted when their route is known"');
+    expect(none).not.toContain('<b>0</b> in 30 to 60 min');
+    expect(html).not.toContain('not known');
+  });
+
+  it('says it is still watching for holding in the first minutes, rather than that none is holding', () => {
+    const early = trafficBodyHtml(data({ holding: { count: 0, list: [], stacks: [] }, coverage: { holdingReliable: true, holdingReady: false, movementsReliable: true, notes: [] } }), { formatTick });
+    expect(early).toContain('Still watching');
+    expect(early).not.toContain('No aircraft holding');
+  });
+
+  it('words holding times as minimums counted from when the page opened', () => {
+    expect(html).toContain('>14+ min</span>');
+    expect(html).toContain('title="Seen holding for at least 14 min"');
+    expect(html).toContain('Holding times are minimums: they count from when this page saw the aircraft start holding.');
+    expect(trafficBodyHtml(data({ holding: { count: 0, list: [], stacks: [] } }), { formatTick })).not.toContain('Holding times are minimums');
   });
 
   it('escapes what the aircraft report', () => {
@@ -232,7 +253,7 @@ describe('the part', () => {
   const quiet = { setTimer: vi.fn(() => 7), clearTimer: vi.fn() };
   // An aircraft coming in 60 miles east of Schiphol, as the area feed gives it.
   const inbound = (id = 'inb1', seen = Date.now()) => ({ id, callsign: 'KLM1', type: 'B738', category: 'Large aircraft', lat: 52.3086, lng: 4.7639 + 60 / (60 * Math.cos((52.3086 * Math.PI) / 180)), altitudeFt: 9000, onGround: false, speedKt: 250, track: 270, verticalFpm: -1500, military: false, seen });
-  const context = (src, airport = () => EHAM) => () => ({ airport: airport(), now: Date.now(), formatTick, trafficSource: src });
+  const context = (src, airport = () => EHAM, observation = null) => () => ({ airport: airport(), now: Date.now(), formatTick, trafficSource: src, observation });
 
   it('is in the Ops parts, after the runway, visibility and lightning parts', () => {
     expect(OPS_PARTS.map((p) => p.id)).toEqual(['runway', 'visibility', 'lightning', 'traffic']);
@@ -352,6 +373,22 @@ describe('the part', () => {
     unbind();
     bind(second.root, { getContext: context(src, () => EGLL), rerender: vi.fn() }, quiet);
     expect(opsPanelHtml([trafficPart], { ...ctx, airport: EGLL })).not.toContain('KLM1');
+  });
+
+  it('gives the monitor the QNH of the METAR: a landing in a deep low is seen only with it', () => {
+    // 2.5 miles out on the 27 approach, 850 ft true, reading 2,018 ft at the standard setting.
+    const landing = () => ({ id: 'low1', callsign: 'LOW1', category: 'Large aircraft', lat: 52.3184, lng: 4.79689 + 2.5 / (60 * Math.cos((52.3184 * Math.PI) / 180)), altitudeFt: 2018, onGround: false, speedKt: 140, track: 267, verticalFpm: -700, military: false, seen: Date.now() });
+    const run = (observation) => {
+      const src = source();
+      bind(page().root, { getContext: context(src, () => EHAM, observation), rerender: vi.fn() }, quiet);
+      src.list = [landing()];
+      src.emit({ area: { lat: 52.25, lng: 4.75, nm: 125 }, name: 'adsb.lol' });
+      const use = src.overlays.at(-1).runwayUse.ends;
+      forgetTraffic();
+      return use;
+    };
+    expect(Object.keys(run({ qnh: 970 }))).toEqual(['27']);
+    expect(run(null)).toEqual({});
   });
 
   it('draws the section again on a timer, whether or not the feed answered', () => {

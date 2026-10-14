@@ -100,15 +100,19 @@ function inboundHtml(inbound) {
 
 function holdingHtml(holding, coverage) {
   if (!coverage.holdingReliable) return '<p class="ops-empty">Holding cannot be judged from this data.</p>';
-  if (!holding.count) return '<p class="ops-empty">No aircraft holding.</p>';
+  if (!holding.count) {
+    return coverage.holdingReady
+      ? '<p class="ops-empty">No aircraft holding.</p>'
+      : '<p class="ops-empty">Still watching: holding needs a few minutes of reports to be seen, so none seen yet says little.</p>';
+  }
   return `<ul class="ops-stacks">${holding.stacks
     .map((s) => {
       const heights = s.minAltitudeFt === s.maxAltitudeFt ? heightText(s.minAltitudeFt) : `${heightText(s.minAltitudeFt)} to ${heightText(s.maxAltitudeFt)}`;
       const flights = s.aircraft
-        .map((h) => flightButton(h, `<span class="ops-flight-call">${escapeHtml(h.callsign || h.id.toUpperCase())}</span><span>${escapeHtml(h.type || '')}</span><span>${heightText(h.altitudeFt)}</span><span>${h.minutes} min</span>`))
+        .map((h) => flightButton(h, `<span class="ops-flight-call">${escapeHtml(h.callsign || h.id.toUpperCase())}</span><span>${escapeHtml(h.type || '')}</span><span>${heightText(h.altitudeFt)}</span><span title="Seen holding for at least ${h.minutes} min">${h.minutes}+ min</span>`))
         .map((b) => `<li>${b}</li>`)
         .join('');
-      return `<li><p class="ops-stack"><b>${plural(s.count, 'aircraft', 'aircraft')}</b> ${s.direction} of the airport, ${s.distanceNm} NM out, ${heights}, the longest about ${s.longestMinutes} min</p><ul class="ops-flights ops-flights-holding">${flights}</ul></li>`;
+      return `<li><p class="ops-stack"><b>${plural(s.count, 'aircraft', 'aircraft')}</b> ${s.direction} of the airport, ${s.distanceNm} NM out, ${heights}, the longest seen holding for at least ${s.longestMinutes} min</p><ul class="ops-flights ops-flights-holding">${flights}</ul></li>`;
     })
     .join('')}</ul>`;
 }
@@ -149,8 +153,15 @@ function hoursHtml(movements, coverage, ctx) {
 // The body of the section for the data of `analyse`.
 export function trafficBodyHtml(data, ctx) {
   const { report } = data;
-  const counts = `<p class="ops-counts"><span><b>${report.inbound.within30}</b> in 0 to 30 min</span><span><b>${report.inbound.between30and60}</b> in 30 to 60 min</span></p>`;
+  // Beyond 100 NM only aircraft with a known route are counted, so the later half hour is a
+  // minimum at best: said so, rather than a number that looks complete.
+  const later = report.inbound.between30and60;
+  const laterText = later
+    ? `<span><b>at least ${later}</b> in 30 to 60 min</span>`
+    : '<span class="ops-unknown" title="Aircraft further than 100 NM are only counted when their route is known"><b>not known</b> for 30 to 60 min</span>';
+  const counts = `<p class="ops-counts"><span><b>${report.inbound.within30}</b> in 0 to 30 min</span>${laterText}</p>`;
   const notes = [...report.coverage.notes];
+  if (report.holding.count) notes.push('Holding times are minimums: they count from when this page saw the aircraft start holding.');
   if (data.error) notes.unshift(`The flight feed did not answer (${data.error}).`);
   if (data.watching) notes.unshift(`Watching ${WATCH_NM} NM around the airport, asking the area feed every 15 s.`);
   if (data.watching && !data.layerOn) notes.push('Flights are switched off in the controls, so the aircraft are not marked on the map.');
@@ -248,7 +259,7 @@ function onFeed(event) {
   else {
     session.error = null;
     const list = session.source.aircraft();
-    session.monitor.update(list, { now: Date.now(), area: event.area, hints: routeHints(list, session.airport) });
+    session.monitor.update(list, { now: Date.now(), area: event.area, hints: routeHints(list, session.airport), qnhHpa: ctx.observation?.qnh });
   }
   publish();
   refreshView();

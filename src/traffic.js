@@ -126,6 +126,14 @@ export function snapArea({ lat, lng, nm }) {
   return { lat: Math.round(lat * 4) / 4, lng: Math.round(lng * 4) / 4, nm: Math.min(MAX_AREA_NM, Math.max(25, Math.ceil(nm / 25) * 25)) };
 }
 
+// The area around the view counts as the watched area's answer if it answered this lately.
+const VIEW_COVERS_MS = 20_000;
+// The watch asks a provider directly (when the API will not do) once a minute at most.
+const DIRECT_SPARING_MS = 60_000;
+
+// Whether circle `outer` ({ lat, lng, nm }) holds circle `inner`.
+export const areaCovers = (outer, inner) => greatCircleNm(outer, inner) + inner.nm <= outer.nm;
+
 // Stack areas drawn at most (the Ops tab's holding stacks), and how many points a circle has.
 const MAX_STACK_CIRCLES = 4;
 const CIRCLE_POINTS = 48;
@@ -306,6 +314,10 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
   const inFlight = new Set();
   // An area kept up to date for the Ops tab (see watchArea), and who wants to hear of its answers.
   const watch = { area: null, next: 0 };
+  // The last answer for the area around the view ({ at, area (snapped), name }), and when the
+  // browser last asked a provider directly (any feed), for the watch to go easy on that.
+  let viewAnswer = null;
+  let lastDirectAt = 0;
   const listeners = new Set();
   // What the Ops tab marks (see setOverlay): ids of aircraft arriving soon and of those holding,
   // the holding ones again as a list to put a ring around, and the circles of the stacks.
@@ -325,7 +337,10 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
   let worker = null;
 
   // ADS-B Exchange style feeds: the one that worked last, else the next.
-  async function fromProviders(urlFor, proxyPath) {
+  // `sparing`: for a feed that is only extra (the Ops watch): it asks the browser's own way (straight
+  // from the providers) once a minute at most, counting the calls of every feed, and then of one
+  // provider, so it adds little when the API is in a cool-off for the flight feeds.
+  async function fromProviders(urlFor, proxyPath, { sparing = false } = {}) {
     // The Power Globe API asks the feeds server-side; most feeds do not answer web pages.
     let proxyError = null;
     if (PROXY_URL) {
@@ -337,9 +352,13 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
         proxyError = err;
       }
     }
+    if (sparing && Date.now() - lastDirectAt < DIRECT_SPARING_MS) {
+      throw new Error(proxyError ? `Power Globe API: ${proxyError.message}` : 'asking the feeds directly is paused for now');
+    }
     const failures = [];
-    for (let k = 0; k < ADSB_PROVIDERS.length; k++) {
+    for (let k = 0; k < (sparing ? 1 : ADSB_PROVIDERS.length); k++) {
       const i = (provider + k) % ADSB_PROVIDERS.length;
+      lastDirectAt = Date.now();
       try {
         const data = await fetchJson(urlFor(ADSB_PROVIDERS[i]));
         provider = i;
@@ -426,6 +445,9 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
         areaFailed = false;
         status.area = `In view from ${name}, ${timeText()}`;
         nextArea = Date.now() + AREA_MS;
+        viewAnswer = { at: Date.now(), area: snapArea({ ...center, nm }), name };
+        // An answer that covers the watched area is the watch's answer too.
+        if (watch.area && areaCovers(viewAnswer.area, watch.area)) notify({ area: viewAnswer.area, name });
       } catch (err) {
         console.error(err);
         areaFailed = true;
@@ -435,22 +457,43 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
     });
   }
 
+  // Tells the listeners of the watched area (see subscribe); one that throws does not stop the others,
+  // and is not taken for a failure of the feed.
+  function notify(event) {
+    for (const fn of listeners) {
+      try {
+        fn(event);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+  }
+
+  // Whether the area asked for the view answered lately and covers the watched one, which then
+  // needs no request of its own.
+  function viewCoversWatch(wall) {
+    return Boolean(viewAnswer && wall - viewAnswer.at < VIEW_COVERS_MS && watch.area && areaCovers(viewAnswer.area, watch.area));
+  }
+
   // The area watched for the Ops tab, apart from the one around the middle of the view.
   function loadWatch() {
     const area = watch.area;
     return once('watch', async () => {
+      let event;
       try {
-        const { data, name } = await fromProviders((p) => p.area(area.lat, area.lng, area.nm), `/flights/area?lat=${area.lat}&lon=${area.lng}&nm=${area.nm}`);
+        const { data, name } = await fromProviders((p) => p.area(area.lat, area.lng, area.nm), `/flights/area?lat=${area.lat}&lon=${area.lng}&nm=${area.nm}`, { sparing: true });
         addAircraft(fromAdsb(data), name);
+        // The area watched has changed since: this answer is for another.
         if (watch.area !== area) return;
         watch.next = Date.now() + AREA_MS;
-        for (const fn of listeners) fn({ area, name });
+        event = { area, name };
       } catch (err) {
         console.error(err);
         if (watch.area !== area) return;
         watch.next = Date.now() + FEED_RETRY_MS;
-        for (const fn of listeners) fn({ error: explain(err) });
+        event = { error: explain(err) };
       }
+      notify(event);
     });
   }
 
@@ -691,7 +734,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
         const moved = lastArea && !areaFailed && greatCircleNm(lastArea, pov) > lastArea.nm / 2;
         if (wall >= nextArea || moved) loadArea(pov);
       }
-      if (watch.area && wall >= watch.next) loadWatch();
+      if (watch.area && wall >= watch.next && !viewCoversWatch(wall)) loadWatch();
     }
     resize(pov.altitude);
     drawAircraft(Date.now());

@@ -349,6 +349,85 @@ describe('traffic on the globe', () => {
       expect(heard).toHaveLength(1);
     });
 
+    it('does not report an answer for an area that is no longer watched (the stale-answer guard)', async () => {
+      stored = { flights: false };
+      start();
+      const heard = [];
+      traffic.subscribe((e) => heard.push(e));
+      let moved = false;
+      fetch.mockImplementation(async (url) => {
+        // The watch is pointed elsewhere while its first request is under way.
+        if (!moved && /lat=52.25&lon=4.75&nm=200/.test(url)) {
+          moved = true;
+          traffic.watchArea({ lat: 40, lng: -3, nm: 100 });
+        }
+        return { ok: true, json: async () => feed([klm()]) };
+      });
+      traffic.watchArea(EHAM);
+      await run(300);
+      expect(moved).toBe(true);
+      expect(heard.map((e) => e.area?.lat)).not.toContain(52.25);
+      expect(heard.map((e) => e.area?.lat)).toContain(40);
+    });
+
+    it('does not take a listener that throws for a failure of the feed, nor stop the others', async () => {
+      stored = { flights: false };
+      start();
+      const heard = [];
+      traffic.subscribe(() => {
+        throw new Error('a bug in a listener');
+      });
+      traffic.subscribe((e) => heard.push(e));
+      traffic.watchArea(EHAM);
+      await run(300);
+      expect(heard).toHaveLength(1);
+      expect(heard[0].error).toBeUndefined();
+      expect(heard[0].area).toEqual({ lat: 52.25, lng: 4.75, nm: 200 });
+      // And it was asked for again in 15 seconds, not after the minute of a failure.
+      await run(16_000);
+      expect(heard).toHaveLength(2);
+      expect(console.error).toHaveBeenCalledWith(expect.objectContaining({ message: 'a bug in a listener' }));
+    });
+
+    it('asks nothing of its own while the area around the view, answered lately, covers it, and passes that answer on', async () => {
+      const heard = [];
+      const pov = { lat: 52.3, lng: 4.76, altitude: 0.05 };
+      traffic.subscribe((e) => heard.push(e));
+      await run(300, pov);
+      // The view's area (150 NM after the API's rounding) holds the watch's 125.
+      traffic.watchArea({ lat: 52.3086, lng: 4.7639, nm: 125 });
+      await run(40_000, pov);
+      const urls = fetch.mock.calls.map((c) => c[0]);
+      expect(urls.some((u) => /nm=125/.test(u))).toBe(false);
+      expect(heard.length).toBeGreaterThanOrEqual(2);
+      expect(heard[0].area).toEqual({ lat: 52.25, lng: 4.75, nm: 150 });
+    });
+
+    it('asks for itself again once the view stops answering, or no longer covers the area', async () => {
+      const pov = { lat: 52.3, lng: 4.76, altitude: 0.05 };
+      await run(300, pov);
+      traffic.watchArea({ lat: 52.3086, lng: 4.7639, nm: 125 });
+      respond = () => new Error('Power Globe API: answered 502');
+      await run(40_000, pov);
+      expect(fetch.mock.calls.some((c) => /nm=125/.test(c[0]))).toBe(true);
+    });
+
+    it('adds at most one direct call to a provider a minute when the API will not answer', async () => {
+      stored = { flights: false };
+      start();
+      const direct = [];
+      fetch.mockImplementation(async (url) => {
+        if (/power-globe-api/.test(url)) return { ok: false, status: 429, json: async () => ({ error: 'cooling off' }) };
+        direct.push(Date.now());
+        return { ok: true, json: async () => feed([klm()]) };
+      });
+      traffic.watchArea(EHAM);
+      await run(3 * 60_000);
+      expect(direct.length).toBeGreaterThanOrEqual(2);
+      expect(direct.length).toBeLessThanOrEqual(4);
+      for (let i = 1; i < direct.length; i++) expect(direct[i] - direct[i - 1]).toBeGreaterThanOrEqual(60_000);
+    });
+
     it('tints the inbound aircraft and the holding ones, rings only the holding ones, and takes it all off', async () => {
       await run(300);
       const [planes, , , marks] = drawn.clouds;

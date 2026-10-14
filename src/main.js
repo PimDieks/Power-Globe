@@ -28,6 +28,7 @@ import { airportDetailsHtml, airportPlace, panelStays, verdictText } from './air
 import { setupWindCheck } from './windcheck.js';
 import { DETAIL_TABS, OPS_PARTS, createOpsHost, readTab, saveTab, tabAfterKey } from './ops.js';
 import { formatClock, formatClockShort, formatTick, zoneName } from './opsclock.js';
+import { afterDeselect, backAction, escapeAction, opsKeepsWatching, opsReturnFor } from './opsreturn.js';
 import { releaseLightning, setLightningOverlay } from './opslightningview.js';
 import { setupLightningOverlay } from './lightningmap.js';
 import { STATUS, assessAirport } from './runways.js';
@@ -249,9 +250,14 @@ const traffic = setupTraffic({
   onSelect: (item, title) => showTraffic(item, title),
   onDeselect: () => {
     stopFollowing();
-    if (!state.detail?.traffic) return;
-    state.detail = null;
+    const next = afterDeselect(state);
+    if (!next) return;
+    // The aircraft's panel goes, and the way back to an airport's Ops tab with it: the tab stops watching.
+    const returning = state.opsReturn;
+    Object.assign(state, next);
     els.details.classList.add('hidden');
+    syncDetailTabs();
+    if (returning) airportMap.select(null);
   },
   onFlightEnds: (ends) => mapFeatures.setFlightEnds(ends),
   announce: (message) => announce(message),
@@ -920,7 +926,7 @@ function showTraffic(item, title) {
   // Tapping the aircraft that is followed keeps following it.
   if (state.follow && !(item.kind === 'aircraft' && item.id === state.follow.id)) stopFollowing();
   // An aircraft picked while the Ops tab is open (or from the aircraft picked that way) can go back to the airport.
-  const back = item.kind === 'aircraft' ? (state.detail?.airport && state.detailTab === 'ops' ? state.detail : state.detail?.traffic ? state.opsReturn : null) : null;
+  const back = opsReturnFor(state, item);
   openSidePanel({ keepTraffic: true });
   windCheck.close();
   syncWindCheckButton();
@@ -1338,6 +1344,8 @@ function backToAirport() {
   airportMap.select(detail.airport);
   syncDetailTabs();
   renderDetails();
+  // Focus goes to the Ops tab it came from, the aircraft's button being gone.
+  document.getElementById('details-tab-ops')?.focus();
 }
 
 // Back from an airport to the wind check list, with focus on the airport just shown.
@@ -1440,7 +1448,7 @@ function syncDetailTabs() {
   }
   if (show && state.detailTab === 'ops') ops.mount();
   // An aircraft picked from the Ops tab leaves it watching, for the way back.
-  else if (!(state.detail?.traffic && state.opsReturn)) ops.unmount();
+  else if (!opsKeepsWatching(state)) ops.unmount();
 }
 
 function selectDetailTab(id) {
@@ -1598,7 +1606,7 @@ els.cloudsLoop.addEventListener('click', toggleCloudsLoop);
 els.cloudsLoop.hidden = state.basemap !== 'clouds';
 els.wind.addEventListener('change', invalidate);
 els.detailsClose.addEventListener('click', closeDetails);
-els.detailsBack.addEventListener('click', () => (state.detail?.traffic && state.opsReturn ? backToAirport() : backToWindCheck()));
+els.detailsBack.addEventListener('click', () => (backAction(state) === 'back-to-airport' ? backToAirport() : backToWindCheck()));
 els.windCheckOpen.addEventListener('click', () => {
   if (els.windCheck.panel.classList.contains('hidden')) openWindCheck();
   else closeWindCheck();
@@ -1619,9 +1627,11 @@ window.addEventListener('keydown', (event) => {
     els.creditsToggle.focus();
     return;
   }
-  if (state.follow) stopFollowing('Stopped following.');
-  else if (state.detail?.fromList) backToWindCheck();
-  else if (state.detail) closeDetails();
+  const action = escapeAction(state, { following: Boolean(state.follow) });
+  if (action === 'stop-following') stopFollowing('Stopped following.');
+  else if (action === 'back-to-airport') backToAirport();
+  else if (action === 'back-to-wind-check') backToWindCheck();
+  else if (action === 'close') closeDetails();
   else if (!els.windCheck.panel.classList.contains('hidden')) {
     closeWindCheck();
     els.windCheckOpen.focus();
