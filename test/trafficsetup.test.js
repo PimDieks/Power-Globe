@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTraffic } from '../src/traffic.js';
+import { clearFlightCaches } from '../src/flightroute.js';
+
+// The lines drawn for the selected aircraft, solid first, then dashed.
+const drawn = vi.hoisted(() => ({ lines: [] }));
 
 // The layers draw with three.js on a globe; these keep the numbers and nothing else.
 vi.mock('../src/trafficlayer.js', async (importOriginal) => {
@@ -18,7 +22,12 @@ vi.mock('../src/trafficlayer.js', async (importOriginal) => {
       place() {},
     };
   };
-  return { ...(await importOriginal()), aircraftLayer: cloud, satelliteLayer: cloud, selectionRing: cloud, orbitLine: () => ({ show() {}, hide() {} }) };
+  const line = () => {
+    const made = { visible: false, set() { this.visible = true; }, moveEnd() {}, moveStart() {}, hide() { this.visible = false; }, setViewport() {}, set dash(v) {}, set gap(v) {} };
+    drawn.lines.push(made);
+    return made;
+  };
+  return { ...(await importOriginal()), aircraftLayer: cloud, satelliteLayer: cloud, selectionRing: cloud, orbitLine: () => ({ show() {}, hide() {} }), flightLine: line };
 });
 
 const START = Date.parse('2026-10-14T12:00:00Z');
@@ -69,6 +78,8 @@ describe('traffic on the globe', () => {
   }
 
   beforeEach(() => {
+    clearFlightCaches();
+    drawn.lines.length = 0;
     vi.useFakeTimers();
     vi.setSystemTime(START);
     vi.stubGlobal('document', { hidden: false, createElement: () => ({ textContent: '' }) });
@@ -131,6 +142,81 @@ describe('traffic on the globe', () => {
       expect(traffic.selected).toMatchObject({ kind: 'aircraft', id: '484506' });
       expect(traffic.selectedAircraft()).toBeNull();
       expect(traffic.detailsHtml()).toContain('No longer received.');
+    });
+  });
+
+  describe('the lines of the selected aircraft', () => {
+    const KLM66A = { hex: 'aa0001', flight: 'KLM66A', lat: 51.9, lon: 1.2, alt_baro: 24000, gs: 450, track: 60, seen_pos: 1 };
+    const route = { airport_codes: 'EGLL-EHAM', _airports: [{ icao: 'EGLL', iata: 'LHR', name: 'London Heathrow Airport', lat: 51.4706, lon: -0.461941 }, { icao: 'EHAM', iata: 'AMS', name: 'Amsterdam Airport Schiphol', lat: 52.3086, lon: 4.76389 }] };
+    let asked;
+    // The track of this flight from Heathrow up to a little behind the aircraft, as OpenSky would give it now.
+    const flown = () => {
+      const now = Date.now() / 1000;
+      return { callsign: 'KLM66A', endTime: now - 120, points: [[now - 900, 51.4776, -0.4469, -300, 0], [now - 120, 51.85, 1.0, 15000, 0]] };
+    };
+
+    // Answers the feed as the other tests do, and tracks, routes and airports as the services do.
+    function services({ track = flown() } = {}) {
+      const feedFetch = globalThis.fetch;
+      asked = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url) => {
+          if (url.includes('/track?')) {
+            asked.push(url);
+            return { ok: true, json: async () => track };
+          }
+          if (url.includes('vrs-standing-data')) {
+            asked.push(url);
+            return { ok: true, status: 200, json: async () => route };
+          }
+          if (url.includes('airports.json')) {
+            return { ok: true, json: async () => ({ airports: [['EGLL', 'LHR', 'London Heathrow Airport', 'London', 'GB', 51.4706, -0.461941, 83, 1, 1, []]] }) };
+          }
+          return feedFetch(url);
+        }),
+      );
+    }
+
+    it('asks for nothing, and draws nothing, while no aircraft is selected', async () => {
+      respond = () => feed([KLM66A]);
+      services();
+      await run(1500);
+      expect(asked).toEqual([]);
+      expect(drawn.lines.every((line) => !line.visible)).toBe(true);
+    });
+
+    it('draws the lines when an aircraft is selected, asks for its track and route once, and removes them on deselecting', async () => {
+      respond = () => feed([KLM66A]);
+      services();
+      await run(300);
+      traffic.select({ kind: 'aircraft', id: 'aa0001' });
+      await run(1500);
+      expect(asked).toEqual(['https://power-globe-api.pimdieks.workers.dev/track?icao24=aa0001', 'https://vrs-standing-data.adsb.lol/routes/KL/KLM66A.json']);
+      const [past, ahead] = drawn.lines;
+      expect(past.visible).toBe(true);
+      expect(ahead.visible).toBe(true);
+      expect(traffic.flightInfo()).toMatchObject({ trackState: 'ok', from: { code: 'LHR' }, to: { code: 'AMS' } });
+      expect(traffic.detailsHtml()).toContain('Amsterdam Airport Schiphol (AMS)');
+      traffic.deselect();
+      expect(past.visible).toBe(false);
+      expect(ahead.visible).toBe(false);
+      expect(traffic.flightInfo()).toBeNull();
+      // Selected again soon after, it is not asked for again.
+      traffic.select({ kind: 'aircraft', id: 'aa0001' });
+      await run(1500);
+      expect(asked).toHaveLength(2);
+      expect(past.visible).toBe(true);
+    });
+
+    it('draws what it has seen of an aircraft whose track cannot be had', async () => {
+      respond = () => feed([{ ...KLM66A, hex: 'aa0002', flight: 'GLWLKR' }]);
+      services({ track: { points: [] } });
+      await run(300);
+      traffic.select({ kind: 'aircraft', id: 'aa0002' });
+      await run(1500);
+      expect(drawn.lines[0].visible).toBe(true);
+      expect(traffic.detailsHtml()).toContain('Track not available');
     });
   });
 

@@ -97,6 +97,7 @@
         <h2 id="details-title"></h2>
         <button id="details-follow" class="follow-button" type="button" hidden>Follow</button>
         <button id="details-pilot" class="follow-button" type="button" hidden>Pilot view</button>
+        <button id="details-minimise" class="follow-button" type="button" hidden>Minimise</button>
         <button id="details-close" class="icon-button" type="button">
           <span aria-hidden="true">✕</span><span class="visually-hidden">Close details</span>
         </button>
@@ -184,7 +185,11 @@
       </div>
     </div>
 
-    <footer class="attribution">
+    <!-- While the card is shown the credits fold away behind this button, which comes right before them for the Tab key. -->
+    <button id="credits-toggle" class="credits-toggle" type="button" aria-expanded="false" aria-controls="credits" aria-label="Map credits" hidden>
+      <span aria-hidden="true">i</span>
+    </button>
+    <footer class="attribution" id="credits">
       Weather by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> (CC BY 4.0) ·
       <span id="credit-basemap">Imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar,
       Earthstar Geographics and the GIS User Community; NASA Blue Marble</span> ·
@@ -193,10 +198,19 @@
       <a href="https://openflights.org/data.php" target="_blank" rel="noopener">OpenFlights</a> (ODbL) · METAR
       <a href="https://aviationweather.gov/" target="_blank" rel="noopener">NOAA AWC</a><span id="credit-flights" hidden>
         · Flights <a href="https://opensky-network.org/" target="_blank" rel="noopener">The OpenSky Network</a>,
-        <span id="credit-adsb">adsb.lol</span> (ODbL)</span><span id="credit-satellites" hidden>
+        <span id="credit-adsb">adsb.lol</span> (ODbL), routes <a href="https://github.com/vradarserver/standing-data" target="_blank" rel="noopener">VRS standing data</a> (CC0) via adsb.lol</span><span id="credit-satellites" hidden>
         · Satellites <a href="https://celestrak.org/" target="_blank" rel="noopener">CelesTrak</a></span>
     </footer>
 
+    <!-- Phones: while an aircraft is followed this card is all that is left of the panels (see followcard.js). -->
+    <section id="follow-card" class="follow-card" aria-label="Followed flight" hidden>
+      <button id="follow-card-open" class="follow-card-open" type="button">
+        <span id="follow-card-name" class="follow-card-name"></span>
+        <span id="follow-card-line" class="follow-card-line"></span>
+      </button>
+      <button id="follow-card-stop" class="follow-card-stop" type="button">Stop<span class="visually-hidden"> following</span></button>
+      <p id="follow-card-live" class="visually-hidden" role="status" aria-live="polite"></p>
+    </section>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

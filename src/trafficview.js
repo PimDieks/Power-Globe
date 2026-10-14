@@ -21,9 +21,16 @@ export function ago(ms) {
 // The name to show for an aircraft: its callsign, else its registration, else its address.
 export const aircraftName = (ac) => ac.callsign || ac.registration || ac.id.toUpperCase();
 
-export function aircraftDetailsHtml(ac, { position, now, locale }) {
+// An airport as the panel names it: "Amsterdam Airport Schiphol (AMS)".
+const airportText = (airport) => (airport.name ? `${airport.name} (${airport.code})` : airport.code);
+
+// `flight` is what the lines on the map know (see flightlines.js): where the aircraft came from
+// and, if its route fits, where it is going, and whether its track could be had.
+export function aircraftDetailsHtml(ac, { position, now, locale, flight }) {
   const rows = [];
   const row = (label, value) => value != null && value !== '' && rows.push(`<dt>${label}</dt><dd>${escapeHtml(value)}</dd>`);
+  row('From', flight?.from ? airportText(flight.from) : null);
+  row('To', flight?.to ? airportText(flight.to) : null);
   row('Altitude', ac.onGround ? 'On the ground' : ac.altitudeFt == null ? null : `${num(Math.round(ac.altitudeFt / 25) * 25, locale)} ft`);
   row('Ground speed', round(ac.speedKt) == null ? null : `${round(ac.speedKt)} kt`);
   row('Track', round(ac.track) == null ? null : `${String(round(ac.track)).padStart(3, '0')}°`);
@@ -44,7 +51,7 @@ export function aircraftDetailsHtml(ac, { position, now, locale }) {
   return `
     <p>${badges.join('')}Live ADS-B · last report ${ago(now - ac.seen)} via ${escapeHtml(ac.source ?? 'ADS-B')}${
       ac.onGround ? '' : '; position estimated since then from speed and track'
-    }</p>
+    }</p>${flight?.trackState === 'none' ? '<p>Track not available; the line shows where it has been since it was selected.</p>' : ''}
     <dl>${rows.join('')}</dl>`;
 }
 
