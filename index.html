@@ -16,7 +16,7 @@
     <link rel="preconnect" href="https://server.arcgisonline.com" crossorigin />
   </head>
   <body>
-    <main id="globe" aria-label="Weather globe" aria-describedby="globe-help"></main>
+    <main id="globe" aria-label="Weather globe" aria-describedby="globe-help" tabindex="-1"></main>
 
     <aside aria-label="Airport search, layers and display">
       <p id="globe-help" class="visually-hidden">
@@ -95,12 +95,14 @@
       </button>
       <div class="details-head">
         <h2 id="details-title"></h2>
-        <button id="details-follow" class="follow-button" type="button" hidden>Follow</button>
-        <button id="details-pilot" class="follow-button" type="button" hidden>Pilot view</button>
-        <button id="details-minimise" class="follow-button" type="button" hidden>Minimise</button>
-        <button id="details-close" class="icon-button" type="button">
-          <span aria-hidden="true">✕</span><span class="visually-hidden">Close details</span>
-        </button>
+        <div class="details-actions">
+          <button id="details-follow" class="follow-button" type="button" hidden>Follow</button>
+          <button id="details-pilot" class="follow-button" type="button" hidden>Pilot view</button>
+          <button id="details-minimise" class="follow-button" type="button" hidden>Minimise</button>
+          <button id="details-close" class="icon-button" type="button">
+            <span aria-hidden="true">✕</span><span class="visually-hidden">Close details</span>
+          </button>
+        </div>
       </div>
       <div id="details-body"></div>
     </aside>
@@ -208,6 +210,7 @@
         <span id="follow-card-name" class="follow-card-name"></span>
         <span id="follow-card-line" class="follow-card-line"></span>
       </button>
+      <button id="follow-card-pilot" class="follow-card-pilot" type="button">Pilot view</button>
       <button id="follow-card-stop" class="follow-card-stop" type="button">Stop<span class="visually-hidden"> following</span></button>
       <p id="follow-card-live" class="visually-hidden" role="status" aria-live="polite"></p>
     </section>

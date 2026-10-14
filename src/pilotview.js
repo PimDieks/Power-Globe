@@ -214,23 +214,53 @@ export function hazeBand({ height, aglM, lookDown, vfov, visKm, color }) {
   return { top: yHorizon - 2, height: height - yHorizon + 2, background: `linear-gradient(to bottom, ${stops.join(', ')})` };
 }
 
+// Which imagery the view shows by height above the ground: 'far' (levels up to 11 only) from far
+// up, 'normal', and 'fine' (the finest levels over it) within a few metres of the ground. Esri's
+// imagery changes source between levels 11 and 12, with a different tone, so a view that spans
+// both shows the sharper part as a pasted-on patch. From far up that patch is a large part of the
+// view, and the softer imagery alone looks better. Each tier is left only past a margin
+// (`previous` is the tier now), so the layers do not flicker on and off at a boundary.
+export const FAR_ABOVE_M = 4400;
+export const FAR_BELOW_M = 3600;
+export const FINE_BELOW_M = 15;
+export const FINE_ABOVE_M = 30;
+export function imageryTier(previous, aglM) {
+  if (previous === 'far') return aglM < FAR_BELOW_M ? 'normal' : 'far';
+  if (aglM > FAR_ABOVE_M) return 'far';
+  if (previous === 'fine') return aglM < FINE_ABOVE_M ? 'fine' : 'normal';
+  return aglM < FINE_BELOW_M ? 'fine' : 'normal';
+}
+
+// The point of view to give the traffic layer: the globe's own, but centred on the aircraft while
+// the pilot view is open. The globe is not drawn then and its view stays where it was, and the
+// flight feed for the area around the view would stop covering an aircraft that has flown on.
+export const trafficPov = (pov, position) => (position ? { ...pov, lat: position.lat, lng: position.lng } : pov);
+
+const LOADING = 'Loading the view…';
+
 // The overlay. `els`: root, map (where the view goes), title, status, terrain, close, button (the
-// details panel's "Pilot view" button), detailsClose, hud { alt, altUnit, gs, trk } and terrainCredit.
-// `traffic`: the traffic layer (selectedAircraft, selected, title). `background`: the page's other
-// elements, made inert while the overlay is open. `onOpen` and `onClose`: the globe's pause and
-// resume. `loadMap`: loads the map module (replaced in tests).
-export function setupPilotView({ els, traffic, background, onOpen, onClose, announce, loadMap = () => import('./pilotmap.js') }) {
+// details panel's "Pilot view" button), cardButton (the phone's follow card has one too),
+// detailsClose, hud { alt, altUnit, gs, trk } and terrainCredit. `traffic`: the traffic layer
+// (selectedAircraft, selected, title). `background`: the page's other elements, made inert while
+// the overlay is open. `onOpen` and `onClose`: the globe's pause and resume. `afterClose`: the
+// element that should get focus when the view closes, if the button it was opened from is not on
+// screen. `loadMap`: loads the map module (replaced in tests).
+export function setupPilotView({ els, traffic, background, onOpen, onClose, afterClose, announce, loadMap = () => import('./pilotmap.js') }) {
   let session = null;
   let inerted = [];
+
+  const showStatus = (mine) => {
+    els.status.textContent = mine.trouble || (mine.loaded ? '' : LOADING);
+  };
 
   function open() {
     const report = traffic.selectedAircraft();
     if (session || !report) return;
     const name = traffic.title(traffic.selected);
-    const mine = { id: report.id, name, pilot: startPilot(report), map: null, ground: null, readoutAt: -Infinity, raf: 0 };
+    const mine = { id: report.id, name, pilot: startPilot(report), map: null, ground: null, pose: null, loaded: false, trouble: '', readoutAt: -Infinity, raf: 0 };
     session = mine;
     els.title.textContent = name;
-    els.status.textContent = 'Loading the view…';
+    showStatus(mine);
     els.terrain.setAttribute('aria-pressed', 'true');
     els.terrain.textContent = 'Terrain: on';
     els.terrainCredit.hidden = false;
@@ -244,12 +274,21 @@ export function setupPilotView({ els, traffic, background, onOpen, onClose, anno
     (async () => {
       try {
         const module = await loadMap();
+        // Closed (and perhaps opened again) while the module loaded: nothing is made for this one.
+        if (session !== mine) return;
         const map = await module.createPilotMap({
           container: els.map,
           terrain: els.terrain.getAttribute('aria-pressed') === 'true',
-          onLoaded: () => session === mine && (els.status.textContent = ''),
+          onLoaded: () => {
+            mine.loaded = true;
+            if (session === mine) showStatus(mine);
+          },
+          onTrouble: (text) => {
+            mine.trouble = text;
+            if (session === mine) showStatus(mine);
+          },
         });
-        // Closed while it loaded.
+        // Closed while it was made.
         if (session !== mine) map.destroy();
         else mine.map = map;
       } catch (err) {
@@ -284,6 +323,7 @@ export function setupPilotView({ els, traffic, background, onOpen, onClose, anno
       return;
     }
     const pose = pilotStep(mine.pilot, report, now);
+    mine.pose = pose;
     const map = mine.map;
     let groundM = 0;
     if (map) {
@@ -306,26 +346,35 @@ export function setupPilotView({ els, traffic, background, onOpen, onClose, anno
     }
   }
 
-  // Closes the view and gives the globe back as it was. `message`: said to screen readers.
+  // Closes the view and gives the globe back as it was, whatever goes wrong on the way. `message`:
+  // said to screen readers.
   function close(message) {
     const mine = session;
     if (!mine) return;
     session = null;
     cancelAnimationFrame(mine.raf);
-    mine.map?.destroy();
-    els.root.hidden = true;
-    for (const el of inerted) el.inert = false;
-    inerted = [];
-    onClose();
-    if (message) announce(message);
-    // The focus goes back to the button that opened it, or to the panel's close button if the
-    // aircraft is gone and the button is off.
-    if (!els.button.hidden && traffic.selectedAircraft()) els.button.focus();
-    else els.detailsClose.focus();
+    try {
+      mine.map?.destroy();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      els.root.hidden = true;
+      for (const el of inerted) el.inert = false;
+      inerted = [];
+      onClose();
+      if (message) announce(message);
+      // The focus goes back to the button that opened it. If that is not on screen (the panel is
+      // closed, or the phone shows its card) or the aircraft is gone, somewhere that is.
+      const target = afterClose?.();
+      if (target) target.focus();
+      else if (!els.button.hidden && traffic.selectedAircraft()) els.button.focus();
+      else els.detailsClose.focus();
+    }
   }
 
-  // The button is in the details panel's header, which is not rebuilt every second like its body.
-  // It shows for an aircraft, and is off while the aircraft is not being received.
+  // The buttons are in the details panel's header, which is not rebuilt every second like its
+  // body, and on the phone's card. They show for an aircraft, and are off while the aircraft is not
+  // being received.
   let buttonKey = '';
   function sync() {
     const aircraft = traffic.selected?.kind === 'aircraft';
@@ -335,11 +384,13 @@ export function setupPilotView({ els, traffic, background, onOpen, onClose, anno
     buttonKey = key;
     els.button.hidden = !aircraft;
     els.button.disabled = !received;
+    if (els.cardButton) els.cardButton.disabled = !received;
     // A disabled button cannot keep focus: the panel's close button is the next stop.
     if (els.button.disabled && els.button.ownerDocument?.activeElement === els.button) els.detailsClose.focus();
   }
 
   els.button.addEventListener('click', open);
+  els.cardButton?.addEventListener('click', open);
   els.close.addEventListener('click', () => close());
   els.terrain.addEventListener('click', () => {
     if (!session) return;
@@ -351,5 +402,18 @@ export function setupPilotView({ els, traffic, background, onOpen, onClose, anno
     if (!on) session.ground = null;
   });
 
-  return { open, close, frame, sync, get isOpen() { return !!session; }, get map() { return session?.map ?? null; } };
+  return {
+    open,
+    close,
+    frame,
+    sync,
+    get isOpen() {
+      return !!session;
+    },
+    get map() {
+      return session?.map ?? null;
+    },
+    // Where the aircraft is now, { lat, lng }, or null when the view is not open.
+    position: () => (session?.pose ? { lat: session.pose.lat, lng: session.pose.lng } : null),
+  };
 }

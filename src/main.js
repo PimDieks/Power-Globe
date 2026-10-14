@@ -27,7 +27,7 @@ import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
 import { DragTracker, dragged, followStep, startFollow, stopReason, shiftedLat, visibleShift } from './follow.js';
-import { setupPilotView } from './pilotview.js';
+import { setupPilotView, trafficPov } from './pilotview.js';
 import { CARD_REFRESH_MS, cardText, focusTarget, followLayout, freeArea, spokenDue, spokenText } from './followcard.js';
 import { latestObservation } from './metar.js';
 import { explain } from './api.js';
@@ -104,6 +104,7 @@ const els = {
   followCardName: document.getElementById('follow-card-name'),
   followCardLine: document.getElementById('follow-card-line'),
   followCardStop: document.getElementById('follow-card-stop'),
+  followCardPilot: document.getElementById('follow-card-pilot'),
   followCardLive: document.getElementById('follow-card-live'),
   creditsToggle: document.getElementById('credits-toggle'),
   traffic: {
@@ -236,6 +237,7 @@ const pilot = setupPilotView({
     terrainCredit: document.getElementById('pilot-terrain-credit'),
     close: document.getElementById('pilot-close'),
     button: els.detailsPilot,
+    cardButton: els.followCardPilot,
     detailsClose: els.detailsClose,
     hud: {
       alt: document.getElementById('pilot-alt'),
@@ -248,6 +250,12 @@ const pilot = setupPilotView({
   background: () => [...document.body.children].filter((el) => !['pilot', 'announcer'].includes(el.id) && el.tagName !== 'SCRIPT'),
   onOpen: () => globe.pauseAnimation(),
   onClose: () => globe.resumeAnimation(),
+  // Where focus goes when the view closes and the button it was opened from is not on screen.
+  afterClose: () => {
+    if (!traffic.selectedAircraft()) return els.globe;
+    if (followLayoutNow === 'card') return els.followCardPilot;
+    return els.details.classList.contains('hidden') ? els.globe : null;
+  },
   announce: (message) => announce(message),
 });
 const windCheck = setupWindCheck({
@@ -558,7 +566,7 @@ function tick(now) {
   // Live traffic is extra: a problem with it must not stop the globe.
   try {
     updateFollow();
-    traffic.frame(now, globe.pointOfView());
+    traffic.frame(now, trafficPov(globe.pointOfView(), pilot.position()));
   } catch (err) {
     console.error(err);
   }

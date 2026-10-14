@@ -84,6 +84,11 @@ body {
   z-index: 0;
 }
 
+/* Focus can be sent here (when a view closes and nothing else is on screen), not seen. */
+#globe:focus {
+  outline: none;
+}
+
 /* Zoomed-in wind particles, drawn over the globe at screen resolution. */
 .flow-overlay {
   position: fixed;
@@ -552,15 +557,25 @@ input:disabled {
 
 .details-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
   margin: -4px -6px 6px 0;
 }
 
+/* The title takes a row of its own when the buttons would leave it too little room to read. */
 .details-head h2 {
-  flex: 1;
+  flex: 1 1 9rem;
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.details-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .follow-button {
@@ -1325,13 +1340,15 @@ body:not(.idle) #caption {
 .pilot {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  /* Over everything, the phone's credits button included. */
+  z-index: 30;
   background: #0b1220;
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
-.pilot .pilot-map {
+.pilot .pilot-map,
+.pilot .pilot-map-host {
   position: absolute;
   inset: 0;
 }
@@ -1590,6 +1607,16 @@ body:not(.idle) #caption {
   font-size: 0.85rem;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* Two short lines, so that the card still leaves room for the name on a narrow phone. */
+.follow-card-pilot {
+  flex: none;
+  max-width: 4.5rem;
+  min-height: 48px;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  line-height: 1.15;
 }
 
 .follow-card-stop {

@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { estimatePosition } from '../src/aircraft.js';
 import {
   EYE_HEIGHT_M,
+  FAR_ABOVE_M,
+  FAR_BELOW_M,
+  FINE_ABOVE_M,
+  FINE_BELOW_M,
   LOD_HIGH_M,
   LOD_NEAR_GROUND_M,
   MAX_ALTITUDE_ESTIMATE_S,
@@ -11,9 +15,11 @@ import {
   eyeAltitudeM,
   formatReadout,
   hazeBand,
+  imageryTier,
   pilotStep,
   setupPilotView,
   startPilot,
+  trafficPov,
   viewProfile,
 } from '../src/pilotview.js';
 
@@ -303,6 +309,38 @@ describe('hazeBand', () => {
   });
 });
 
+describe('imageryTier', () => {
+  it('is the normal imagery between the ground and far up', () => {
+    expect(imageryTier('normal', 1000)).toBe('normal');
+    expect(imageryTier('normal', FINE_BELOW_M + 1)).toBe('normal');
+    expect(imageryTier('normal', FAR_ABOVE_M - 1)).toBe('normal');
+  });
+
+  it('is the finest close to the ground, and stays so until clear of it', () => {
+    expect(imageryTier('normal', FINE_BELOW_M - 1)).toBe('fine');
+    expect(imageryTier('fine', FINE_ABOVE_M - 1)).toBe('fine');
+    expect(imageryTier('fine', FINE_ABOVE_M + 1)).toBe('normal');
+  });
+
+  it('is the coarse levels only from far up, and stays so until well below', () => {
+    expect(imageryTier('normal', FAR_ABOVE_M + 1)).toBe('far');
+    expect(imageryTier('far', FAR_BELOW_M + 1)).toBe('far');
+    expect(imageryTier('far', FAR_BELOW_M - 1)).toBe('normal');
+    expect(imageryTier('fine', FAR_ABOVE_M + 1)).toBe('far');
+  });
+});
+
+describe('trafficPov', () => {
+  it('is the view of the globe when the pilot view is not open', () => {
+    const pov = { lat: 10, lng: 20, altitude: 1.5 };
+    expect(trafficPov(pov, null)).toBe(pov);
+  });
+
+  it('is centred on the aircraft, at the altitude of the globe, when it is', () => {
+    expect(trafficPov({ lat: 10, lng: 20, altitude: 1.5 }, { lat: 52, lng: 4 })).toEqual({ lat: 52, lng: 4, altitude: 1.5 });
+  });
+});
+
 // The overlay, with the page, the traffic layer and the map made up.
 describe('the overlay', () => {
   const element = (extra = {}) => {
@@ -506,7 +544,7 @@ describe('the overlay', () => {
     expect(els.hud.gs.textContent).toBe('450');
   });
 
-  it('frees a map that was still loading when the view was closed', async () => {
+  it('frees a map that was still being made when the view was closed', async () => {
     let finish;
     view = setupPilotView({
       els,
@@ -515,9 +553,10 @@ describe('the overlay', () => {
       onOpen() {},
       onClose() {},
       announce() {},
-      loadMap: () => new Promise((resolve) => (finish = () => resolve({ createPilotMap: async () => fakeMap() }))),
+      loadMap: async () => ({ createPilotMap: () => new Promise((resolve) => (finish = () => resolve(fakeMap()))) }),
     });
     view.open();
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
     view.close();
     finish();
     await vi.waitFor(() => expect(maps.length).toBe(1));
@@ -551,6 +590,120 @@ describe('the overlay', () => {
     els.terrain.click();
     expect(maps[0].terrain).toEqual([false, true]);
     expect(els.terrainCredit.hidden).toBe(false);
+  });
+
+  it('does not start a map for a view that was closed and opened again while the module loaded', async () => {
+    const gates = [];
+    const created = [];
+    view = setupPilotView({
+      els,
+      traffic,
+      background: () => [],
+      onOpen() {},
+      onClose() {},
+      announce() {},
+      loadMap: () => new Promise((resolve) => gates.push(() => resolve({ createPilotMap: async (options) => created.push(options) && fakeMap() }))),
+    });
+    view.open();
+    view.close();
+    view.open();
+    expect(gates).toHaveLength(2);
+    // The first load ends after the second view was asked for: it must make nothing.
+    gates[0]();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(created).toHaveLength(0);
+    gates[1]();
+    await vi.waitFor(() => expect(view.map).not.toBeNull());
+    expect(created).toHaveLength(1);
+    expect(maps).toHaveLength(1);
+    expect(maps[0].destroyed).toBe(0);
+  });
+
+  it('closes completely even when freeing the map fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await opened();
+    maps[0].destroy = () => {
+      throw new Error('lost context');
+    };
+    view.close();
+    expect(view.isOpen).toBe(false);
+    expect(els.root.hidden).toBe(true);
+    expect(view.page.every((el) => !el.inert)).toBe(true);
+    expect(calls).toEqual(['open', 'close']);
+  });
+
+  it('says in the overlay when tiles stop coming, and when they come again', async () => {
+    let options;
+    view = setupPilotView({
+      els,
+      traffic,
+      background: () => [],
+      onOpen() {},
+      onClose() {},
+      announce() {},
+      loadMap: async () => ({ createPilotMap: async (o) => ((options = o), fakeMap()) }),
+    });
+    view.open();
+    expect(els.status.textContent).toBe('Loading the view…');
+    await vi.waitFor(() => expect(view.map).not.toBeNull());
+    options.onLoaded();
+    expect(els.status.textContent).toBe('');
+    options.onTrouble('Imagery unavailable');
+    expect(els.status.textContent).toBe('Imagery unavailable');
+    options.onTrouble('');
+    expect(els.status.textContent).toBe('');
+  });
+
+  it('gives the traffic layer the aircraft as its point of view while open, and the globe otherwise', async () => {
+    expect(view.position()).toBeNull();
+    await opened();
+    view.frame(Date.now(), 0);
+    const position = view.position();
+    expect(position.lat).toBeCloseTo(52, 1);
+    const pov = { lat: 0, lng: 0, altitude: 1 };
+    expect(trafficPov(pov, position)).toMatchObject({ lat: position.lat, lng: position.lng, altitude: 1 });
+    view.close();
+    expect(trafficPov(pov, view.position())).toBe(pov);
+  });
+
+  it('keeps the point of view with the aircraft as it flies on, though no report comes', async () => {
+    await opened();
+    view.frame(Date.now(), 0);
+    const first = view.position();
+    // 450 kt due east: a minute later it is about 14 km on.
+    view.frame(Date.now() + 60_000, 200);
+    const later = view.position();
+    expect(later.lng).toBeGreaterThan(first.lng + 0.15);
+  });
+
+  it('puts focus where it can be seen when the button it was opened from is not', async () => {
+    const card = element();
+    view = setupPilotView({
+      els: { ...els, cardButton: card },
+      traffic,
+      background: () => [],
+      onOpen() {},
+      onClose() {},
+      afterClose: () => card,
+      announce() {},
+      loadMap: async () => ({ createPilotMap: async () => fakeMap() }),
+    });
+    card.click();
+    expect(view.isOpen).toBe(true);
+    view.close();
+    expect(card.focused).toBe(1);
+    expect(els.button.focused).toBe(0);
+  });
+
+  it('can be opened from the phone card button, which is off while the aircraft is not received', () => {
+    const card = element();
+    view = setupPilotView({ els: { ...els, cardButton: card }, traffic, background: () => [], onOpen() {}, onClose() {}, announce() {}, loadMap: async () => ({ createPilotMap: async () => fakeMap() }) });
+    view.sync();
+    expect(card.disabled).toBe(false);
+    store.clear();
+    selected = { kind: 'aircraft', id: 'abc123' };
+    view.sync();
+    expect(card.disabled).toBe(true);
   });
 
   it('has its button in the panel for an aircraft only, off while it is not received', () => {
