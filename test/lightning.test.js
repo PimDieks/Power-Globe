@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  COLOUR_CACHE_MAX,
   FRAME_COUNT,
   FRAME_MS,
+  HOLD_MIN,
+  KEEP_MS,
   LightningMonitor,
+  MAX_CELL_KM2,
+  MIN_TREND_KM2,
   RAMP,
   RING_KM,
   STALE_MIN,
@@ -10,10 +15,13 @@ import {
   analyseImage,
   attribution,
   bearingOf,
+  checkImage,
+  colourCacheSize,
   compassOf,
   countFromColour,
   countsFromImage,
   estimateMotion,
+  fitTrack,
   followCell,
   frameTimes,
   frameUrl,
@@ -31,9 +39,8 @@ import {
 const MIN = 60_000;
 const at = (iso) => Date.parse(iso);
 const T0 = at('2026-10-14T14:00:00Z');
-// One kilometre per pixel, and one instrument pixel is 4 km², so a flash is 4 image pixels.
-const G = makeGeometry(52, 5, { halfKm: 60, size: 120, nativeKm2: 4 });
-const ONE = makeGeometry(52, 5, { halfKm: 60, size: 120, nativeKm2: 1 });
+// One kilometre per pixel.
+const G = makeGeometry(52, 5, { halfKm: 60, size: 120 });
 
 // A decoded image: discs of `count` (km east, km north of the airport, radius km), and extra
 // single pixels [col, row].
@@ -55,8 +62,16 @@ function image(discs = [], pixels = [], geometry = G) {
 // Frames from one list of discs for each 5 minute frame, the first starting at T0.
 const framesOf = (list, geometry = G, start = T0) => list.map((discs, k) => analyseImage(image(discs, [], geometry), geometry, start + k * FRAME_MS));
 const cell = (x, y, r = 3) => [{ x, y, r }];
-// `now` is 8 minutes after the newest frame ends.
-const nowAfter = (frames, behind = 8) => frames.at(-1).time + FRAME_MS + behind * MIN;
+// Frames made of cells directly, for when the exact positions matter: one cell at each (x, y).
+const synth = (points, area = 40) =>
+  points.map((p, k) => ({
+    time: T0 + k * FRAME_MS,
+    cells: p ? [{ x: p[0], y: p[1], areaKm2: area, peak: 4, edge: false, nearestKm: Math.max(0, Math.hypot(p[0], p[1]) - 3.5), nearestBearing: 0 }] : [],
+    rings: RING_KM.map((km) => ({ km, areaKm2: 0, peak: 0 })),
+    nearest: null,
+  }));
+// `now` is `behind` minutes after the stamp of the newest frame.
+const nowAfter = (frames, behind = 13) => frames.at(-1).time + behind * MIN;
 
 describe('windows and addresses', () => {
   it('knows where the images reach', () => {
@@ -111,7 +126,7 @@ describe('windows and addresses', () => {
   });
 });
 
-describe('colours to counts', () => {
+describe('colours to intensities', () => {
   it('gives the count of every step of the ramp back', () => {
     for (const [count, r, g, b] of RAMP) expect(countFromColour(r, g, b)).toBe(count);
   });
@@ -139,6 +154,63 @@ describe('colours to counts', () => {
     data.set([...RAMP[0].slice(1), 255], 12);
     expect([...countsFromImage({ width: 2, height: 2, data })]).toEqual([10, 0, 0, 1]);
   });
+
+  it('keeps the colours it has seen within a bound, and reads on correctly after letting them go', () => {
+    for (let i = 0; i < COLOUR_CACHE_MAX + 300; i++) countFromColour(i % 256, Math.floor(i / 256) % 256, 7 + Math.floor(i / 65536));
+    expect(colourCacheSize()).toBeLessThanOrEqual(COLOUR_CACHE_MAX);
+    expect(colourCacheSize()).toBeGreaterThan(0);
+    for (const [count, r, g, b] of RAMP) expect(countFromColour(r, g, b)).toBe(count);
+  });
+});
+
+describe('images that are not what the service draws', () => {
+  const good = () => image(cell(20, 10, 3));
+
+  it('lets a real looking image through', () => {
+    expect(() => checkImage(good())).not.toThrow();
+    expect(() => analyseImage(good(), G, T0)).not.toThrow();
+  });
+
+  it('refuses one with pixels that are partly transparent, as a canvas that smoothed it gives', () => {
+    const img = good();
+    const i = img.data.findIndex((v, k) => k % 4 === 3 && v === 255);
+    img.data[i] = 200;
+    expect(() => analyseImage(img, G, T0)).toThrow(/partly transparent/);
+    // Not a single pixel of it is used.
+    const faint = good();
+    faint.data[3] = 1;
+    expect(() => checkImage(faint)).toThrow(/partly transparent/);
+  });
+
+  it('refuses one where many opaque pixels are far from the colours of the legend', () => {
+    const img = good();
+    // A third of the opaque pixels turn blue.
+    let seen = 0;
+    for (let i = 0; i < img.data.length; i += 4) {
+      if (img.data[i + 3] === 255 && seen++ % 3 === 0) img.data.set([0, 40, 255, 255], i);
+    }
+    expect(() => analyseImage(img, G, T0)).toThrow(/legend colours/);
+  });
+
+  it('lets a few odd pixels pass: it is the many that give it away', () => {
+    const img = good();
+    let changed = 0;
+    for (let i = 0; i < img.data.length && changed < 3; i += 4) {
+      if (img.data[i + 3] === 255) {
+        img.data.set([0, 40, 255, 255], i);
+        changed++;
+      }
+    }
+    expect(() => checkImage(img)).not.toThrow();
+    // And an image with only a handful of pixels at all is not judged by colour.
+    const few = image([], [[5, 5], [6, 5]]);
+    few.data.set([0, 0, 255, 255], (5 * 120 + 5) * 4);
+    expect(() => checkImage(few)).not.toThrow();
+  });
+
+  it('refuses one that is not square', () => {
+    expect(() => analyseImage({ width: 4, height: 2, data: new Uint8ClampedArray(32) }, G, T0)).toThrow();
+  });
 });
 
 describe('directions', () => {
@@ -157,10 +229,10 @@ describe('one image: cells and rings', () => {
     const r = analyseImage(image(), G, T0);
     expect(r.nearest).toBeNull();
     expect(r.cells).toEqual([]);
-    expect(r.flashes).toBe(0);
     expect(r.activeKm2).toBe(0);
     expect(r.rings.map((x) => x.km)).toEqual(RING_KM);
-    expect(r.rings.every((x) => x.areaKm2 === 0 && x.flashes === 0 && x.peak === 0)).toBe(true);
+    expect(r.rings.every((x) => x.areaKm2 === 0 && x.peak === 0)).toBe(true);
+    expect(JSON.stringify(r)).not.toContain('flashes');
   });
 
   it('leaves out noisy single pixels and pairs, but keeps a real patch', () => {
@@ -173,15 +245,14 @@ describe('one image: cells and rings', () => {
     expect(r.cells[0].y).toBeCloseTo(10, 0);
   });
 
-  it('counts area and flashes within the rings, cumulatively', () => {
+  it('gives the active area and the peak intensity within the rings, cumulatively', () => {
     // One cell 8 km east, one 25 km north, one 45 km west: only the last two rings see the second.
-    const img = image([{ x: 8, y: 0, r: 2, count: 4 }, { x: 0, y: 25, r: 2, count: 8 }, { x: -45, y: 0, r: 2, count: 2 }], [], ONE);
-    const r = analyseImage(img, ONE, T0);
+    const img = image([{ x: 8, y: 0, r: 2, count: 4 }, { x: 0, y: 25, r: 2, count: 8 }, { x: -45, y: 0, r: 2, count: 2 }]);
+    const r = analyseImage(img, G, T0);
     const [r5, r10, r20, r30] = r.rings;
     const counts = countsFromImage(img);
     const brute = (km) => {
       let px = 0;
-      let sum = 0;
       let peak = 0;
       for (let i = 0; i < counts.length; i++) {
         if (!counts[i]) continue;
@@ -189,34 +260,22 @@ describe('one image: cells and rings', () => {
         const d = Math.hypot(col + 0.5 - 60, 60 - (i - col) / 120 - 0.5);
         if (d <= km) {
           px++;
-          sum += counts[i];
           peak = Math.max(peak, counts[i]);
         }
       }
-      return { px, sum, peak };
+      return { px, peak };
     };
     expect(r5.areaKm2).toBe(0);
-    expect(r5.flashes).toBe(0);
+    expect(r5.peak).toBe(0);
     const b10 = brute(10);
     expect(b10.px).toBeGreaterThan(8);
     expect(r10.areaKm2).toBe(b10.px);
-    expect(r10.flashes).toBe(b10.sum);
     expect(r10.peak).toBe(4);
     expect(r20.areaKm2).toBe(b10.px);
     expect(r30.areaKm2).toBe(brute(30).px);
-    expect(r30.flashes).toBe(brute(30).sum);
     expect(r30.peak).toBe(8);
     expect(r.activeKm2).toBe(brute(100).px);
     expect(r.cells.map((c) => c.nearestKm)).toEqual([...r.cells.map((c) => c.nearestKm)].sort((a, b) => a - b));
-  });
-
-  it('turns the many pixels of one flash back into about one flash', () => {
-    // A 4 km² instrument pixel is 4 image pixels here: a patch of 16 pixels of count 3 is 12 flashes.
-    const img = image([{ x: 15, y: 0, r: 2.3, count: 3 }]);
-    const r = analyseImage(img, G, T0);
-    const px = countsFromImage(img).filter(Boolean).length;
-    expect(r.rings[2].flashes).toBe(Math.round((px * 3) / 4));
-    expect(r.flashes).toBe(r.rings[2].flashes);
   });
 
   it('says where the nearest lightning is', () => {
@@ -235,7 +294,7 @@ describe('one image: cells and rings', () => {
 
   it('puts the middle of a cell towards its stronger pixels', () => {
     const size = 20;
-    const g = makeGeometry(52, 5, { halfKm: 10, size, nativeKm2: 1 });
+    const g = makeGeometry(52, 5, { halfKm: 10, size });
     const counts = new Uint8Array(size * size);
     // Two rows of pixels, 3 wide: the upper row is much stronger.
     for (let c = 8; c < 11; c++) {
@@ -248,8 +307,14 @@ describe('one image: cells and rings', () => {
     expect(r.cells[0].peak).toBe(18);
   });
 
-  it('refuses an image that is not square, and reads the size from the image', () => {
-    expect(() => analyseImage({ width: 4, height: 2, data: new Uint8ClampedArray(32) }, G, T0)).toThrow();
+  it('says whether a cell runs off the edge of the image', () => {
+    const inside = analyseImage(image(cell(20, 10, 3)), G, T0);
+    expect(inside.cells[0].edge).toBe(false);
+    const edge = analyseImage(image(cell(0, 56, 6)), G, T0);
+    expect(edge.cells[0].edge).toBe(true);
+  });
+
+  it('reads the size from the image', () => {
     const g = makeGeometry(52, 5, { halfKm: 60, size: 160 });
     const small = analyseImage(image(cell(20, 0, 3), [], G), g, T0);
     expect(small.cells[0].x).toBeCloseTo(20, 0);
@@ -257,15 +322,15 @@ describe('one image: cells and rings', () => {
 });
 
 describe('trend', () => {
-  const frame = (k, flashes) => ({ time: T0 + k * FRAME_MS, rings: [{ flashes: 0 }, { flashes: 0 }, { flashes: 0 }, { flashes }] });
-  const series = (list) => list.map((f, k) => frame(k, f));
+  const frame = (k, area) => ({ time: T0 + k * FRAME_MS, rings: [0, 0, 0, area].map((areaKm2, i) => ({ km: RING_KM[i], areaKm2, peak: 0 })) });
+  const series = (list) => list.map((a, k) => frame(k, a));
 
-  it('sees more, the same and less over 30 and over 60 minutes', () => {
-    expect(trendOf(series([0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 10, 20]), 30)).toBe('rising');
-    expect(trendOf(series([2, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2]), 60)).toBe('steady');
-    expect(trendOf(series([30, 30, 20, 20, 10, 10, 8, 5, 4, 2, 1, 0]), 60)).toBe('falling');
+  it('sees more, the same and less area over 30 and over 60 minutes', () => {
+    expect(trendOf(series([0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 120, 200]), 30)).toBe('rising');
+    expect(trendOf(series([100, 110, 100, 110, 100, 110, 100, 110, 100, 110, 100, 110]), 60)).toBe('steady');
+    expect(trendOf(series([300, 300, 200, 200, 100, 100, 80, 50, 40, 20, 10, 0]), 60)).toBe('falling');
     // Rising over the hour but falling within the last half.
-    const mixed = series([1, 2, 5, 10, 20, 30, 40, 50, 40, 30, 20, 10]);
+    const mixed = series([10, 20, 50, 100, 200, 300, 400, 500, 400, 300, 200, 100]);
     expect(trendOf(mixed, 60)).toBe('rising');
     expect(trendOf(mixed, 30)).toBe('falling');
   });
@@ -274,11 +339,22 @@ describe('trend', () => {
     expect(trendOf(series(new Array(12).fill(0)), 60)).toBe('none');
     expect(trendOf(series([5]), 60)).toBe('unknown');
     expect(trendOf([], 30)).toBe('unknown');
-    expect(trendOf(series([1, 2]), 60)).toBe('unknown');
+    expect(trendOf(series([10, 20]), 60)).toBe('unknown');
   });
 
-  it('treats a single flash more or less as noise: small changes are steady', () => {
-    expect(trendOf(series([1, 1, 1, 2, 2, 2]), 30)).toBe('steady');
+  it('does not take one stray flash for a trend, from nothing or to nothing', () => {
+    // One instrument pixel, about 10 km², where there was none, and then none again.
+    expect(trendOf(series([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10]), 60)).toBe('steady');
+    expect(trendOf(series([0, 0, 0, 10, 10, 10]), 30)).toBe('steady');
+    expect(trendOf(series([10, 10, 10, 0, 0, 0]), 30)).toBe('steady');
+    expect(trendOf(series([0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0]), 60)).toBe('steady');
+    // A real change from nothing, and to nothing, is one.
+    expect(trendOf(series([0, 0, 0, MIN_TREND_KM2 + 10, MIN_TREND_KM2 + 10, MIN_TREND_KM2 + 10]), 30)).toBe('rising');
+    expect(trendOf(series([MIN_TREND_KM2 + 10, MIN_TREND_KM2 + 10, MIN_TREND_KM2 + 10, 0, 0, 0]), 30)).toBe('falling');
+  });
+
+  it('does not take a small change in a small area for a trend either', () => {
+    expect(trendOf(series([10, 10, 10, 25, 25, 25]), 30)).toBe('steady');
   });
 });
 
@@ -296,14 +372,14 @@ describe('movement', () => {
   });
 
   it('says a cell comes closer, and when its edge is 5 km away', () => {
-    const m = estimateMotion(coming, { behindMin: 8 });
+    const m = estimateMotion(coming, { behindMin: 13 });
     expect(m.state).toBe('approaching');
     expect(m.speedKmh).toBe(48);
     expect(m.headingDeg).toBe(180);
-    // 20.5 km left to go to the ring at 0.8 km/min, 8 minutes behind and half a frame into the window.
-    expect(m.etaMin).toBeGreaterThan(13);
-    expect(m.etaMin).toBeLessThan(17);
-    expect(estimateMotion(coming, { behindMin: 0 }).etaMin).toBeGreaterThan(m.etaMin + 7);
+    // 20.5 km left to go to the ring at 0.8 km/min, and the data 13 minutes old.
+    expect(m.etaMin).toBeGreaterThan(10);
+    expect(m.etaMin).toBeLessThan(15);
+    expect(estimateMotion(coming, { behindMin: 0 }).etaMin).toBeGreaterThan(m.etaMin + 10);
   });
 
   it('says a cell goes away', () => {
@@ -348,10 +424,73 @@ describe('movement', () => {
     expect(m.etaMin).toBeNull();
   });
 
-  it('gives no time for a cell without history, or with too little', () => {
+  it('gives no time for a cell without history, or with too little: five images are needed', () => {
     expect(estimateMotion(framesOf([[], [], [], [], [], cell(0, 20)])).state).toBe('unclear');
     expect(estimateMotion(framesOf([[], [], [], [], cell(0, 24), cell(0, 20)])).state).toBe('unclear');
     expect(estimateMotion(framesOf([cell(0, 40)])).state).toBe('unclear');
+    // Four images of a cell moving perfectly steadily: still too few.
+    const four = estimateMotion(framesOf([[], [], cell(0, 40), cell(0, 36), cell(0, 32), cell(0, 28)]));
+    expect(four.state).toBe('unclear');
+    expect(four.reason).toMatch(/Too little history/);
+    // With five it is followed.
+    expect(estimateMotion(framesOf([[], cell(0, 44), cell(0, 40), cell(0, 36), cell(0, 32), cell(0, 28)])).state).toBe('approaching');
+  });
+
+  it('gives no time for a cell that has hardly moved from where it was', () => {
+    // 12 km/h is above what counts as staying put, but 5 km in 25 minutes is under the least.
+    const m = estimateMotion(synth([[0, 40], [0, 39], [0, 38], [0, 37], [0, 36], [0, 35]]));
+    expect(m.state).toBe('unclear');
+    expect(m.reason).toMatch(/hardly moved/);
+    // The same speed for longer is a movement.
+    expect(estimateMotion(synth([[0, 44], [0, 43], [0, 42], [0, 41], [0, 40], [0, 39], [0, 38]])).state).toBe('approaching');
+  });
+
+  it('gives no time when the speed is known too poorly', () => {
+    // A cell going south at about 25 km/h, but the points lie about 2.6 km from the line.
+    const ys = [40, 33, 37, 29, 33, 27];
+    const frames = synth(ys.map((y) => [0, y]));
+    const { speedError, vy, rms } = fitTrack(frames.map((f, k) => ({ t: -25 + 5 * k, x: 0, y: f.cells[0].y })));
+    expect(speedError * 60).toBeGreaterThan(0.3 * Math.abs(vy) * 60);
+    expect(rms).toBeLessThan(Math.max(2, 0.25 * Math.abs(vy) * 60 * (25 / 60)));
+    const m = estimateMotion(frames);
+    expect(m.state).toBe('unclear');
+    expect(m.reason).toMatch(/uncertain/);
+  });
+
+  it('gives no time when the cell is one large area, or runs off the image', () => {
+    // A merged area of about 2,460 km², moving steadily.
+    const big = estimateMotion(framesOf([48, 44, 40, 36, 32, 28].map((y) => [{ x: 0, y: y - 25, r: 28 }])));
+    expect(big.state).toBe('unclear');
+    expect(big.reason).toMatch(/large area/);
+    expect(synth([[0, 20]], MAX_CELL_KM2 + 1)[0].cells[0].areaKm2).toBeGreaterThan(MAX_CELL_KM2);
+    expect(estimateMotion(synth([[0, 40], [0, 36], [0, 32], [0, 28], [0, 24], [0, 20]], MAX_CELL_KM2 + 1)).state).toBe('unclear');
+    // The same track on a cell that touches the edge of the image.
+    const edgy = synth([[0, 40], [0, 36], [0, 32], [0, 28], [0, 24], [0, 20]]);
+    edgy.at(-1).cells[0].edge = true;
+    expect(estimateMotion(edgy).state).toBe('unclear');
+    // Or one that did so some images ago.
+    const past = synth([[0, 40], [0, 36], [0, 32], [0, 28], [0, 24], [0, 20]]);
+    past[1].cells[0].edge = true;
+    const m = estimateMotion(past);
+    expect(m.state).toBe('unclear');
+    expect(m.reason).toMatch(/too large|edge/);
+  });
+
+  it('does not hop to a neighbouring cell: with two near ones the track ends', () => {
+    // Two cells 5 km apart, moving together: which was which can not be told.
+    const two = framesOf([48, 44, 40, 36, 32, 28].map((y) => [{ x: 0, y, r: 2 }, { x: 5, y, r: 2 }]));
+    expect(followCell(two)).toHaveLength(1);
+    expect(estimateMotion(two).state).toBe('unclear');
+    // Far enough apart they are told apart, and the nearer is followed.
+    const apart = framesOf([48, 44, 40, 36, 32, 28].map((y) => [{ x: 0, y, r: 2 }, { x: 25, y, r: 2 }]));
+    expect(followCell(apart)).toHaveLength(6);
+    expect(estimateMotion(apart).state).toBe('approaching');
+  });
+
+  it('ends the track where a cell is of quite another size', () => {
+    const grown = framesOf([[{ x: 0, y: 48, r: 2 }], [{ x: 0, y: 44, r: 2 }], [{ x: 0, y: 40, r: 2 }], [{ x: 0, y: 36, r: 6 }], [{ x: 0, y: 32, r: 6 }], [{ x: 0, y: 28, r: 6 }]]);
+    expect(followCell(grown)).toHaveLength(3);
+    expect(estimateMotion(grown).state).toBe('unclear');
   });
 
   it('gives no time when the cell moves faster than a storm does', () => {
@@ -371,15 +510,52 @@ describe('movement', () => {
 
   it('copes with a frame in the middle where the cell was not seen', () => {
     const gap = framesOf([cell(0, 48), cell(0, 44), [], cell(0, 36), cell(0, 32), cell(0, 28)]);
-    const m = estimateMotion(gap, { behindMin: 8 });
+    const m = estimateMotion(gap, { behindMin: 13 });
     expect(m.state).toBe('approaching');
     expect(m.speedKmh).toBe(48);
   });
 
   it('gives no wait for a cell that would be within the ring by now', () => {
-    const m = estimateMotion(framesOf([30, 26, 22, 18, 14, 10].map((y) => cell(0, y))), { behindMin: 8 });
+    const m = estimateMotion(framesOf([30, 26, 22, 18, 14, 10].map((y) => cell(0, y))), { behindMin: 13 });
     expect(m.state).toBe('approaching');
     expect(m.etaMin).toBe(0);
+  });
+
+  it('almost never says a cell that stays where it is is moving, whatever the jitter of its middle', () => {
+    // A cell 25 km north that does not move, its middle found 1 to 1.5 km off in each image.
+    let seed = 12345;
+    const random = () => {
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed / 4294967296;
+    };
+    const jitter = (size) => (random() * 2 - 1) * size;
+    const states = {};
+    const trials = 4000;
+    for (const size of [1, 1.5]) {
+      for (let n = 0; n < trials; n++) {
+        const frames = synth(Array.from({ length: 6 }, () => [jitter(size), 25 + jitter(size)]));
+        const { state } = estimateMotion(frames);
+        states[state] = (states[state] ?? 0) + 1;
+      }
+    }
+    const moving = (states.approaching ?? 0) + (states.passing ?? 0) + (states.receding ?? 0);
+    expect(moving / (2 * trials)).toBeLessThan(0.002);
+    // And it is called stationary or unclear, not left unsaid.
+    expect((states.stationary ?? 0) + (states.unclear ?? 0)).toBe(2 * trials - moving);
+  });
+
+  it('does not go on calling a moving cell unclear: the jitter does not hide steady movement', () => {
+    let seed = 99;
+    const random = () => {
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed / 4294967296;
+    };
+    let approaching = 0;
+    for (let n = 0; n < 500; n++) {
+      const frames = synth(Array.from({ length: 6 }, (_, k) => [(random() * 2 - 1) * 1, 48 - 4 * k + (random() * 2 - 1) * 1]));
+      if (estimateMotion(frames, { behindMin: 13 }).state === 'approaching') approaching++;
+    }
+    expect(approaching).toBeGreaterThan(450);
   });
 });
 
@@ -399,7 +575,7 @@ describe('levels and words', () => {
 });
 
 describe('the status', () => {
-  const sum = (frames, behind = 8, extra = {}) => summarise(frames, { geometry: G, now: nowAfter(frames, behind), timeZone: 'UTC', ...extra });
+  const sum = (frames, behind = 13, extra = {}) => summarise(frames, { geometry: G, now: nowAfter(frames, behind), timeZone: 'UTC', ...extra });
 
   it('writes an approaching storm with the time it arrives', () => {
     const frames = framesOf([48, 44, 40, 36, 32, 28].map((y) => cell(0, y)));
@@ -407,15 +583,17 @@ describe('the status', () => {
     expect(r.state).toBe('ok');
     expect(r.status.level).toBe('distant');
     expect(r.status.text).toBe('Lightning 26 km N, approaching, ~15 min');
-    expect(r.status.dataText).toBe('as of 14:30, data 8 min behind');
+    // From the stamp of the newest image, the safe reading.
+    expect(r.status.dataText).toBe('as of 14:25, data 13 min behind');
     expect(r.status.detail).toMatch(/^Expected within 5 km at about 14:5\d, moving S at 48 km\/h\.$/);
-    expect(r.asOf).toBe(at('2026-10-14T14:30:00Z'));
-    expect(r.behindMin).toBe(8);
+    expect(r.asOf).toBe(at('2026-10-14T14:25:00Z'));
+    expect(r.behindMin).toBe(13);
     expect(r.stale).toBe(false);
-    expect(r.trend.min30).toBe('rising');
+    expect(r.held).not.toBeNull();
     expect(r.attribution).toBe('Contains modified EUMETSAT Meteosat data 2026');
     expect(r.frames).toHaveLength(6);
     expect(r.rings).toHaveLength(4);
+    expect(JSON.stringify(r.rings)).not.toContain('flashes');
   });
 
   it('writes a storm that goes past, or is not clear', () => {
@@ -431,7 +609,9 @@ describe('the status', () => {
   it('writes a storm that goes away', () => {
     const away = sum(framesOf([0, 4, 8, 12, 16, 20].map((y) => cell(0, y))));
     expect(away.status.text).toBe('Lightning 18 km N, moving away');
-    expect(away.status.level).toBe('near');
+    // It was over the airport a few minutes ago: the level stays where it was.
+    expect(away.status.level).toBe('overhead');
+    expect(away.status.hold).toMatch(/Lightning was within \d km \d+ min ago/);
   });
 
   it('writes a storm overhead', () => {
@@ -441,6 +621,7 @@ describe('the status', () => {
     // Half an hour of images is too little for the trend over an hour.
     expect(r.trend).toEqual({ min30: 'steady', min60: 'unknown' });
     expect(r.rings[0].areaKm2).toBeGreaterThan(20);
+    expect(r.rings[0].peak).toBe(4);
   });
 
   it('writes none within 30 km, for no lightning, noise, or lightning farther out', () => {
@@ -450,27 +631,91 @@ describe('the status', () => {
     expect(sum(framesOf(new Array(6).fill(cell(0, 50)))).status.level).toBe('none');
   });
 
-  it('says when lightning was there a while ago', () => {
-    const frames = framesOf([cell(0, 20), cell(0, 22), cell(0, 24), [], [], []]);
-    const r = sum(frames, 8);
-    expect(r.status.text).toBe('No lightning within 30 km, last 25 min ago');
-    expect(r.trend.min30).toBe('falling');
-  });
-
-  it('flags data that is behind and gives no time from it', () => {
-    const frames = framesOf([48, 44, 40, 36, 32, 28].map((y) => cell(0, y)));
-    const r = sum(frames, 40);
-    expect(r.stale).toBe(true);
-    expect(r.status.dataText).toBe('as of 14:30, data 40 min behind');
-    expect(r.status.text).toBe('Lightning 26 km N, movement unclear');
-    expect(r.motion.etaMin).toBeNull();
-  });
-
   it('answers for a place the images do not cover', () => {
     const r = uncovered(35.5, 139.8, T0);
     expect(r.state).toBe('uncovered');
     expect(r.status.text).toBe('Lightning: not covered here');
+    expect(r.status.level).toBe('unknown');
     expect(r.frames).toEqual([]);
+  });
+
+  describe('old data', () => {
+    const frames = () => framesOf([48, 44, 40, 36, 32, 28].map((y) => cell(0, y)));
+
+    it('says nothing of the lightning, not even that there is none', () => {
+      const r = sum(frames(), STALE_MIN + 10);
+      expect(r.stale).toBe(true);
+      expect(r.status.level).toBe('unknown');
+      expect(r.status.text).toBe('Lightning data 40 min old');
+      expect(r.status.dataText).toBe('as of 14:25, data 40 min behind');
+      expect(r.motion.etaMin).toBeNull();
+    });
+
+    it('is old after more than the least, and not at it', () => {
+      expect(sum(frames(), STALE_MIN).stale).toBe(false);
+      expect(sum(frames(), STALE_MIN + 1).stale).toBe(true);
+      // Even with nothing in the images.
+      const empty = sum(framesOf(new Array(12).fill([])), 45);
+      expect(empty.status.level).toBe('unknown');
+      expect(empty.status.text).toBe('Lightning data 45 min old');
+    });
+  });
+
+  describe('holding the level after lightning', () => {
+    // Lightning at 8 km (5.5 km to its nearest edge: 'close') in some images, none in the others.
+    const L = cell(0, 8);
+    const list = (...cells) => framesOf(cells);
+
+    it('does not clear at an empty image: it flickers from one 5 minute window to the next', () => {
+      // Lightning, nothing, lightning, nothing, nothing: now is the empty window after the second.
+      const r = sum(list(L, [], L, [], []), 13);
+      expect(r.status.level).toBe('close');
+      expect(r.status.text).toBe('No lightning within 30 km now, last lightning 20 min ago');
+      expect(r.status.hold).toMatch(/Kept as a warning until 30 minutes after the last lightning: within \d+ km\./);
+      expect(r.held.km).toBeLessThan(10);
+    });
+
+    it('holds the worse level, not the last one', () => {
+      // Overhead, then 25 km away: still overhead for the half hour.
+      const r = sum(list(cell(1, 1, 3), [], cell(0, 28, 3), []), 13);
+      expect(r.status.level).toBe('overhead');
+      const now = sum(list(cell(1, 1, 3), cell(0, 28, 3)), 13);
+      expect(now.status.text).toMatch(/^Lightning 2\d km N/);
+      expect(now.status.level).toBe('overhead');
+      expect(now.status.hold).toMatch(/Lightning was within \d km \d+ min ago/);
+    });
+
+    it('clears 30 minutes after the last lightning, counted from the end of its window', () => {
+      // The last lightning is in the first window, ending 5 minutes after T0: 30 minutes on, at T0 + 35.
+      const frames = list(L, [], [], [], [], [], []);
+      const at29 = summarise(frames, { geometry: G, now: T0 + 5 * MIN + (HOLD_MIN - 1) * MIN, timeZone: 'UTC' });
+      expect(at29.status.level).toBe('close');
+      const at31 = summarise(frames, { geometry: G, now: T0 + 5 * MIN + (HOLD_MIN + 1) * MIN, timeZone: 'UTC' });
+      // Stale by then (the newest image is 6 windows after T0 and this is 36 minutes after it ends).
+      expect(['none', 'unknown']).toContain(at31.status.level);
+      // With newer images the all clear is plain, and says how long it is since.
+      const later = list(L, [], [], [], [], [], [], [], []);
+      const clear = summarise(later, { geometry: G, now: T0 + 40 * MIN + 5 * MIN, timeZone: 'UTC' });
+      expect(clear.status.level).toBe('none');
+      expect(clear.status.text).toBe('No lightning within 30 km, last lightning 40 min ago');
+      expect(clear.held).toBeNull();
+    });
+
+    it('starts the 30 minutes again with each new lightning', () => {
+      const r = sum(list(L, [], [], [], [], L, []), 13);
+      expect(r.status.level).toBe('close');
+      expect(r.held.minAgo).toBeLessThan(30);
+    });
+
+    it('keeps an amber at least: any lightning within 30 km held is never green', () => {
+      const r = sum(list(cell(0, 40, 3), cell(0, 30, 2), [], []), 13);
+      expect(['distant', 'near']).toContain(r.status.level);
+      expect(r.status.level).not.toBe('none');
+    });
+
+    it('does not hold for lightning farther than 30 km', () => {
+      expect(sum(list(cell(0, 50), [], []), 13).status.level).toBe('none');
+    });
   });
 });
 
@@ -481,20 +726,24 @@ describe('thunderstorm risk from the forecast', () => {
     time: hours(10, (i) => new Date(at('2026-10-14T10:00:00Z') + i * 3_600_000).toISOString().slice(0, 16)),
     weather_code: hours(10, () => 3),
     cape: hours(10, () => 100),
-    lifted_index: hours(10, () => 2),
     ...over,
   });
 
-  it('rates an hour by code, CAPE and lifted index', () => {
-    expect(hourRisk(95, 0, 5)).toBe('high');
-    expect(hourRisk(99, null, null)).toBe('high');
-    expect(hourRisk(3, 1600, 1)).toBe('moderate');
-    expect(hourRisk(3, 1100, -3)).toBe('moderate');
-    expect(hourRisk(3, 600, 1)).toBe('low');
-    expect(hourRisk(3, 100, -2.5)).toBe('low');
-    expect(hourRisk(3, 100, 2)).toBe('none');
-    expect(hourRisk(undefined, undefined, undefined)).toBe('none');
-    expect(hourRisk(94, 0, 0)).toBe('none');
+  it('rates an hour by the weather code and CAPE', () => {
+    expect(hourRisk(95, 0)).toBe('high');
+    expect(hourRisk(99, null)).toBe('high');
+    // CAPE alone is only possible, however high.
+    expect(hourRisk(3, 1600)).toBe('low');
+    expect(hourRisk(3, 4000)).toBe('low');
+    expect(hourRisk(undefined, 2000)).toBe('low');
+    // Likely needs wet weather in the forecast as well.
+    expect(hourRisk(80, 1100)).toBe('moderate');
+    expect(hourRisk(63, 1500)).toBe('moderate');
+    expect(hourRisk(80, 600)).toBe('low');
+    expect(hourRisk(3, 600)).toBe('low');
+    expect(hourRisk(3, 100)).toBe('none');
+    expect(hourRisk(undefined, undefined)).toBe('none');
+    expect(hourRisk(94, 0)).toBe('none');
   });
 
   it('gives the worst hour in the next hours, and when it starts', () => {
@@ -516,19 +765,27 @@ describe('thunderstorm risk from the forecast', () => {
     expect(thunderstormRisk(hourly({ weather_code: late }), { now, hours: 6 }).level).toBe('none');
   });
 
-  it('works from CAPE alone and says none when it is calm', () => {
+  it('works from CAPE alone as a possibility, and says unlikely when it is calm', () => {
     const r = thunderstormRisk(hourly({ weather_code: undefined, cape: hours(10, (i) => (i === 4 ? 1800 : 50)) }), { now, timeZone: 'UTC' });
-    expect(r.level).toBe('moderate');
-    expect(r.word).toBe('likely');
-    expect(r.text).toBe('Thunderstorms likely, from 14:00');
+    expect(r.level).toBe('low');
+    expect(r.word).toBe('possible');
+    expect(r.text).toBe('Thunderstorms possible');
+    expect(r.firstHour).toBeNull();
+    const likely = thunderstormRisk(hourly({ weather_code: hours(10, (i) => (i === 4 ? 81 : 3)), cape: hours(10, (i) => (i === 4 ? 1800 : 50)) }), { now, timeZone: 'UTC' });
+    expect(likely.level).toBe('moderate');
+    expect(likely.text).toBe('Thunderstorms likely, from 14:00');
     const calm = thunderstormRisk(hourly(), { now });
     expect(calm).toMatchObject({ level: 'none', firstHour: null });
     expect(calm.text).toBe('Thunderstorms unlikely in the next 6 h');
   });
 
-  it('says so when the forecast does not reach the next hours, and takes times as numbers', () => {
-    expect(thunderstormRisk({ time: [] }, { now }).word).toBe('unknown');
-    expect(thunderstormRisk(undefined, { now }).level).toBe('none');
+  it('says unknown, not unlikely, when the forecast does not reach the next hours', () => {
+    expect(thunderstormRisk({ time: [] }, { now })).toMatchObject({ level: 'unknown', word: 'unknown' });
+    expect(thunderstormRisk(undefined, { now }).level).toBe('unknown');
+    expect(thunderstormRisk({ time: [now - 5 * 3_600_000], weather_code: [3] }, { now }).level).toBe('unknown');
+  });
+
+  it('takes times as numbers', () => {
     const r = thunderstormRisk({ time: [now, now + 3_600_000], weather_code: [3, 95] }, { now });
     expect(r.level).toBe('high');
   });
@@ -544,6 +801,7 @@ function fakeService(airportGeometry) {
     storm: true,
     failImages: false,
     failText: false,
+    makeImage: null,
   };
   service.fetchText = async () => {
     service.texts++;
@@ -553,6 +811,7 @@ function fakeService(airportGeometry) {
   service.loadImage = async (url) => {
     service.urls.push(url);
     if (service.failImages) throw new Error('HTTP 400');
+    if (service.makeImage) return service.makeImage(url);
     const time = Date.parse(new URL(url).searchParams.get('time'));
     const k = (time - at('2026-10-14T14:30:00Z')) / FRAME_MS;
     return image(service.storm ? cell(0, 48 - 4 * (k % 6)) : [], [], airportGeometry);
@@ -601,7 +860,7 @@ describe('the monitor', () => {
     expect(service.urls).toHaveLength(12);
     expect(result.frames).toHaveLength(12);
     expect(result.state).toBe('ok');
-    expect(result.status.dataText).toBe('as of 15:30, data 8 min behind');
+    expect(result.status.dataText).toBe('as of 15:25, data 13 min behind');
     expect(updates).toHaveLength(1);
     expect(live()).toHaveLength(1);
     expect(live()[0].ms).toBe(5 * MIN);
@@ -651,6 +910,56 @@ describe('the monitor', () => {
     expect(service.urls).toHaveLength(0);
   });
 
+  describe('stopped, or moved, while the images are loading', () => {
+    // Images that come when told to.
+    function held() {
+      const { service, monitor, live, updates } = setup();
+      const pending = [];
+      service.loadImage = (url) => {
+        service.urls.push(url);
+        return new Promise((resolve) => pending.push(() => resolve(image([], [], makeGeometry(52.31, 4.76)))));
+      };
+      monitor.loadImage = service.loadImage;
+      const settle = async () => {
+        await vi.waitFor(() => expect(pending.length).toBeGreaterThan(0));
+        for (const resolve of pending.splice(0)) resolve();
+      };
+      return { service, monitor, live, updates, pending, settle };
+    }
+
+    it('keeps none of them, gives no result and sets no timer', async () => {
+      const { monitor, live, updates, settle, pending } = held();
+      const first = monitor.start(EHAM);
+      await vi.waitFor(() => expect(pending.length).toBe(12));
+      monitor.stop();
+      await settle();
+      await first;
+      expect([...monitor.cache.values()].every((frames) => frames.size === 0)).toBe(true);
+      expect(updates).toHaveLength(0);
+      expect(live()).toHaveLength(0);
+    });
+
+    it('keeps none of the first airport in the cache of the second', async () => {
+      const { monitor, updates, settle, pending } = held();
+      const first = monitor.start(EHAM);
+      await vi.waitFor(() => expect(pending.length).toBe(12));
+      const firstImages = pending.splice(0);
+      const second = monitor.start({ lat: 51.47, lon: -0.45 });
+      await vi.waitFor(() => expect(pending.length).toBe(12));
+      // The first airport's images come in after the second was asked for.
+      for (const resolve of firstImages) resolve();
+      await settle();
+      await first;
+      await second;
+      const sizes = [...monitor.cache.entries()].map(([key, frames]) => [key, frames.size]);
+      expect(sizes.find(([key]) => key === '52.310,4.760')[1]).toBe(0);
+      expect(sizes.find(([key]) => key === '51.470,-0.450')[1]).toBe(12);
+      // Only the second airport was reported.
+      expect(updates).toHaveLength(1);
+      expect(updates[0].geometry.lat).toBe(51.47);
+    });
+  });
+
   it('fetches nothing for a place outside the coverage', async () => {
     const { service, monitor, live, updates } = setup();
     const result = await monitor.start({ lat: 35.5, lon: 139.8 });
@@ -667,6 +976,7 @@ describe('the monitor', () => {
     const first = await monitor.start(EHAM);
     expect(first.state).toBe('unavailable');
     expect(first.status.text).toBe('Lightning data unavailable');
+    expect(first.status.level).toBe('unknown');
     expect(live()[0].ms).toBe(30_000);
     setNow(at('2026-10-14T15:39:00Z'));
     await live()[0].fn();
@@ -689,8 +999,40 @@ describe('the monitor', () => {
     expect(r.state).toBe('ok');
     expect(r.frames).toHaveLength(12);
     expect(r.problem).toMatch(/could not be fetched/);
-    expect(r.behindMin).toBe(14);
+    expect(r.behindMin).toBe(19);
     expect(live()[0].ms).toBe(30_000);
+  });
+
+  it('lets go of images older than an hour at every refresh, also when it fails', async () => {
+    const { service, monitor, live, setNow } = setup();
+    await monitor.start(EHAM);
+    service.failText = true;
+    // 75 minutes after the newest stamp: the older images (stamps 14:30 to 15:20) are past it.
+    setNow(at('2026-10-14T15:25:00Z') + 75 * MIN);
+    const r = await live()[0].fn();
+    expect(r.problem).toMatch(/could not be fetched/);
+    expect(r.frames.length).toBeLessThan(12);
+    expect(r.frames.every((f) => at('2026-10-14T15:25:00Z') + 75 * MIN - f.time <= KEEP_MS)).toBe(true);
+    // The newest is still there, and is old: it says nothing of the lightning.
+    expect(r.stale).toBe(true);
+    expect(r.status.level).toBe('unknown');
+    expect([...monitor.cache.values()][0].size).toBe(r.frames.length);
+    // Long after, there is nothing at all.
+    setNow(at('2026-10-14T15:25:00Z') + 2 * 3_600_000);
+    const none = await live()[0].fn();
+    expect(none.state).toBe('unavailable');
+    expect([...monitor.cache.values()][0].size).toBe(0);
+  });
+
+  it('lets go of them on a successful refresh as well', async () => {
+    const { service, monitor, live, setNow } = setup();
+    await monitor.start(EHAM);
+    service.end += 12 * FRAME_MS;
+    setNow(at('2026-10-14T15:25:00Z') + 12 * FRAME_MS + 13 * MIN);
+    const r = await live()[0].fn();
+    expect(r.state).toBe('ok');
+    expect(r.frames).toHaveLength(12);
+    expect(r.frames[0].time).toBeGreaterThan(at('2026-10-14T15:25:00Z'));
   });
 
   it('still gives a result when only the older images fail', async () => {
@@ -714,6 +1056,19 @@ describe('the monitor', () => {
   it('reports a failure of the newest image', async () => {
     const { service, monitor } = setup();
     service.failImages = true;
+    const r = await monitor.start(EHAM);
+    expect(r.state).toBe('unavailable');
+    expect(r.problem).toMatch(/newest/);
+  });
+
+  it('treats an image that does not look like the service draws as failed', async () => {
+    const { service, monitor } = setup();
+    // What a canvas that blended the image would give: half transparent pixels.
+    service.makeImage = () => {
+      const img = image(cell(0, 20));
+      for (let i = 3; i < img.data.length; i += 4) if (img.data[i] === 255) img.data[i] = 128;
+      return img;
+    };
     const r = await monitor.start(EHAM);
     expect(r.state).toBe('unavailable');
     expect(r.problem).toMatch(/newest/);

@@ -4,11 +4,13 @@
 import { compassOf, isCovered, thunderstormRisk, uncovered } from './lightning.js';
 
 // The status of the Ops strip for how near the lightning is, and for the forecast's risk.
-export const LEVEL_STATUS = { none: 'ok', distant: 'caution', near: 'caution', close: 'nogo', overhead: 'nogo' };
-export const RISK_STATUS = { none: 'ok', low: 'ok', moderate: 'caution', high: 'nogo' };
+export const LEVEL_STATUS = { none: 'ok', distant: 'caution', near: 'caution', close: 'nogo', overhead: 'nogo', unknown: 'unknown' };
+// The forecast stands in for lightning data that is not there, and the lack of data is never green:
+// not even a calm forecast says there is no lightning, so it is grey.
+export const RISK_STATUS = { none: 'unknown', low: 'unknown', moderate: 'caution', high: 'nogo', unknown: 'unknown' };
 
 // The names the forecast uses for what the risk is made of.
-const RISK_FIELDS = ['weather_code', 'cape', 'lifted_index'];
+const RISK_FIELDS = ['weather_code', 'cape'];
 
 // What the forecast of an airport has for judging thunderstorms: the names of its fields.
 export const riskFields = (hourly) => RISK_FIELDS.filter((name) => hourly?.[name]?.some((v) => v != null));
@@ -54,16 +56,16 @@ export function motionLine({ motion, status }) {
 
 const riskNote = (data) => (data.risk ? `${data.risk.text} (forecast)` : null);
 
-// The one line for the status strip: { text, status }.
+// The one line for the status strip: { text, status }. Lightning data that is old counts as none
+// at all: it is grey, says how old it is, and the forecast's risk is given in its place.
 export function lightningFact(data) {
   const { lightning: r, risk } = data;
-  if (r?.state === 'ok') {
-    const old = r.stale ? `, data ${r.behindMin} min behind` : '';
-    return { text: `${r.status.text}${old}`, status: LEVEL_STATUS[r.status.level] ?? 'unknown' };
-  }
+  if (r?.state === 'ok' && !r.stale) return { text: r.status.text, status: LEVEL_STATUS[r.status.level] ?? 'unknown' };
+  const old = r?.state === 'ok' ? `lightning data ${r.behindMin} min old` : r?.state === 'uncovered' ? 'no lightning data here' : null;
   const forecast = risk && riskNote(data);
-  if (forecast) return { text: r?.state === 'uncovered' ? `${forecast}, no lightning data here` : forecast, status: RISK_STATUS[risk.level] ?? 'unknown' };
+  if (forecast) return { text: old ? `${forecast}, ${old}` : forecast, status: RISK_STATUS[risk.level] ?? 'unknown' };
   if (data.loading) return { text: 'Loading lightning data', status: 'unknown' };
   if (r?.state === 'uncovered') return { text: 'Not covered here', status: 'unknown' };
+  if (old) return { text: old.replace(/^./, (c) => c.toUpperCase()), status: 'unknown' };
   return { text: 'No lightning data', status: 'unknown' };
 }

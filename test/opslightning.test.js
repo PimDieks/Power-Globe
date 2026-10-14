@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FRAME_MS, LightningMonitor, RAMP, analyseImage, decodeBlob, makeGeometry, summarise, unavailable } from '../src/lightning.js';
 import { OPS_PARTS, createOpsHost, opsPanelHtml } from '../src/ops.js';
 import { LEVEL_STATUS, RISK_STATUS, analyseLightning, lightningFact, motionLine, riskFields, trendText } from '../src/opslightning.js';
-import { bind, compassSvg, lightningInnerHtml, lightningPart, lightningSectionHtml, setLightningOverlay, unbind } from '../src/opslightningview.js';
+import { bind, compassSvg, lightningInnerHtml, lightningPart, lightningSectionHtml, releaseLightning, setLightningOverlay, unbind } from '../src/opslightningview.js';
 
 const MIN = 60_000;
 const at = (iso) => Date.parse(iso);
@@ -26,10 +26,10 @@ function image(discs = [], geometry = G) {
 }
 const cell = (x, y, r = 3) => [{ x, y, r }];
 const framesOf = (list) => list.map((discs, k) => analyseImage(image(discs), G, T0 + k * FRAME_MS));
-// A result for the airport at 8 minutes after the newest image ends.
-const resultOf = (list, behind = 8) => {
+// A result for the airport `behind` minutes after the stamp of the newest image.
+const resultOf = (list, behind = 13) => {
   const frames = framesOf(list);
-  return summarise(frames, { geometry: G, now: frames.at(-1).time + FRAME_MS + behind * MIN, timeZone: 'UTC' });
+  return summarise(frames, { geometry: G, now: frames.at(-1).time + behind * MIN, timeZone: 'UTC' });
 };
 const approaching = () => resultOf([48, 44, 40, 36, 32, 28].map((y) => cell(0, y)));
 const overhead = () => resultOf(new Array(6).fill(cell(1, 1, 4)));
@@ -92,23 +92,49 @@ describe('the status fact', () => {
     expect(fact(approaching())).toEqual({ text: 'Lightning 26 km N, approaching, ~15 min', status: 'caution' });
     expect(fact(overhead())).toEqual({ text: 'Lightning within 5 km, nearly stationary', status: 'nogo' });
     expect(fact(none())).toEqual({ text: 'No lightning within 30 km', status: 'ok' });
-    expect(fact(receding())).toEqual({ text: 'Lightning 18 km N, moving away', status: 'caution' });
-    expect(LEVEL_STATUS).toEqual({ none: 'ok', distant: 'caution', near: 'caution', close: 'nogo', overhead: 'nogo' });
+    // It was over the airport 30 minutes ago or less, so the level stays red.
+    expect(fact(receding())).toEqual({ text: 'Lightning 18 km N, moving away', status: 'nogo' });
+    expect(LEVEL_STATUS).toEqual({ none: 'ok', distant: 'caution', near: 'caution', close: 'nogo', overhead: 'nogo', unknown: 'unknown' });
   });
 
-  it('says when the data is old', () => {
-    const old = resultOf([48, 44, 40, 36, 32, 28].map((y) => cell(0, y)), 40);
-    expect(fact(old).text).toBe('Lightning 26 km N, movement unclear, data 40 min behind');
+  it('shows old data as grey, with how old it is, never as an all clear', () => {
+    const old = resultOf(new Array(12).fill([]), 45);
+    expect(old.status.level).toBe('unknown');
+    expect(fact(old)).toEqual({ text: 'Lightning data 45 min old', status: 'unknown' });
+    // Also when the old images had lightning in them.
+    const busy = resultOf([48, 44, 40, 36, 32, 28].map((y) => cell(0, y)), 40);
+    expect(fact(busy)).toEqual({ text: 'Lightning data 40 min old', status: 'unknown' });
+    // With a forecast, that stands in, with the age of the data after it, and is not green.
+    const calm = lightningFact(analyseLightning({ airport: EHAM, hourly: hourly(), now: NOW, result: old }));
+    expect(calm).toEqual({ text: 'Thunderstorms unlikely in the next 6 h (forecast), lightning data 45 min old', status: 'unknown' });
+    const stormy2 = lightningFact(analyseLightning({ airport: EHAM, hourly: stormy(), now: NOW, result: old }));
+    expect(stormy2.status).toBe('nogo');
+    expect(stormy2.text).toMatch(/lightning data 45 min old$/);
   });
 
-  it('falls back on the forecast when the airport is not covered or there is no data', () => {
+  it('keeps lightning that was there a short while ago amber or red, not green', () => {
+    const held = resultOf([cell(0, 8), [], cell(0, 9), [], []]);
+    expect(fact(held)).toEqual({ text: 'No lightning within 30 km now, last lightning 20 min ago', status: 'nogo' });
+    const far = resultOf([cell(0, 28), [], [], []]);
+    expect(fact(far).status).toBe('caution');
+    expect(fact(far).text).toMatch(/^No lightning within 30 km now, last lightning \d+ min ago$/);
+  });
+
+  it('falls back on the forecast when the airport is not covered or there is no data, and not in green', () => {
     const risk = { airport: TOKYO, hourly: stormy() };
     expect(lightningFact(analyseLightning({ ...risk, now: NOW }))).toEqual({ text: expect.stringMatching(/^Thunderstorms forecast.*\(forecast\), no lightning data here$/), status: 'nogo' });
     const calm = lightningFact(analyseLightning({ airport: EHAM, hourly: hourly(), now: NOW, result: unavailable(52, 5, 'HTTP 500', NOW) }));
-    expect(calm).toEqual({ text: 'Thunderstorms unlikely in the next 6 h (forecast)', status: 'ok' });
-    const moderate = lightningFact(analyseLightning({ airport: EHAM, hourly: hourly({ cape: hourly().time.map(() => 1800) }), now: NOW, result: unavailable(52, 5, null, NOW) }));
-    expect(moderate.status).toBe('caution');
-    expect(RISK_STATUS.low).toBe('ok');
+    expect(calm).toEqual({ text: 'Thunderstorms unlikely in the next 6 h (forecast)', status: 'unknown' });
+    // CAPE alone is only possible: not an alarm.
+    const possible = lightningFact(analyseLightning({ airport: EHAM, hourly: hourly({ cape: hourly().time.map(() => 1800) }), now: NOW, result: unavailable(52, 5, null, NOW) }));
+    expect(possible).toEqual({ text: 'Thunderstorms possible (forecast)', status: 'unknown' });
+    // With showers in the forecast as well it is likely.
+    const wet = hourly({ cape: hourly().time.map(() => 1800), weather_code: hourly().time.map(() => 80) });
+    expect(lightningFact(analyseLightning({ airport: EHAM, hourly: wet, now: NOW, result: unavailable(52, 5, null, NOW) })).status).toBe('caution');
+    // No forecast hours at all is unknown too.
+    const nothing = lightningFact(analyseLightning({ airport: EHAM, hourly: { time: ['2020-01-01T00:00'], weather_code: [3] }, now: NOW, result: unavailable(52, 5, null, NOW) }));
+    expect(nothing).toEqual({ text: 'No forecast for the next hours (forecast)', status: 'unknown' });
+    expect(RISK_STATUS).toEqual({ none: 'unknown', low: 'unknown', moderate: 'caution', high: 'nogo', unknown: 'unknown' });
   });
 
   it('is plain when there is nothing to go by', () => {
@@ -166,11 +192,13 @@ describe('the section', () => {
     expect(out).toContain('<svg class="lightning-compass');
     expect(out).toContain('Lightning 26 km N, approaching, ~15 min');
     expect(out).toMatch(/Expected within 5 km at about \d\d:\d\d, moving S at 48 km\/h\./);
-    expect(out).toContain('Last 30 min rising, last 60 min not enough images');
-    expect(out).toContain('As of 14:30, data 8 min behind.');
+    expect(out).toContain('Last 30 min steady, last 60 min not enough images');
+    expect(out).toContain('As of 14:25, data 13 min behind.');
     expect(out.match(/<tr>/g)).toHaveLength(1 + 4);
     expect(out).toContain('Contains modified EUMETSAT Meteosat data 2026');
-    expect(out).toContain('approximate');
+    expect(out).toContain('rough');
+    expect(out).toContain('Peak intensity');
+    expect(out).not.toMatch(/<th[^>]*>Flashes/);
     expect(out).toContain('class="ops-lightning"');
   });
 
@@ -203,9 +231,28 @@ describe('the section', () => {
     expect(out).toContain('tries again by itself');
   });
 
-  it('notes that old data gives no arrival time, and a failed refresh', () => {
+  it('warns of old data in the section, and draws its compass in grey', () => {
     const old = resultOf([48, 44, 40, 36, 32, 28].map((y) => cell(0, y)), 40);
-    expect(html(old)).toContain('The data is old: no arrival time is given.');
+    const out = html(old);
+    expect(out).toContain('The lightning data is 40 min old and says nothing of now.');
+    expect(out).toContain('Do not take it for an all clear.');
+    expect(out).toContain('Lightning data 40 min old');
+    expect(out).toContain('status-unknown');
+    expect(out).not.toContain('approaching');
+    expect(out).not.toContain('Expected within');
+    const withForecast = html(old, { hourly: stormy() });
+    expect(withForecast).toContain('<b>Forecast:</b> Thunderstorms forecast');
+  });
+
+  it('says how long ago there was lightning, when it is only held', () => {
+    const held = resultOf([cell(0, 8), [], cell(0, 9), [], []]);
+    const out = html(held);
+    expect(out).toContain('No lightning within 30 km now, last lightning 20 min ago');
+    expect(out).toContain('Kept as a warning until 30 minutes after the last lightning');
+    expect(out).toContain('status-nogo');
+  });
+
+  it('says a failed refresh', () => {
     expect(html({ ...none(), problem: 'The newest lightning image could not be fetched.' })).toContain('could not be fetched.');
   });
 
@@ -424,6 +471,60 @@ describe('keeping it up to date', () => {
     stop.mockRestore();
   });
 
+  it('lets go of the airport at once when another is opened, before the panel is drawn for it', () => {
+    const s = setup();
+    render(ctxFor(EHAM));
+    releaseLightning();
+    expect(s.made[0].stopped).toBe(1);
+    expect(s.overlay.calls.at(-1)).toEqual(['hide']);
+    // A result for the old airport that is still on its way comes to nothing.
+    s.made[0].options.onUpdate(none());
+    expect(s.root.inner.innerHTML).toBe('');
+    // Nothing is stopped twice, and the new airport starts when it is drawn.
+    releaseLightning();
+    expect(s.made[0].stopped).toBe(1);
+    render(ctxFor({ ident: 'EGLL', lat: 51.47, lng: -0.45 }));
+    expect(s.made[0].started.map((a) => a.lat)).toEqual([EHAM.lat, 51.47]);
+  });
+
+  it('does nothing when released with nothing bound or nothing started', () => {
+    expect(() => releaseLightning()).not.toThrow();
+    const s = setup();
+    releaseLightning();
+    expect(s.made[0].stopped).toBe(0);
+    expect(s.overlay.calls).toEqual([]);
+  });
+
+  it('keeps the newest image of only the last few airports', async () => {
+    const s = setup();
+    const airports = Array.from({ length: 6 }, (_, i) => ({ ident: 'A' + i, lat: 50 + i, lng: 5 }));
+    for (const airport of airports) {
+      render(ctxFor(airport));
+      await s.made[0].options.loadImage('https://x/ows?time=2026-10-14T15%3A30%3A00Z');
+    }
+    expect(s.images).toHaveLength(6);
+    // The first two are gone: back at the first, the map has no image to show yet.
+    render(ctxFor(airports[0]));
+    expect(s.overlay.calls.at(-1)[1].image).toBeNull();
+    // The last four are kept: the map has theirs at once.
+    render(ctxFor(airports[5]));
+    expect(s.overlay.calls.at(-1)[1].image).toBe(s.images[5]);
+    render(ctxFor(airports[2]));
+    expect(s.overlay.calls.at(-1)[1].image).toBe(s.images[2]);
+    render(ctxFor(airports[1]));
+    expect(s.overlay.calls.at(-1)[1].image).toBeNull();
+  });
+
+  it('keeps an older image after a newer one for the same airport, not the other way round', async () => {
+    const s = setup();
+    render(ctxFor(EHAM));
+    await s.made[0].options.loadImage('https://x/ows?time=2026-10-14T15%3A30%3A00Z');
+    await s.made[0].options.loadImage('https://x/ows?time=2026-10-14T15%3A35%3A00Z');
+    await s.made[0].options.loadImage('https://x/ows?time=2026-10-14T15%3A20%3A00Z');
+    s.made[0].options.onUpdate(none());
+    expect(s.overlay.calls.at(-1)[1].image).toBe(s.images[1]);
+  });
+
   it('binding again first lets go of the earlier binding', () => {
     const monitors = fakeMonitors();
     const root = fakeRoot();
@@ -468,7 +569,7 @@ describe('the part in the Ops tab', () => {
 });
 
 describe('decoding an image in the browser', () => {
-  const globals = ['createImageBitmap', 'OffscreenCanvas'];
+  const globals = ['createImageBitmap', 'OffscreenCanvas', 'document'];
   const saved = Object.fromEntries(globals.map((g) => [g, globalThis[g]]));
   afterEach(() => {
     for (const g of globals) {
@@ -477,23 +578,84 @@ describe('decoding an image in the browser', () => {
     }
   });
 
-  it('gives the size of the image although closing it empties it', async () => {
+  function fakeBrowser({ offscreen = true } = {}) {
     const bitmap = {
       width: 160,
       height: 160,
+      closed: 0,
       close() {
+        this.closed++;
         this.width = 0;
         this.height = 0;
       },
     };
     const pixels = new Uint8ClampedArray(160 * 160 * 4);
-    globalThis.createImageBitmap = vi.fn(async () => bitmap);
-    globalThis.OffscreenCanvas = class {
-      getContext() {
-        return { drawImage() {}, getImageData: () => ({ data: pixels }) };
-      }
+    const log = { contexts: [], draws: [], reads: [], canvases: [] };
+    const context = {
+      drawImage: (...args) => log.draws.push(args),
+      getImageData: (...args) => {
+        log.reads.push(args);
+        return { data: pixels };
+      },
     };
+    const makeCanvas = (width, height) => ({
+      width,
+      height,
+      getContext: (...args) => {
+        log.contexts.push(args);
+        return context;
+      },
+    });
+    globalThis.createImageBitmap = vi.fn(async () => bitmap);
+    if (offscreen) {
+      globalThis.OffscreenCanvas = class {
+        constructor(width, height) {
+          Object.assign(this, makeCanvas(width, height));
+          log.canvases.push(['offscreen', width, height]);
+        }
+      };
+    } else {
+      delete globalThis.OffscreenCanvas;
+      globalThis.document = {
+        createElement: (name) => {
+          log.canvases.push([name]);
+          return makeCanvas(0, 0);
+        },
+      };
+    }
+    return { bitmap, pixels, log };
+  }
+
+  it('gives the size of the image although closing it empties it', async () => {
+    const { pixels } = fakeBrowser();
     const image = await decodeBlob({});
     expect(image).toEqual({ width: 160, height: 160, data: pixels });
+  });
+
+  it('asks for the image as it is: no premultiplied alpha, no colour conversion', async () => {
+    const { log } = fakeBrowser();
+    const blob = { png: true };
+    await decodeBlob(blob);
+    expect(globalThis.createImageBitmap).toHaveBeenCalledWith(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+    // Read back at its own size, from a canvas made for reading.
+    expect(log.canvases).toEqual([['offscreen', 160, 160]]);
+    expect(log.contexts).toEqual([['2d', { willReadFrequently: true }]]);
+    expect(log.draws).toHaveLength(1);
+    expect(log.draws[0].slice(1)).toEqual([0, 0]);
+    expect(log.reads).toEqual([[0, 0, 160, 160]]);
+  });
+
+  it('lets go of the bitmap, once', async () => {
+    const { bitmap } = fakeBrowser();
+    await decodeBlob({});
+    expect(bitmap.closed).toBe(1);
+  });
+
+  it('uses an ordinary canvas of the page where there is no offscreen one', async () => {
+    const { log, pixels } = fakeBrowser({ offscreen: false });
+    const image = await decodeBlob({});
+    expect(log.canvases).toEqual([['canvas']]);
+    expect(image.data).toBe(pixels);
+    expect(log.contexts).toEqual([['2d', { willReadFrequently: true }]]);
   });
 });

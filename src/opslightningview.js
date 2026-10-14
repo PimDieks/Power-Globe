@@ -65,14 +65,14 @@ export function compassSvg(result) {
 }
 
 function ringsTableHtml(rings) {
-  const rows = rings.map((r) => `<tr><th scope="row">${r.km} km</th><td>${r.areaKm2 ? `${Math.round(r.areaKm2)} km²` : 'none'}</td><td>${r.flashes ? `~${r.flashes}` : '0'}</td><td>${r.peak || ''}</td></tr>`).join('');
-  return `<table class="lightning-rings"><caption>Newest image, within each distance</caption><thead><tr><th scope="col">Within</th><th scope="col">Active area</th><th scope="col">Flashes</th><th scope="col">Peak</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const rows = rings.map((r) => `<tr><th scope="row">${r.km} km</th><td>${r.areaKm2 ? `${Math.round(r.areaKm2)} km²` : 'none'}</td><td>${r.peak || ''}</td></tr>`).join('');
+  return `<table class="lightning-rings"><caption>Newest image, within each distance</caption><thead><tr><th scope="col">Within</th><th scope="col">Active area</th><th scope="col">Peak intensity</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function forecastHtml(data) {
   const { risk, fields } = data;
   if (!risk) return '<p class="ops-note">The forecast loaded for this airport has no thunderstorm fields (weather code, CAPE), so no thunderstorm risk can be given from it.</p>';
-  const basis = `from the forecast's ${fields.map((f) => ({ weather_code: 'weather code', cape: 'CAPE', lifted_index: 'lifted index' })[f]).join(', ')}`;
+  const basis = `from the forecast's ${fields.map((f) => ({ weather_code: 'weather code', cape: 'CAPE' })[f]).join(', ')}`;
   return `<p class="lightning-risk"><b>Forecast:</b> ${escapeHtml(risk.text)} <span class="ops-note">(${escapeHtml(basis)})</span></p>`;
 }
 
@@ -88,18 +88,20 @@ export function lightningInnerHtml(data, ctx = {}) {
   if (r.state === 'unavailable') {
     return `${zone}<p>No lightning data right now. ${escapeHtml(r.problem ?? '')}</p>${forecast}<p class="ops-note">It tries again by itself.</p>`;
   }
-  const move = motionLine(r);
-  const lines = [r.status.text, move].filter(Boolean);
+  const old = r.stale ? `<p class="lightning-old"><b>The lightning data is ${r.behindMin} min old and says nothing of now.</b> Do not take it for an all clear.</p>` : '';
+  const move = r.stale ? '' : motionLine(r);
+  const lines = [r.status.text, move, r.status.hold].filter(Boolean);
   const [head, ...rest] = lines;
-  const attribution = `${escapeHtml(r.attribution)}. Counts are approximate, read from the colours of EUMETSAT's flash map.`;
+  const attribution = `${escapeHtml(r.attribution)}. Intensity is read from the colours of EUMETSAT's flash map, so it is rough; the map counts flashes per pixel of each flash's footprint, which is not a flash count.`;
   return `${zone}
+    ${old}
     <div class="lightning-body">
       ${compassSvg(r)}
       <div class="lightning-text">
         <p class="lightning-head">${escapeHtml(head)}</p>
         ${rest.map((l) => `<p>${escapeHtml(l)}</p>`).join('')}
         <p>${escapeHtml(trendText(r.trend))}.</p>
-        <p class="ops-note">${escapeHtml(r.status.dataText.replace(/^./, (c) => c.toUpperCase()))}${r.stale ? '. The data is old: no arrival time is given.' : '.'}${r.problem ? ` ${escapeHtml(r.problem)}` : ''}</p>
+        <p class="ops-note">${escapeHtml(r.status.dataText.replace(/^./, (c) => c.toUpperCase()))}.${r.problem ? ` ${escapeHtml(r.problem)}` : ''}</p>
       </div>
     </div>
     ${ringsTableHtml(r.rings)}
@@ -118,6 +120,12 @@ let overlay = null;
 export const setLightningOverlay = (value) => {
   overlay = value;
 };
+
+// Stops looking at the airport now, as another one is being opened, without waiting for the panel to
+// be drawn for it: nothing more is fetched for the old airport and its rings and image go.
+export function releaseLightning() {
+  halt();
+}
 
 let bound = null;
 
