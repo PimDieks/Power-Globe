@@ -27,6 +27,7 @@ import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
 import { DragTracker, dragged, followStep, startFollow, stopReason, shiftedLat, visibleShift } from './follow.js';
+import { CARD_REFRESH_MS, cardText, focusTarget, followLayout, freeArea, spokenDue, spokenText } from './followcard.js';
 import { latestObservation } from './metar.js';
 import { explain } from './api.js';
 
@@ -95,6 +96,14 @@ const els = {
   searchStatus: document.getElementById('search-status'),
   detailsBack: document.getElementById('details-back'),
   detailsFollow: document.getElementById('details-follow'),
+  detailsMinimise: document.getElementById('details-minimise'),
+  followCard: document.getElementById('follow-card'),
+  followCardOpen: document.getElementById('follow-card-open'),
+  followCardName: document.getElementById('follow-card-name'),
+  followCardLine: document.getElementById('follow-card-line'),
+  followCardStop: document.getElementById('follow-card-stop'),
+  followCardLive: document.getElementById('follow-card-live'),
+  creditsToggle: document.getElementById('credits-toggle'),
   traffic: {
     flights: document.getElementById('toggle-flights'),
     military: document.getElementById('toggle-military'),
@@ -149,6 +158,8 @@ const state = {
   region: null,
   // The aircraft the camera is following, see follow.js, or null.
   follow: null,
+  // On phones: whether the full panel was asked for while following, instead of the small card.
+  followExpanded: false,
   autoRotate: !reducedMotion,
 };
 
@@ -521,6 +532,7 @@ function tick(now) {
     console.error(err);
   }
   syncFollowButton();
+  syncFollowUi();
   // Live positions change all the time; refresh the open aircraft or satellite every second.
   if (state.detail?.traffic && now - lastTrafficRender > 1000) {
     lastTrafficRender = now;
@@ -766,6 +778,7 @@ function startFollowing() {
   basemap.setFollowing(true);
   airportMap.setFollowing(true);
   state.follow = startFollow(report, globe.pointOfView(), Date.now(), { reduced: reducedMotion });
+  state.followExpanded = false;
   announce(`Following ${els.detailsTitle.textContent}.`);
 }
 
@@ -773,6 +786,7 @@ let zoomToCursor = true;
 function stopFollowing(message) {
   if (!state.follow) return;
   state.follow = null;
+  state.followExpanded = false;
   controls.zoomToCursor = zoomToCursor;
   basemap.setFollowing(false);
   airportMap.setFollowing(false);
@@ -784,12 +798,23 @@ function stopFollowing(message) {
 // second at most.
 let followShift = 0;
 let followShiftAt = 0;
+// An invisible bar as tall as the notch, to measure it.
+const safeTopProbe = document.createElement('div');
+safeTopProbe.setAttribute('aria-hidden', 'true');
+safeTopProbe.style.cssText = 'position:fixed;top:0;left:0;width:0;height:env(safe-area-inset-top, 0px);visibility:hidden;pointer-events:none';
+document.body.append(safeTopProbe);
 function followShiftNow(now) {
   if (!phoneLayout.matches) return 0;
   if (now - followShiftAt > 500) {
     followShiftAt = now;
-    const top = els.controls.offsetTop + els.controls.offsetHeight;
-    followShift = visibleShift({ top, bottom: els.details.offsetTop, height: window.innerHeight, minFree: 20 });
+    const { top, bottom } = freeArea({
+      layout: followLayoutNow,
+      controlsBottom: els.controls.offsetTop + els.controls.offsetHeight,
+      detailsTop: els.details.offsetTop,
+      cardTop: els.followCard.offsetTop,
+      safeTop: safeTopProbe.offsetHeight,
+    });
+    followShift = visibleShift({ top, bottom, height: window.innerHeight, minFree: 20 });
   }
   return followShift;
 }
@@ -824,7 +849,100 @@ function syncFollowButton() {
   // A disabled button cannot keep focus: the panel's close button is the next stop.
   if (els.detailsFollow.disabled && document.activeElement === els.detailsFollow) els.detailsClose.focus();
 }
-els.detailsFollow.addEventListener('click', () => (state.follow ? stopFollowing('Stopped following.') : startFollowing()));
+els.detailsFollow.addEventListener('click', () => {
+  if (state.follow) stopFollowing('Stopped following.');
+  else {
+    startFollowing();
+    followStarted = true;
+  }
+  syncFollowUi();
+});
+
+// Phones: while an aircraft is followed, the controls, the timeline, the credits and the full
+// panel make way for a small card with the flight's name, altitude, speed and track and a Stop
+// button, so the aircraft stays in view (see followcard.js). Tapping the card brings the full
+// panel back, still following; its Minimise button goes back to the card. Hiding is done in the
+// stylesheet, so everything is back as it was, the folded controls included, once following ends.
+let followLayoutNow = 'normal';
+let cardAt = -Infinity;
+let cardSpoken = null;
+let narrowNow = phoneLayout.matches;
+// Set by the Follow button, so that the card's Stop button gets focus for that follow only.
+let followStarted = false;
+function syncFollowUi() {
+  const narrow = phoneLayout.matches;
+  const resized = narrow !== narrowNow;
+  narrowNow = narrow;
+  const layout = followLayout({ following: !!state.follow, narrow, expanded: state.followExpanded });
+  if (layout !== followLayoutNow) switchFollowLayout(layout, { resized });
+  followStarted = false;
+  syncFollowCard();
+}
+
+function switchFollowLayout(layout, { resized }) {
+  const previous = followLayoutNow;
+  const active = document.activeElement;
+  const inside = !!active && (els.details.contains(active) || els.followCard.contains(active));
+  followLayoutNow = layout;
+  followShiftAt = 0;
+  cardAt = -Infinity;
+  cardSpoken = null;
+  const compact = layout !== 'normal';
+  document.body.classList.toggle('follow-compact', compact);
+  document.body.classList.toggle('follow-with-card', layout === 'card');
+  document.body.classList.toggle('follow-with-panel', layout === 'panel');
+  if (!compact) setCreditsOpen(false);
+  els.followCard.hidden = layout !== 'card';
+  els.detailsMinimise.hidden = layout !== 'panel';
+  els.creditsToggle.hidden = !compact;
+  // The measurements were left alone while the panels were away.
+  if (!compact) updateLayout();
+  const target = focusTarget({ previous, layout, inside, started: followStarted, resized });
+  if (target === 'stop') els.followCardStop.focus();
+  else if (target === 'open') els.followCardOpen.focus();
+  else if (target === 'minimise') els.detailsMinimise.focus();
+  else if (target === 'follow' && !els.details.classList.contains('hidden')) {
+    (els.detailsFollow.hidden || els.detailsFollow.disabled ? els.detailsClose : els.detailsFollow).focus();
+  }
+}
+
+// Keeps the card's text up to date. Screen readers get theirs less often and in words.
+function syncFollowCard() {
+  const now = Date.now();
+  if (followLayoutNow !== 'card' || now - cardAt < CARD_REFRESH_MS) return;
+  const report = traffic.selectedAircraft();
+  if (!report) return;
+  cardAt = now;
+  const { name, line } = cardText(report);
+  if (els.followCardName.textContent !== name) {
+    els.followCardName.textContent = name;
+    els.followCardOpen.setAttribute('aria-label', `Show full details for ${name}`);
+  }
+  if (els.followCardLine.textContent !== line) els.followCardLine.textContent = line;
+  const spoken = spokenText(report);
+  if (spokenDue(cardSpoken, spoken, now)) {
+    els.followCardLive.textContent = spoken;
+    cardSpoken = { text: spoken, at: now };
+  }
+}
+
+function setCreditsOpen(open) {
+  document.body.classList.toggle('credits-open', open);
+  els.creditsToggle.setAttribute('aria-expanded', String(open));
+}
+els.creditsToggle.addEventListener('click', () => setCreditsOpen(!document.body.classList.contains('credits-open')));
+els.followCardStop.addEventListener('click', () => {
+  stopFollowing('Stopped following.');
+  syncFollowUi();
+});
+els.followCardOpen.addEventListener('click', () => {
+  state.followExpanded = true;
+  syncFollowUi();
+});
+els.detailsMinimise.addEventListener('click', () => {
+  state.followExpanded = false;
+  syncFollowUi();
+});
 
 // Dragging the map ends following. Zooming does not: the wheel is no drag, and neither is a
 // gesture with more than one finger down.
@@ -1009,6 +1127,9 @@ function goToAirport(airport, { stayClose = false, ...options } = {}) {
   const altitude = stayClose ? airportFlightAltitude(globe.pointOfView().altitude) : AIRPORT_ALTITUDE;
   let lat = airport.lat;
   if (phoneLayout.matches) {
+    // Following ends with the airport, and the controls the card hid must be there to measure.
+    stopFollowing();
+    syncFollowUi();
     // The controls fold when the panel opens: measure them folded.
     setControlsOpen(false);
     const top = els.controls.offsetTop + els.controls.offsetHeight;
@@ -1144,6 +1265,12 @@ els.windCheckClose.addEventListener('click', () => {
 });
 window.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
+  // Open credits close first.
+  if (document.body.classList.contains('credits-open')) {
+    setCreditsOpen(false);
+    els.creditsToggle.focus();
+    return;
+  }
   if (state.follow) stopFollowing('Stopped following.');
   else if (state.detail?.fromList) backToWindCheck();
   else if (state.detail) closeDetails();
@@ -1173,6 +1300,8 @@ els.hazards.addEventListener('change', invalidate);
 // Panels stop above the timeline, and on phones the timeline above the credits; their heights
 // change with screen width and wrapping. Uses offsetTop, which ignores the idle fade's transform.
 function updateLayout() {
+  // The hidden panels would measure as nothing; the numbers are taken again when they return.
+  if (document.body.classList.contains('follow-compact')) return;
   const root = document.documentElement.style;
   root.setProperty('--credits-height', `${els.credits.offsetHeight}px`);
   root.setProperty('--controls-bottom', `${els.controls.offsetTop + els.controls.offsetHeight}px`);
