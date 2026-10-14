@@ -27,7 +27,7 @@ import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
 import { DragTracker, dragged, followStep, startFollow, stopReason, shiftedLat, visibleShift } from './follow.js';
-import { CARD_REFRESH_MS, cardText, followLayout, freeArea, spokenDue, spokenText } from './followcard.js';
+import { CARD_REFRESH_MS, cardText, focusTarget, followLayout, freeArea, spokenDue, spokenText } from './followcard.js';
 import { latestObservation } from './metar.js';
 import { explain } from './api.js';
 
@@ -798,6 +798,11 @@ function stopFollowing(message) {
 // second at most.
 let followShift = 0;
 let followShiftAt = 0;
+// An invisible bar as tall as the notch, to measure it.
+const safeTopProbe = document.createElement('div');
+safeTopProbe.setAttribute('aria-hidden', 'true');
+safeTopProbe.style.cssText = 'position:fixed;top:0;left:0;width:0;height:env(safe-area-inset-top, 0px);visibility:hidden;pointer-events:none';
+document.body.append(safeTopProbe);
 function followShiftNow(now) {
   if (!phoneLayout.matches) return 0;
   if (now - followShiftAt > 500) {
@@ -807,6 +812,7 @@ function followShiftNow(now) {
       controlsBottom: els.controls.offsetTop + els.controls.offsetHeight,
       detailsTop: els.details.offsetTop,
       cardTop: els.followCard.offsetTop,
+      safeTop: safeTopProbe.offsetHeight,
     });
     followShift = visibleShift({ top, bottom, height: window.innerHeight, minFree: 20 });
   }
@@ -845,7 +851,10 @@ function syncFollowButton() {
 }
 els.detailsFollow.addEventListener('click', () => {
   if (state.follow) stopFollowing('Stopped following.');
-  else startFollowing();
+  else {
+    startFollowing();
+    followStarted = true;
+  }
   syncFollowUi();
 });
 
@@ -857,17 +866,23 @@ els.detailsFollow.addEventListener('click', () => {
 let followLayoutNow = 'normal';
 let cardAt = -Infinity;
 let cardSpoken = null;
+let narrowNow = phoneLayout.matches;
+// Set by the Follow button, so that the card's Stop button gets focus for that follow only.
+let followStarted = false;
 function syncFollowUi() {
-  const layout = followLayout({ following: !!state.follow, narrow: phoneLayout.matches, expanded: state.followExpanded });
-  if (layout !== followLayoutNow) switchFollowLayout(layout);
+  const narrow = phoneLayout.matches;
+  const resized = narrow !== narrowNow;
+  narrowNow = narrow;
+  const layout = followLayout({ following: !!state.follow, narrow, expanded: state.followExpanded });
+  if (layout !== followLayoutNow) switchFollowLayout(layout, { resized });
+  followStarted = false;
   syncFollowCard();
 }
 
-function switchFollowLayout(layout) {
+function switchFollowLayout(layout, { resized }) {
   const previous = followLayoutNow;
   const active = document.activeElement;
-  // Focus only moves if it was in the part that goes away, or nowhere.
-  const ownsFocus = !active || active === document.body || els.details.contains(active) || els.followCard.contains(active);
+  const inside = !!active && (els.details.contains(active) || els.followCard.contains(active));
   followLayoutNow = layout;
   followShiftAt = 0;
   cardAt = -Infinity;
@@ -882,10 +897,11 @@ function switchFollowLayout(layout) {
   els.creditsToggle.hidden = !compact;
   // The measurements were left alone while the panels were away.
   if (!compact) updateLayout();
-  if (!ownsFocus) return;
-  if (layout === 'card') els.followCardStop.focus();
-  else if (layout === 'panel') els.detailsMinimise.focus();
-  else if (previous !== 'normal' && !els.details.classList.contains('hidden')) {
+  const target = focusTarget({ previous, layout, inside, started: followStarted, resized });
+  if (target === 'stop') els.followCardStop.focus();
+  else if (target === 'open') els.followCardOpen.focus();
+  else if (target === 'minimise') els.detailsMinimise.focus();
+  else if (target === 'follow' && !els.details.classList.contains('hidden')) {
     (els.detailsFollow.hidden || els.detailsFollow.disabled ? els.detailsClose : els.detailsFollow).focus();
   }
 }
@@ -1111,6 +1127,9 @@ function goToAirport(airport, { stayClose = false, ...options } = {}) {
   const altitude = stayClose ? airportFlightAltitude(globe.pointOfView().altitude) : AIRPORT_ALTITUDE;
   let lat = airport.lat;
   if (phoneLayout.matches) {
+    // Following ends with the airport, and the controls the card hid must be there to measure.
+    stopFollowing();
+    syncFollowUi();
     // The controls fold when the panel opens: measure them folded.
     setControlsOpen(false);
     const top = els.controls.offsetTop + els.controls.offsetHeight;
@@ -1246,6 +1265,12 @@ els.windCheckClose.addEventListener('click', () => {
 });
 window.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
+  // Open credits close first.
+  if (document.body.classList.contains('credits-open')) {
+    setCreditsOpen(false);
+    els.creditsToggle.focus();
+    return;
+  }
   if (state.follow) stopFollowing('Stopped following.');
   else if (state.detail?.fromList) backToWindCheck();
   else if (state.detail) closeDetails();

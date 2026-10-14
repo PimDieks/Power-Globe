@@ -1354,8 +1354,8 @@ body:not(.idle) #caption {
 .follow-card {
   position: fixed;
   z-index: 10;
-  left: var(--gap);
-  right: var(--gap);
+  left: calc(env(safe-area-inset-left, 0px) + var(--gap));
+  right: calc(env(safe-area-inset-right, 0px) + var(--gap));
   bottom: calc(env(safe-area-inset-bottom, 0px) + var(--gap));
   display: flex;
   align-items: center;
@@ -1416,7 +1416,7 @@ body:not(.idle) #caption {
   position: fixed;
   z-index: 21;
   top: calc(env(safe-area-inset-top, 0px) + 4px);
-  right: 4px;
+  right: calc(env(safe-area-inset-right, 0px) + 4px);
   display: grid;
   place-items: center;
   width: 44px;
@@ -1451,6 +1451,20 @@ body:not(.idle) #caption {
   }
 
   /* The full panel alone: low enough that the aircraft, held above it, stays in view. */
+  /* Its header wraps: the name on a row of its own, so a long one is not squeezed under the buttons. */
+  body.follow-with-panel .details-head {
+    flex-wrap: wrap;
+  }
+
+  body.follow-with-panel .details-head h2 {
+    flex: 1 0 100%;
+    overflow-wrap: anywhere;
+  }
+
+  body.follow-with-panel .details-head .icon-button {
+    margin-left: auto;
+  }
+
   body.follow-with-panel #details {
     bottom: calc(env(safe-area-inset-bottom, 0px) + var(--gap));
     max-height: 60vh;
@@ -1461,8 +1475,8 @@ body:not(.idle) #caption {
     display: block;
     top: calc(env(safe-area-inset-top, 0px) + 48px);
     bottom: auto;
-    left: var(--gap);
-    right: var(--gap);
+    left: calc(env(safe-area-inset-left, 0px) + var(--gap));
+    right: calc(env(safe-area-inset-right, 0px) + var(--gap));
     z-index: 20;
     padding: 8px 12px;
     border-radius: 10px;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SPOKEN_MIN_MS, cardText, followLayout, freeArea, spokenDue, spokenText } from '../src/followcard.js';
+import { SPOKEN_MIN_MS, cardText, focusTarget, followLayout, freeArea, spokenDue, spokenText } from '../src/followcard.js';
 
 const ac = (overrides = {}) => ({
   id: 'abc123',
@@ -58,6 +58,11 @@ describe('spokenText', () => {
   it('does not change for small differences', () => {
     expect(spokenText(ac({ altitudeFt: 36040, speedKt: 452, track: 271 }))).toBe(spokenText(ac()));
   });
+
+  it('changes when the flight changes noticeably', () => {
+    expect(spokenText(ac({ altitudeFt: 37000 }))).not.toBe(spokenText(ac()));
+    expect(spokenText(ac({ track: 300 }))).not.toBe(spokenText(ac()));
+  });
 });
 
 describe('spokenDue', () => {
@@ -84,7 +89,45 @@ describe('freeArea', () => {
     expect(freeArea({ layout: 'panel', ...measured })).toEqual({ top: 0, bottom: 400 });
   });
 
+  it('starts below the notch', () => {
+    expect(freeArea({ layout: 'card', safeTop: 44, ...measured })).toEqual({ top: 44, bottom: 700 });
+    expect(freeArea({ layout: 'panel', safeTop: 44, ...measured })).toEqual({ top: 44, bottom: 400 });
+  });
+
   it('is between the controls and the panel otherwise', () => {
     expect(freeArea({ layout: 'normal', ...measured })).toEqual({ top: 120, bottom: 400 });
+  });
+});
+
+describe('focusTarget', () => {
+  const base = { inside: true, started: false, resized: false };
+
+  it('lands on Stop only for a fresh follow', () => {
+    expect(focusTarget({ ...base, previous: 'normal', layout: 'card', started: true })).toBe('stop');
+    expect(focusTarget({ ...base, previous: 'normal', layout: 'card' })).toBeNull();
+  });
+
+  it('goes to the open button of the card when the panel is minimised, not to Stop', () => {
+    expect(focusTarget({ ...base, previous: 'panel', layout: 'card' })).toBe('open');
+  });
+
+  it('goes to Minimise when the card is opened', () => {
+    expect(focusTarget({ ...base, previous: 'card', layout: 'panel' })).toBe('minimise');
+  });
+
+  it('goes back to Follow when following ends', () => {
+    expect(focusTarget({ ...base, previous: 'card', layout: 'normal' })).toBe('follow');
+    expect(focusTarget({ ...base, previous: 'panel', layout: 'normal' })).toBe('follow');
+  });
+
+  it('leaves focus alone when it was not in the part that went away', () => {
+    expect(focusTarget({ ...base, inside: false, previous: 'card', layout: 'normal' })).toBeNull();
+    expect(focusTarget({ ...base, inside: false, previous: 'card', layout: 'panel' })).toBeNull();
+    expect(focusTarget({ ...base, inside: false, previous: 'panel', layout: 'card' })).toBeNull();
+  });
+
+  it('leaves focus alone on a resize or a turn of the screen', () => {
+    expect(focusTarget({ ...base, resized: true, started: true, previous: 'normal', layout: 'card' })).toBeNull();
+    expect(focusTarget({ ...base, resized: true, previous: 'card', layout: 'normal' })).toBeNull();
   });
 });

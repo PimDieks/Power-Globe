@@ -5,7 +5,7 @@ import { aircraftName } from './trafficview.js';
 // The card's text is worked out this often at most.
 export const CARD_REFRESH_MS = 1000;
 // What screen readers hear changes this seldom at most, and only when it says something new.
-export const SPOKEN_MIN_MS = 5000;
+export const SPOKEN_MIN_MS = 20_000;
 
 const round = (v, step) => Math.round(v / step) * step;
 const known = (v) => v != null && !Number.isNaN(v);
@@ -29,14 +29,14 @@ export function cardText(ac, { locale } = {}) {
   return { name: aircraftName(ac), line: parts.join(' · ') };
 }
 
-// The same for a screen reader, in words and rounded more coarsely so that it changes only when
-// the flight has changed noticeably.
+// The same for a screen reader, in words and rounded coarsely (500 ft, 10 kt, 10 degrees) so
+// that it changes only when the flight has changed noticeably.
 export function spokenText(ac, { locale } = {}) {
   const parts = [`Flight ${aircraftName(ac)}`];
   if (ac.onGround) parts.push('on the ground');
-  else if (known(ac.altitudeFt)) parts.push(`altitude ${round(ac.altitudeFt, 100).toLocaleString(locale)} feet`);
-  if (known(ac.speedKt)) parts.push(`ground speed ${round(ac.speedKt, 5)} knots`);
-  if (known(ac.track)) parts.push(`track ${String(round(ac.track, 5) % 360).padStart(3, '0')} degrees`);
+  else if (known(ac.altitudeFt)) parts.push(`altitude ${round(ac.altitudeFt, 500).toLocaleString(locale)} feet`);
+  if (known(ac.speedKt)) parts.push(`ground speed ${round(ac.speedKt, 10)} knots`);
+  if (known(ac.track)) parts.push(`track ${String(round(ac.track, 10) % 360).padStart(3, '0')} degrees`);
   return `${parts.join(', ')}.`;
 }
 
@@ -45,9 +45,25 @@ export function spokenText(ac, { locale } = {}) {
 export const spokenDue = (last, text, now) => !last || (text !== last.text && now - last.at >= SPOKEN_MIN_MS);
 
 // The part of the screen left free for the aircraft, as { top, bottom } in pixels from the top:
-// above the card or the panel, and below the controls when they are still shown.
-export function freeArea({ layout, controlsBottom, detailsTop, cardTop }) {
-  if (layout === 'card') return { top: 0, bottom: cardTop };
-  if (layout === 'panel') return { top: 0, bottom: detailsTop };
+// above the card or the panel and below the notch (`safeTop`), or below the controls when they
+// are still shown.
+export function freeArea({ layout, controlsBottom, detailsTop, cardTop, safeTop = 0 }) {
+  if (layout === 'card') return { top: safeTop, bottom: cardTop };
+  if (layout === 'panel') return { top: safeTop, bottom: detailsTop };
   return { top: controlsBottom, bottom: detailsTop };
+}
+
+// Where focus goes when the layout changes, or null to leave it. 'stop' and 'open' are the
+// card's buttons, 'minimise' the full panel's, 'follow' its Follow button (or its close button
+// when that is off). Focus only moves if it was in the part that goes away (`inside`), never
+// when the screen was just resized or turned, and only a fresh follow (`started`) lands on the
+// Stop button: Stop is not a button to land on by chance.
+export function focusTarget({ previous, layout, inside, started, resized }) {
+  if (resized) return null;
+  if (layout === 'card') {
+    if (previous === 'panel') return inside ? 'open' : null;
+    return started ? 'stop' : null;
+  }
+  if (!inside) return null;
+  return layout === 'panel' ? 'minimise' : 'follow';
 }
