@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { toAirport } from '../src/airports.js';
-import { assessHour, favouredRuns, noCarry, noOutlookText, outlookLines, outlookStale, outlookTimes, runwayFact, runwayOutlook, runwayRows } from '../src/opsrunway.js';
+import { assessHour, favouredRuns, hourAt, runwayCall, noCarry, noOutlookText, outlookLines, outlookStale, outlookTimes, runwayFact, runwayOutlook, runwayRows } from '../src/opsrunway.js';
 import { assessAirport, runwayEnds } from '../src/runways.js';
 
 const LIMITS = { crosswind: 25, tailwind: 10 };
@@ -322,5 +322,92 @@ describe('the order of the ends of an airport', () => {
     expect(result.ends.map((e) => e.status)).toEqual(['ok', 'ok']);
     expect(result.ends.map((e) => e.ident)).toEqual(['X', 'Y']);
     expect(result.best.ident).toBe('X');
+  });
+});
+
+describe('runwayCall', () => {
+  const ends = runwayEnds(two);
+  const wind = (direction, speed, gust) => ({ time: '2026-10-14T12:00', direction, speed, gust: gust ?? speed });
+  const call = (airport, w, runway = airport.runways[0], carry) => runwayCall(runway, assessHour(runwayEnds(airport), w, LIMITS, carry));
+
+  it('colours a runway by its better end and marks the downwind end as neutral', () => {
+    // 15 kt from 270: a headwind on 27, a tailwind of 15 (over the limit of 10) on 09.
+    const result = call(two, wind(270, 15));
+    expect(result.status).toBe('ok');
+    expect(result.best).toBe('27');
+    expect(result.ends['27']).toEqual({ status: 'ok', hint: null });
+    expect(result.ends['09']).toEqual({ status: 'neutral', hint: 'tailwind' });
+  });
+
+  it('shows red on both ends only when every end is over a limit', () => {
+    // 28 kt from 360 is a 28 kt crosswind on 09/27, over the limit of 25 whichever way round.
+    const result = call(two, wind(0, 28));
+    expect(result.status).toBe('nogo');
+    expect(result.ends['09'].status).toBe('nogo');
+    expect(result.ends['27'].status).toBe('nogo');
+    // The other runway of the airport (06/24) is fine in the same wind.
+    expect(call(two, wind(0, 28), two.runways[1]).status).toBe('caution');
+  });
+
+  it('is marginal on the better end, neutral on the other', () => {
+    // A 21 kt crosswind is 84% of the limit.
+    const crossing = call(one, wind(0, 21));
+    expect(crossing.status).toBe('caution');
+    expect([crossing.ends['09'].status, crossing.ends['27'].status].filter((s) => s === 'caution')).toHaveLength(1);
+    expect([crossing.ends['09'].status, crossing.ends['27'].status].filter((s) => s === 'neutral')).toHaveLength(1);
+  });
+
+  it('judges a gust like the strips do', () => {
+    // A mean wind of 10 kt gusting 30 from 090 puts a 30 kt tailwind on 27: it is the 09 end.
+    const result = call(one, wind(90, 10, 30));
+    expect(result.best).toBe('09');
+    expect(result.ends['27']).toEqual({ status: 'neutral', hint: 'tailwind' });
+  });
+
+  it('shows both ends with their status in calm, and gives no hint to a mere crosswind end', () => {
+    const calm = call(one, wind(0, 0));
+    expect(calm.ends).toEqual({ '09': { status: 'ok', hint: null }, '27': { status: 'ok', hint: null } });
+    // Wind straight across the runway: no tailwind on either end, still one end is the better one.
+    const across = call(one, wind(0, 10));
+    const neutral = Object.values(across.ends).find((e) => e.status === 'neutral');
+    expect(neutral.hint).toBeNull();
+  });
+
+  it('keeps the end in use when the headwinds are within a knot, like the strips', () => {
+    // Wind straight across the runway gives both ends the same headwind: the end in use stays.
+    const carried = call(one, wind(0, 10), one.runways[0], { favoured: '27', best: { '09/27': '27' } });
+    expect(carried.best).toBe('27');
+    expect(call(one, wind(0, 10)).best).toBe('09');
+  });
+
+  it('is unknown without a forecast', () => {
+    const result = runwayCall(one.runways[0], assessHour(runwayEnds(one), null, LIMITS));
+    expect(result.status).toBe('unknown');
+    expect(result.ends['09'].status).toBe('unknown');
+    expect(runwayCall(one.runways[0], null).status).toBe('unknown');
+  });
+
+  it('agrees with the outlook for every hour of a run of winds, including the carried end', () => {
+    const rows = [[270, 12], [0, 10], [0, 10], [90, 12], [0, 10], [0, 30], [0, 0], [90, 15]];
+    const outlook = outlookFor(one, rows, { hours: rows.length });
+    const data = hourly(rows);
+    outlook.hours.forEach((h) => {
+      const mapHour = hourAt(one, data, h.time, LIMITS);
+      const result = runwayCall(one.runways[0], mapHour);
+      expect(result.status).toBe(h.runways[0].status);
+      expect(result.best).toBe(h.runways[0].best);
+    });
+  });
+});
+
+describe('hourAt', () => {
+  it('judges the hour containing the time, and carries the favoured end from the hours before', () => {
+    const data = hourly([[270, 10], [0, 10]]);
+    // The second hour alone would favour 09; after 27 it stays on 27 (the headwinds are equal).
+    expect(hourAt(one, data, '2026-10-14T13:20', LIMITS).favoured).toBe('27');
+  });
+
+  it('has nothing without a forecast', () => {
+    expect(hourAt(one, null, '2026-10-14T13:20', LIMITS)).toBeNull();
   });
 });

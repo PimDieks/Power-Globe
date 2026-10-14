@@ -5,7 +5,8 @@ import { STATUS, assessAirport, formatWind } from './runways.js';
 import { viewBounds } from './detail.js';
 import { CITIES, labelTier } from './cities.js';
 import { airportView, runwayEndText } from './mapprofile.js';
-import { destination, localFrame, placeLabels, runwayEnds, runwayStatus, setupRunways } from './runwaymap.js';
+import { hourAt, runwayCall } from './opsrunway.js';
+import { destination, localFrame, placeLabels, runwayEnds, setupRunways } from './runwaymap.js';
 
 // Altitude to fly to an airport at: low enough to make out its runways.
 export const AIRPORT_ALTITUDE = 0.004;
@@ -251,11 +252,14 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     const wanted = [];
     const withWind = new Set();
     for (const airport of shown) {
-      const { conditions, endStatus } = statusOf(airport, time, limits);
+      const conditions = conditionsAt(weather.get(airport.ident), time);
       const view = airportView(airport, selected, profile);
+      // The runways as the panel's outlook judges the hour (see runwayCall).
+      const hour = view.runwayStatus && conditions ? hourAt(airport, weather.get(airport.ident), time, limits) : null;
       for (const runway of airport.runways) {
         const ends = runwayEnds(airport, runway);
-        strips.push({ ends, widthFt: runway.widthFt, status: view.runwayStatus ? runwayStatus(runway, endStatus) : 'unknown' });
+        const call = runwayCall(runway, hour);
+        strips.push({ ends, widthFt: runway.widthFt, status: view.runwayStatus ? call.status : 'unknown' });
         const [a, b] = ends.map(frame.toXY);
         // As drawn: at least 5 px wide, plus its outline.
         segments.push({ a, b, r: Math.max(runway.widthFt * 0.3048, 5 * mpp) / 2 + 1.5 * mpp });
@@ -265,10 +269,14 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
         // Each end's label goes beyond its threshold, on the extended centreline if that is free.
         [runway.le, runway.he].forEach((ident, k) => {
           if (!ident) return;
-          const status = view.runwayStatus ? (endStatus.get(ident) ?? 'unknown') : 'unknown';
+          const end = view.runwayStatus ? call.ends[ident] : { status: 'unknown', hint: null };
+          const { status } = end;
           // Seen in use by the traffic (see setRunwayUse), while the Traffic tab shows it: ARR, DEP or both.
           const use = view.runwayUse && runwayUse?.ident === airport.ident ? runwayUse.ends[ident] : null;
-          const text = runwayEndText(ident, STATUS[status].icon, use, view);
+          const neutral = status === 'neutral';
+          const name = end.hint ? `${ident} ${end.hint}` : ident;
+          const text = runwayEndText(name, neutral ? null : STATUS[status].icon, use, view);
+          const verdict = neutral ? `${end.hint ? `${end.hint}, ` : ''}the runway is ${STATUS[call.status].label.toLowerCase()} from ${call.best}` : STATUS[status].label;
           wanted.push({
             label: {
               key: `${airport.ident}:${ident}:${status}:${use?.tag ?? ''}:${text}`,
@@ -276,7 +284,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
               status,
               use: Boolean(use),
               text,
-              title: view.runwayStatus ? `Runway ${ident}: ${STATUS[status].label}${use ? `. ${use.title}` : ''}` : `Runway ${ident}${use ? `. ${use.title}` : ''}`,
+              title: view.runwayStatus ? `Runway ${ident}: ${verdict}${use ? `. ${use.title}` : ''}` : `Runway ${ident}${use ? `. ${use.title}` : ''}`,
             },
             anchor: k ? b : a,
             direction: k ? along : { x: -along.x, y: -along.y },
