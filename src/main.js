@@ -194,6 +194,7 @@ const basemap = setupBasemap(globe, `${IMAGE_BASE}/earth-blue-marble.jpg`, {
   onCredit: (html) => {
     els.basemapCredit.innerHTML = html;
   },
+  onClouds: () => renderCaption(),
 });
 const mapFeatures = setupMapFeatures(globe);
 const traffic = setupTraffic({
@@ -366,7 +367,10 @@ renderTrafficLegend();
 function renderCaption() {
   const time = state.forecast?.times[Math.round(state.t)];
   const label = state.overlay ? state.layer.label : 'Map';
-  els.caption.textContent = time ? `${label} · ${formatTime(time)}` : label;
+  // In the forecast part of the timeline the moving clouds stay on the newest image there is.
+  const asOf = basemap.cloudsAsOf();
+  const clouds = asOf ? ` · clouds as of ${new Date(asOf).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })}` : '';
+  els.caption.textContent = time ? `${label} · ${formatTime(time)}${clouds}` : label;
 }
 
 // Re-draw everything on the next frame, e.g. after a layer or display change.
@@ -390,6 +394,9 @@ function drawStep(step) {
   els.slider.value = String(step);
   els.slider.setAttribute('aria-valuetext', formatTime(times[step]));
   els.timeLabel.textContent = formatTime(times[step]);
+  // While the timeline plays, the clouds for the next two steps load ahead.
+  const ahead = state.playing ? [1, 2].map((k) => parseTime(times[(step + k) % times.length])) : [];
+  basemap.setTime(parseTime(times[step]), ahead);
   renderCaption();
   renderDetails();
   windCheck.update();
