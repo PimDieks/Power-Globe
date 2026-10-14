@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ANIMATION_MAX_TILES,
   AREA_DEG,
   Backoff,
+  LOOP_FRAME_MS,
+  LOOP_HOLD_MS,
+  coarserView,
+  loopFrames,
+  loopStep,
+  loopStatus,
   MAX_ATTEMPTS,
   TileStore,
   frameFor,
@@ -385,6 +392,23 @@ describe('TileStore', () => {
     expect(load.mock.calls.map(([url]) => url)).toEqual(['u:a', 'u:b', 'u:a']);
   });
 
+  it('drops tiles beyond a lowered bound as soon as they are no longer wanted', async () => {
+    vi.useFakeTimers();
+    const dispose = vi.fn();
+    const store = new TileStore({ load: async (url) => url, max: 10, concurrency: 10, dispose });
+    store.want(jobs(['a', 'b', 'c', 'd', 'e', 'f']));
+    await flush();
+    store.max = 2;
+    store.evict();
+    // Still wanted: all kept.
+    expect(store.entries.size).toBe(6);
+    // Wanted no more, with nothing new to load: down to the bound at once.
+    store.want(jobs(['f']));
+    expect(store.entries.size).toBe(2);
+    expect(store.get('f').state).toBe('done');
+    expect(dispose).toHaveBeenCalledTimes(4);
+  });
+
   it('lets go of every loaded image when cleared, but not of those loading', async () => {
     vi.useFakeTimers();
     const dispose = vi.fn();
@@ -398,5 +422,62 @@ describe('TileStore', () => {
     store.clear();
     expect([...store.entries.keys()]).toEqual(['c']);
     expect(dispose.mock.calls.map(([v]) => v).sort()).toEqual(['A', 'B']);
+  });
+});
+
+describe('animation tiles', () => {
+  it('takes the finest level with at most a few tiles in view', () => {
+    // Europe at about 0.7 globe radii up: much of a quarter of the globe.
+    const inView = (lat, lng) => lat > 25 && lat < 70 && lng > -20 && lng < 40;
+    const still = tilesInView(4, inView).length;
+    const coarse = coarserView(4, inView);
+    expect(still).toBeGreaterThan(ANIMATION_MAX_TILES);
+    expect(coarse.tiles.length).toBeLessThanOrEqual(ANIMATION_MAX_TILES);
+    expect(coarse.level).toBe(3);
+    expect(coarse.tiles).toEqual(tilesInView(3, inView));
+    // Few enough already: the same tiles.
+    expect(coarserView(2, inView)).toEqual({ level: 2, tiles: tilesInView(2, inView) });
+    expect(coarserView(1, () => true, 0).level).toBe(0);
+  });
+});
+
+describe('the clouds loop', () => {
+  it('takes the last 12 hours every half hour, oldest first, from the newest half hour', () => {
+    const frames = loopFrames(TIMES);
+    expect(frames).toHaveLength(25);
+    expect(frames.at(-1)).toBe(at('2026-10-14T06:30:00Z'));
+    expect(frames[0]).toBe(at('2026-10-13T18:30:00Z'));
+    expect(frames[1] - frames[0]).toBe(30 * MIN);
+    // A newest image off the half hour: the loop ends on the half hour before it.
+    expect(loopFrames({ ...TIMES, end: at('2026-10-14T06:50:00Z') }).at(-1)).toBe(at('2026-10-14T06:30:00Z'));
+    // Never before the first image there is.
+    expect(loopFrames({ start: at('2026-10-14T03:00:00Z'), end: at('2026-10-14T06:30:00Z'), step: 10 * MIN })).toHaveLength(8);
+  });
+
+  it('fades each image into the next, holds the newest, and starts again', () => {
+    let at = { index: 0, since: 1000 };
+    expect(loopStep(at, 1000, 25)).toEqual({ index: 0, since: 1000, next: 1, mix: 0 });
+    expect(loopStep(at, 1000 + LOOP_FRAME_MS / 2, 25)).toEqual({ index: 0, since: 1000, next: 1, mix: 0.5 });
+    at = loopStep(at, 1000 + LOOP_FRAME_MS, 25);
+    expect(at).toEqual({ index: 1, since: 1000 + LOOP_FRAME_MS, next: 2, mix: 0 });
+    // The newest stays, then the loop jumps back to the oldest.
+    const newest = { index: 24, since: 0 };
+    expect(loopStep(newest, LOOP_FRAME_MS, 25)).toEqual({ index: 24, since: 0, next: 24, mix: 0 });
+    expect(loopStep(newest, LOOP_HOLD_MS, 25)).toEqual({ index: 0, since: LOOP_HOLD_MS, next: 1, mix: 0 });
+    // More images arrived meanwhile: what was the newest goes on to the next.
+    expect(loopStep({ index: 19, since: 0 }, LOOP_FRAME_MS, 25).index).toBe(20);
+    expect(loopStep({ index: 0, since: 0 }, 5000, 1)).toEqual({ index: 0, since: 5000, next: 0, mix: 0 });
+  });
+
+  it('never goes backwards when a frame comes with an earlier time than the last change', () => {
+    expect(loopStep({ index: 3, since: 1000 }, 950, 25)).toEqual({ index: 3, since: 1000, next: 4, mix: 0 });
+  });
+
+  it('starts once nearly all images are there, and gives up only when there are not two', () => {
+    expect(loopStatus({ frames: 25, complete: 19, settled: false })).toBe('loading');
+    expect(loopStatus({ frames: 25, complete: 20, settled: false })).toBe('ready');
+    expect(loopStatus({ frames: 25, complete: 5, settled: true })).toBe('ready');
+    expect(loopStatus({ frames: 25, complete: 1, settled: true })).toBe('failed');
+    expect(loopStatus({ frames: 2, complete: 1, settled: false })).toBe('loading');
   });
 });

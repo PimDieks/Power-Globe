@@ -21,6 +21,7 @@ import { ScreenFlow } from './screenflow.js';
 import { HAZARDS, hazardRings, reuseRings } from './patterns.js';
 import { DETAIL_ALTITUDE, needsNewRegion, regionFor, viewBounds } from './detail.js';
 import { BASEMAPS, setupBasemap, setupMapFeatures } from './map.js';
+import { buildTimeline, forecastPosition, samePlace } from './timeline.js';
 import { setupSearch } from './search.js';
 import { airportPanelWeather, conditionsAt, loadAirports, searchAirports } from './airports.js';
 import { airportDetailsHtml, airportPlace, panelStays, verdictText } from './airportview.js';
@@ -93,6 +94,7 @@ const els = {
   slider: document.getElementById('time-slider'),
   timeLabel: document.getElementById('time-label'),
   now: document.getElementById('now'),
+  cloudsLoop: document.getElementById('clouds-loop'),
   caption: document.getElementById('caption'),
   controls: document.getElementById('controls'),
   controlsToggle: document.getElementById('controls-toggle'),
@@ -150,8 +152,12 @@ const state = {
   overlay: false,
   forecast: null,
   winds: null,
-  // Fractional index into forecast.times; the field and wind blend between neighbouring steps.
+  // Fractional index into timeline.times; the field and wind blend between neighbouring steps.
   t: 0,
+  // The timeline: the forecast's times, after the past day's in the Clouds view (see timeline.js).
+  timeline: null,
+  // The clouds loop's status as last shown ('loading', 'playing', 'failed' or null).
+  loopStatus: null,
   playing: false,
   // Step whose discrete layers (the storm rings) are currently drawn.
   drawnStep: -1,
@@ -179,6 +185,9 @@ const state = {
 if (narrowScreen) setControlsOpen(false);
 
 const fmt = (value, unit) => (value == null ? '–' : `${Math.round(value * 10) / 10} ${unit}`);
+
+// A time in milliseconds, as formatTime writes it.
+const formatMs = (ms) => formatTime(new Date(ms).toISOString().slice(0, 16));
 
 const formatTime = (time) =>
   new Date(parseTime(time)).toLocaleString(undefined, {
@@ -217,7 +226,10 @@ const basemap = setupBasemap(globe, `${IMAGE_BASE}/earth-blue-marble.jpg`, {
   onCredit: (html) => {
     els.basemapCredit.innerHTML = html;
   },
-  onClouds: () => renderCaption(),
+  onClouds: () => {
+    renderCaption();
+    renderCloudsLoop();
+  },
 });
 const mapFeatures = setupMapFeatures(globe);
 const traffic = setupTraffic({
@@ -257,7 +269,11 @@ const pilot = setupPilotView({
   },
   traffic,
   background: () => [...document.body.children].filter((el) => !['pilot', 'announcer'].includes(el.id) && el.tagName !== 'SCRIPT'),
-  onOpen: () => globe.pauseAnimation(),
+  onOpen: () => {
+    // The clouds loop is for the globe, which the pilot view covers.
+    stopCloudsLoop();
+    globe.pauseAnimation();
+  },
   onClose: () => globe.resumeAnimation(),
   // Where focus goes when the view closes and the button it was opened from is not on screen.
   afterClose: () => {
@@ -375,6 +391,8 @@ function renderControls() {
     (key) => {
       state.basemap = key;
       basemap.setStyle(key);
+      els.cloudsLoop.hidden = key !== 'clouds';
+      rebuildTimeline();
       try {
         localStorage.setItem(BASEMAP_KEY, key);
       } catch {
@@ -423,12 +441,84 @@ for (const el of [els.traffic.flights, els.traffic.military, els.traffic.satelli
 renderTrafficLegend();
 
 function renderCaption() {
-  const time = state.forecast?.times[Math.round(state.t)];
+  const loop = basemap.cloudsLoop();
+  if (loop?.status === 'playing') {
+    els.caption.textContent = `Clouds · last 12 hours · ${formatMs(loop.frame)}`;
+    return;
+  }
+  const time = state.timeline?.times[Math.round(state.t)];
   const label = state.overlay ? state.layer.label : 'Map';
   // In the forecast part of the timeline the moving clouds stay on the newest image there is.
   const asOf = basemap.cloudsAsOf();
   const clouds = asOf ? ` · clouds as of ${new Date(asOf).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })}` : '';
-  els.caption.textContent = time ? `${label} · ${formatTime(time)}${clouds}` : label;
+  // Before the forecast the weather layers hold its first hour.
+  const weatherOn = state.overlay || els.wind.checked || els.hazards.checked;
+  const held = weatherOn && inPast() ? ` · weather shown for ${formatTime(state.forecast.times[0])}` : '';
+  els.caption.textContent = time ? `${label} · ${formatTime(time)}${clouds}${held}` : label;
+}
+
+// Whether timeline step `step` is in the past day shown before the forecast in the Clouds view.
+function inPast(step = Math.round(state.t)) {
+  return !!state.timeline && step < state.timeline.past;
+}
+
+// The forecast's step for timeline step `step`: the past steps hold the forecast's first.
+function forecastStep(step = Math.round(state.t)) {
+  return Math.round(forecastPosition(step, state.timeline));
+}
+
+// Builds the timeline afresh, with or without the past day for the Clouds view, and keeps its
+// place when the new one has the same time; else it goes to the present.
+function rebuildTimeline() {
+  if (!state.forecast) return;
+  const previous = state.timeline;
+  state.timeline = buildTimeline(state.forecast.times, { withPast: state.basemap === 'clouds' });
+  els.slider.max = String(state.timeline.times.length - 1);
+  const place = previous && samePlace(state.t, previous, state.timeline);
+  seek(place ?? startIndex(state.timeline.times));
+  state.drawnStep = -1;
+  els.cloudsLoop.hidden = state.basemap !== 'clouds';
+}
+
+// The clouds loop's button, and its progress or image time in place of the timeline's time.
+function renderCloudsLoop() {
+  const loop = basemap.cloudsLoop();
+  const on = loop?.status === 'loading' || loop?.status === 'playing';
+  els.cloudsLoop.setAttribute('aria-pressed', String(on));
+  els.cloudsLoop.textContent = on && loop.status === 'playing' && reducedMotion ? 'Next image' : 'Last 12 h';
+  if (loop?.status === 'loading') els.timeLabel.textContent = `Loading ${Math.round(loop.progress * 100)}%`;
+  else if (loop?.status === 'playing') els.timeLabel.textContent = formatMs(loop.frame);
+  else if (loop?.status === 'failed') els.timeLabel.textContent = 'Clouds did not load';
+  else if (state.timeline) els.timeLabel.textContent = formatTime(state.timeline.times[Math.round(state.t)]);
+  if (loop?.status !== state.loopStatus) {
+    if (loop?.status === 'playing') {
+      announce(reducedMotion ? 'The clouds of 12 hours ago. Press Next image for each half hour after.' : 'Playing the clouds of the last 12 hours.');
+    } else if (loop?.status === 'failed') {
+      announce('The clouds of the last 12 hours could not be loaded.');
+    }
+    state.loopStatus = loop?.status ?? null;
+  }
+}
+
+// The loop button: starts the loop, stops it, or with reduced motion shows the next image.
+function toggleCloudsLoop() {
+  const loop = basemap.cloudsLoop();
+  if (loop?.status === 'playing' && reducedMotion) {
+    basemap.advanceCloudsLoop();
+    return;
+  }
+  if (loop?.status === 'loading' || loop?.status === 'playing') {
+    basemap.stopCloudsLoop();
+    return;
+  }
+  setPlaying(false);
+  if (basemap.startCloudsLoop({ manual: reducedMotion })) announce('Loading the clouds of the last 12 hours.');
+  else announce('No moving clouds in view: they cover Europe and Africa, and not when zoomed in close.');
+}
+
+// Any use of the timeline ends the clouds loop.
+function stopCloudsLoop() {
+  basemap.stopCloudsLoop();
 }
 
 // Re-draw everything on the next frame, e.g. after a layer or display change.
@@ -443,20 +533,25 @@ function invalidate() {
 
 // The moving clouds for the timeline at `step`: which images they show differs while it plays.
 function syncClouds(step = Math.round(state.t)) {
-  const { times } = state.forecast;
+  const { times } = state.timeline;
   const lookahead = Math.ceil(CLOUD_LOOKAHEAD_HOURS / state.stepHours);
-  const clouds = cloudTimes(times, step, { playing: state.playing, lookahead });
-  basemap.setTime(clouds.time, clouds.ahead);
+  // In the past, where every hour has its own image, the clouds follow every hour while playing too
+  // (see cloudTimes).
+  const hourlyBefore = Date.now();
+  const clouds = cloudTimes(times, step, { playing: state.playing, lookahead, hourlyBefore });
+  basemap.setTime(clouds.time, clouds.ahead, state.playing);
 }
 
 // Discrete layers only change when the timeline reaches a new step.
 function drawStep(step) {
-  const { points, values, times } = state.forecast;
+  const { points, values } = state.forecast;
+  const { times } = state.timeline;
+  const at = forecastStep(step);
 
   // The globe restarts the pulse of every ring it is given, so it only hears of changes.
   const rings = reuseRings(
     state.rings,
-    els.hazards.checked ? hazardRings(points, values.weather_code[step], values.precipitation[step]) : [],
+    els.hazards.checked ? hazardRings(points, values.weather_code[at], values.precipitation[at]) : [],
   );
   if (rings !== state.rings) {
     state.rings = rings;
@@ -468,6 +563,7 @@ function drawStep(step) {
   els.timeLabel.textContent = formatTime(times[step]);
   syncClouds(step);
   renderCaption();
+  renderCloudsLoop();
   renderDetails();
   windCheck.update();
   airportMap.refresh();
@@ -476,8 +572,9 @@ function drawStep(step) {
 
 function blendIndices() {
   const last = state.forecast.times.length - 1;
-  const i0 = Math.min(Math.floor(state.t), last);
-  return [i0, Math.min(i0 + 1, last), state.t - i0];
+  const position = forecastPosition(state.t, state.timeline);
+  const i0 = Math.min(Math.floor(position), last);
+  return [i0, Math.min(i0 + 1, last), position - i0];
 }
 
 // Indices into the zoomed-in region's data matching global steps i0 and i1, or null if the
@@ -562,7 +659,7 @@ function tick(now) {
   lastFrame = now;
   // The weather is not drawn while the pilot view covers the globe.
   if (state.forecast && !pilot.isOpen) {
-    const last = state.forecast.times.length - 1;
+    const last = state.timeline.times.length - 1;
     if (state.playing) {
       state.t += (dt * PLAY_HOURS_PER_SECOND) / state.stepHours;
       if (state.t >= last) state.t = 0;
@@ -630,11 +727,13 @@ async function refresh(force = false) {
     state.winds = windGrids(state.forecast.values.wind_speed_10m, state.forecast.values.wind_direction_10m);
     const { times } = state.forecast;
     state.stepHours = seriesHours(times);
-    els.slider.max = String(times.length - 1);
+    // The timeline starts afresh, and plays: the clouds loop and the timeline do not play together.
+    stopCloudsLoop();
+    state.timeline = null;
+    rebuildTimeline();
     for (const el of [els.play, els.slider, els.now]) el.disabled = false;
-    state.drawnStep = -1;
     state.fieldFade = 0;
-    seek(startIndex(times));
+    seek(startIndex(state.timeline.times));
     if (!reducedMotion) setPlaying(true);
     const updated = state.forecast.built
       ? ` · updated ${new Date(state.forecast.built).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`
@@ -1146,7 +1245,7 @@ function closeDetails() {
 function stopAutoplay() {
   if (!state.playing || !state.forecast) return;
   setPlaying(false);
-  seek(startIndex(state.forecast.times));
+  seek(startIndex(state.timeline.times));
 }
 
 function openWindCheck() {
@@ -1223,7 +1322,7 @@ function stopCameraDrift() {
 
 // The timeline's time, or the current hour before the forecast has loaded.
 function currentTime() {
-  return state.forecast?.times[Math.round(state.t)] ?? new Date().toISOString().slice(0, 13) + ':00';
+  return state.forecast?.times[forecastStep()] ?? new Date().toISOString().slice(0, 13) + ':00';
 }
 
 const formatHour = (time) => new Date(parseTime(time)).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
@@ -1250,7 +1349,7 @@ function sparkline(series, index) {
 
 // The hour in a spot's forecast matching the timeline position.
 function detailIndex(data) {
-  const time = state.forecast?.times[Math.round(state.t)];
+  const time = state.forecast?.times[forecastStep()];
   return Math.max(0, data.time.indexOf(time));
 }
 
@@ -1307,15 +1406,24 @@ for (const type of ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstar
 }
 
 els.refresh.addEventListener('click', () => refresh(true));
-els.play.addEventListener('click', () => setPlaying(!state.playing));
+els.play.addEventListener('click', () => {
+  stopCloudsLoop();
+  setPlaying(!state.playing);
+});
 els.slider.addEventListener('input', () => {
+  stopCloudsLoop();
   setPlaying(false);
   seek(Number(els.slider.value));
 });
 els.now.addEventListener('click', () => {
+  stopCloudsLoop();
   setPlaying(false);
-  seek(startIndex(state.forecast.times));
+  // The past day moves on with the clock.
+  rebuildTimeline();
+  seek(startIndex(state.timeline.times));
 });
+els.cloudsLoop.addEventListener('click', toggleCloudsLoop);
+els.cloudsLoop.hidden = state.basemap !== 'clouds';
 els.wind.addEventListener('change', invalidate);
 els.detailsClose.addEventListener('click', closeDetails);
 els.detailsBack.addEventListener('click', backToWindCheck);
