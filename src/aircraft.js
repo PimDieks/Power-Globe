@@ -75,7 +75,8 @@ export function fromOpenSky(data) {
 // r, t, desc, ownOp, dbFlags, alt_baro, gs, track, baro_rate, squawk, lat, lon, seen_pos }] },
 // in feet and knots. dbFlags bit 1 marks military aircraft.
 export function fromAdsb(data, { military = false } = {}) {
-  const now = data?.now ?? Date.now();
+  // adsb.fi gives the time of the feed in seconds, the others in milliseconds.
+  const now = data?.now == null ? Date.now() : data.now < 1e11 ? data.now * 1000 : data.now;
   return (data?.ac ?? data?.aircraft ?? [])
     .filter((a) => a.lat != null && a.lon != null && !/^C/.test(a.category ?? ''))
     .map((a) => {

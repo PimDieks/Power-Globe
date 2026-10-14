@@ -56,6 +56,12 @@ describe('fromAdsb', () => {
     expect(klm).toMatchObject({ onGround: true, altitudeFt: 0, military: false });
   });
 
+  it('reads the time of a feed that gives it in seconds (adsb.fi), as of one in milliseconds', () => {
+    const inSeconds = fromAdsb({ now: 1760000000.5, aircraft: [data.ac[1]] });
+    expect(inSeconds[0].seen).toBe(1760000000500 - 500);
+    expect(fromAdsb({ now: 1760000000500, ac: [data.ac[1]] })[0].seen).toBe(inSeconds[0].seen);
+  });
+
   it('treats everything in the military feed as military', () => {
     expect(fromAdsb({ ac: [data.ac[1]] }, { military: true })[0].military).toBe(true);
   });
