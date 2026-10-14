@@ -394,9 +394,12 @@ describe('the section', () => {
     expect(accessBodyHtml(analyse({ state: 'unavailable', reason: 'The API has no flight relay' }))).toContain('No road data right now. The API has no flight relay.');
   });
 
-  it('keeps a place for trains and buses after the roads', () => {
-    expect(subsections.map((s) => s.id)).toEqual(['roads']);
-    expect(html(data())).toContain('data-access="roads"');
+  it('has the roads first, then the trains and buses, which roads-only data leaves out', () => {
+    expect(subsections.map((s) => s.id)).toEqual(['roads', 'trains', 'buses']);
+    const body = html(data());
+    expect(body).toContain('data-access="roads"');
+    expect(body).not.toContain('data-access="trains"');
+    expect(body).not.toContain('data-access="buses"');
   });
 });
 

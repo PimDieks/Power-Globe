@@ -2,7 +2,7 @@
 // traffic around the Dutch airports, from NDW's open data (read by the flight relay and passed on
 // by the API, see api/worker.js and relay/api-relay.mjs): the speed at the measurement sites, and
 // the jams, accidents and closures near the airport. Pure functions of that data, so they can be
-// tested without a browser. Trains and buses are meant to come as further data next to the roads.
+// tested without a browser. The trains and buses next to the roads are in opstransit.js.
 //
 // What matters to a duty manager is what stops people reaching the airport, so the list is ranked
 // and capped: (1) jams, (2) accidents, (3) closures on motorways that are not roadworks, (4)
