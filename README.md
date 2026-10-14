@@ -13,6 +13,7 @@ An open-source, interactive 3D globe that visualizes temperature and other weath
   - **Military flights:** the worldwide military feed from the same ADS-B networks, in their own colour. Only aircraft that broadcast ADS-B are included.
   - **Satellites:** all active satellites, or just space stations, Starlink, navigation, weather or military satellites, from [CelesTrak](https://celestrak.org/)'s orbital elements, computed live with SGP4 ([satellite.js](https://github.com/shashwatak/satellite-js)) in a background worker, at their real height: low orbits close in, the geostationary belt far out.
   - Tap an aircraft for its altitude, speed, track, climb or descent, squawk (emergencies stand out), registration, type and operator; tap a satellite for its altitude, speed, orbit, period and inclination, with its next orbit drawn.
+  - **Follow** an aircraft from the button in its panel: the camera glides to it and keeps it in the middle of the view, north up and from straight above, as it flies, smoothly across each new position report. You keep the zoom. Dragging the map, pressing Escape, closing the panel, picking anything else or switching the flights off stops it. On a phone the aircraft is held in the part of the map above the panel. With reduced motion the camera centres on the aircraft every few seconds instead of moving continuously.
 - **Four views of the Earth:** satellite imagery, streets, topographic, or an aviation chart (openAIP airspaces, airports and navaids over a light grey map; needs an openAIP key in the Power Globe API). Choose **None** among the weather layers for just the map.
 - **Wind as living brushstrokes:** thousands of glowing particles drift along the forecast wind, leaving fading trails, in the spirit of [earth.nullschool.net](https://earth.nullschool.net).
 - **Smooth colour fields:** temperature, wind speed, precipitation, cloud cover and humidity are painted as soft, bicubic-interpolated colour maps in muted palettes. Clear skies and dry areas fade to transparent so the Earth shows through.
@@ -128,6 +129,7 @@ Every push to `main` builds the site and deploys it to GitHub Pages via
 | `src/traffic.js` | The live traffic layers: feeds and their timing, toggles, drawing, and tapping an aircraft or satellite. |
 | `src/trafficlayer.js` | Aircraft and satellites as GPU point sprites, the selection ring and the orbit line. |
 | `src/trafficview.js` | The details panel for an aircraft or satellite. |
+| `src/follow.js` | Following an aircraft with the camera: smoothing between position reports, the glide, the phone offset, the camera height and when to stop. |
 | `scripts/fetch-satellites.mjs` | Saves a copy of CelesTrak's elements into the site at deploy time, reusing the published copy while it is under two hours old and keeping a group's published file when CelesTrak refuses it; used while CelesTrak is not needed or cannot be reached. |
 | `src/airportmap.js`, `src/runwaymap.js` | Runways on the map, coloured by wind status, with runway end and wind labels. |
 | `src/metar.js` | The latest METAR and flight category. |

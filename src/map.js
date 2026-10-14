@@ -50,7 +50,7 @@ const MAP_ALTITUDE = 1.3;
 // Satellite imagery that sharpens as you zoom in, over a whole-Earth image just beneath it.
 // The image shows wherever tiles are missing: the poles (beyond Web Mercator), while tiles
 // load, or if the tile server cannot be reached.
-// Returns { setAltitude(altitude), setStyle(key) }.
+// Returns { setAltitude(altitude), setStyle(key), setFollowing(on) }.
 export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCredit } = {}) {
   let style = BASEMAPS[initial] ?? BASEMAPS.satellite;
   globe.globeTileEngineUrl(style.url).globeTileEngineMaxLevel(style.maxLevel);
@@ -103,7 +103,7 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
 
   chart.set(style.chart);
   onCredit?.(style.credit);
-  return { setAltitude, setStyle };
+  return { setAltitude, setStyle, setFollowing: chart.setFollowing };
 }
 
 // three-globe's tile engine, once the globe has initialised (else null).
@@ -157,6 +157,8 @@ function setupChartLayer(globe) {
     return engine;
   };
   globe.scene().add(engine);
+  let lastUpdate = 0;
+  let following = false;
   let settle = null;
   // Counts the times the chart was cleared, so tiles still being retried for the old one stop.
   let version = 0;
@@ -178,15 +180,22 @@ function setupChartLayer(globe) {
         engine.updatePov(globe.camera());
       });
     },
+    // While the camera follows an aircraft it never settles: tiles are then asked for at most
+    // once a second, counted from the last time they were.
+    setFollowing(on) {
+      following = on;
+    },
     // Tiles are asked for once the view settles, not for every level passed on the way while
     // zooming: far fewer requests to the chart's service.
     update() {
-      if (!engine.visible) return;
+      if (!engine.visible || (following && settle)) return;
       clearTimeout(settle);
       settle = setTimeout(() => {
+        settle = null;
+        lastUpdate = performance.now();
         withRetries(() => engine.updatePov(globe.camera()));
         showLevel();
-      }, 250);
+      }, following ? Math.max(250, lastUpdate + 1000 - performance.now()) : 250);
     },
   };
 }
