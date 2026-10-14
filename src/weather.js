@@ -237,9 +237,9 @@ export async function fetchHourly(points, { onProgress } = {}) {
 }
 
 // Ground conditions at airports, as aviation weather reports them: wind in knots at 10 m (the
-// height of airport anemometers), temperature and dew point at 2 m, every hour, and the weather
-// code and CAPE that the Ops view's thunderstorm risk is made from (about 0.2 MB more compressed
-// in the site's copy, which is 0.7 MB).
+// height of airport anemometers), temperature and dew point at 2 m, visibility in metres, every
+// hour, and the weather code and CAPE that the Ops view's thunderstorm risk is made from (the
+// site's copy is about 0.7 MB compressed with them, see build-data.mjs).
 export const AIRPORT_VARIABLES = [
   'temperature_2m',
   'dew_point_2m',
@@ -248,7 +248,22 @@ export const AIRPORT_VARIABLES = [
   'wind_gusts_10m',
   'weather_code',
   'cape',
+  'visibility',
 ];
+
+// Visibility as the site's copy keeps it: to 100 m, and no more than 10 km (reports say 9999 for
+// that or more, and no limit is anywhere near), so that the clear hours that are nearly all of them
+// are the same number and the copy compresses to almost the size it had without visibility.
+export const AIRPORT_VISIBILITY_CAP = 10_000;
+export const roundVisibility = (metres) => (metres == null ? null : Math.min(AIRPORT_VISIBILITY_CAP, Math.round(metres / 100) * 100));
+
+// One value of an airport series as the site's copy keeps it: temperatures and dew points to a
+// tenth, visibility as above, everything else to a whole number.
+export function airportValue(variable, value) {
+  if (variable === 'visibility') return roundVisibility(value);
+  if (value == null) return null;
+  return Number(value.toFixed(variable === 'temperature_2m' || variable === 'dew_point_2m' ? 1 : 0));
+}
 const FEET = 0.3048;
 
 // The airport's own elevation lets Open-Meteo correct the temperature for its height.

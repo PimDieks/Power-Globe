@@ -31,7 +31,7 @@ describe('what a part needs, and mounting', () => {
       },
     };
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const root = {};
+    const root = { addEventListener: () => {}, removeEventListener: () => {} };
     const host = createOpsHost({ root, getContext: () => ({}), requestRender: () => {}, setTime: () => {}, parts: [a, b, c] });
     host.mount();
     host.mount();
@@ -44,6 +44,80 @@ describe('what a part needs, and mounting', () => {
     host.mount();
     expect(calls).toHaveLength(3);
     spy.mockRestore();
+  });
+});
+
+describe('a field being typed in', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  function setup() {
+    const handlers = new Map();
+    let focusInside = true;
+    const root = {
+      innerHTML: '',
+      addEventListener: (t, f) => handlers.set(t, f),
+      removeEventListener: (t) => handlers.delete(t),
+      contains: () => focusInside,
+      querySelector: () => null,
+    };
+    vi.stubGlobal('document', { activeElement: { closest: () => null } });
+    vi.stubGlobal('CSS', { escape: (x) => x });
+    vi.useFakeTimers();
+    const requestRender = vi.fn();
+    let version = 1;
+    const part = { id: 'p', title: 'P', analyse: () => 1, html: () => `<p>v${version}</p>` };
+    const host = createOpsHost({ root, getContext: () => ({}), requestRender, setTime: () => {}, parts: [part] });
+    host.mount();
+    const typed = () => handlers.get('input')({ target: { closest: (sel) => (sel === '[data-editing]' ? {} : null) } });
+    return { root, handlers, host, requestRender, typed, bump: () => (version += 1), leave: (inside) => (focusInside = inside) };
+  }
+
+  it('is not drawn over, and is drawn once when the field is left', () => {
+    const { root, handlers, host, requestRender, typed, bump } = setup();
+    host.render({});
+    expect(root.innerHTML).toContain('v1');
+    typed();
+    bump();
+    root.innerHTML = 'what was typed';
+    host.render({});
+    host.render({});
+    expect(root.innerHTML).toBe('what was typed');
+    handlers.get('focusout')({});
+    vi.runAllTimers();
+    expect(requestRender).toHaveBeenCalledTimes(1);
+    host.render({});
+    expect(root.innerHTML).toContain('v2');
+    // Leaving a field with nothing held back asks for nothing.
+    typed();
+    handlers.get('change')({});
+    vi.runAllTimers();
+    expect(requestRender).toHaveBeenCalledTimes(1);
+  });
+
+  it('is drawn as usual for anything else typed in, or when the focus is elsewhere', () => {
+    const { root, handlers, host, typed, bump, leave } = setup();
+    handlers.get('input')({ target: { closest: () => null } });
+    bump();
+    host.render({});
+    expect(root.innerHTML).toContain('v2');
+    typed();
+    leave(false);
+    bump();
+    host.render({});
+    expect(root.innerHTML).toContain('v3');
+  });
+
+  it('forgets it when the tab goes', () => {
+    const { root, handlers, host, typed } = setup();
+    typed();
+    host.unmount();
+    expect(handlers.size).toBe(0);
+    host.mount();
+    host.render({});
+    expect(root.innerHTML).toContain('v1');
   });
 });
 
