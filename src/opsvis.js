@@ -4,7 +4,7 @@
 // data, so they can be tested without a browser.
 import { STATUS } from './runways.js';
 import { outlookTimes } from './opsrunway.js';
-import { milesToMetres } from './taf.js';
+import { metarVisibility, milesToMetres } from './taf.js';
 
 export const VISIBILITY_OUTLOOK_HOURS = 24;
 const HOUR_MS = 3_600_000;
@@ -97,7 +97,9 @@ export const formatCeiling = (feet) => (isNumber(feet) ? `${Math.round(feet).toL
 // runway); an RVR given only as "more than" does not.
 export function observedConditions(observation) {
   if (!observation || observation.error) return null;
-  const visibility = isNumber(observation.visibility) ? milesToMetres(observation.visibility) : null;
+  // The report's own words are exact; the data API gives miles, rounded.
+  const written = metarVisibility(observation.raw);
+  const visibility = written !== undefined ? written : isNumber(observation.visibility) ? milesToMetres(observation.visibility) : null;
   const rvr = parseRvr(observation.raw);
   const values = rvr.filter((g) => !g.above).map((g) => g.value);
   const rvrMin = values.length ? Math.min(...values) : null;

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PROXY_URL } from '../src/api.js';
-import { latestTaf, milesToMetres, newestTaf, parseTaf, tafCeiling, visibilityMetres } from '../src/taf.js';
+import { latestTaf, metarVisibility, milesToMetres, newestTaf, parseTaf, tafCeiling, visibilityInWords, visibilityMetres } from '../src/taf.js';
 import samples from './taf-samples.json';
 
 // Real answers of the Aviation Weather Center's data API (14 October 2026), trimmed to the fields
@@ -18,6 +18,16 @@ describe('visibility in metres', () => {
     expect(milesToMetres(null)).toBeNull();
   });
 
+  it('rounds to 50 m below 800 m, where metric reports use 50 m steps', () => {
+    expect(milesToMetres(0.09)).toBe(150);
+    expect(milesToMetres(0.22)).toBe(350);
+    expect(milesToMetres(0.43)).toBe(700);
+    expect(milesToMetres(0.37)).toBe(600);
+    expect(milesToMetres(0.25)).toBe(400);
+    expect(milesToMetres(0.49)).toBe(800);
+    expect(milesToMetres(0)).toBe(0);
+  });
+
   it('takes 6 miles and over (9999, P6SM, CAVOK) as 10 km or more', () => {
     expect(milesToMetres(6)).toBe(10_000);
     expect(milesToMetres(10)).toBe(16_100);
@@ -31,6 +41,43 @@ describe('visibility in metres', () => {
     expect(visibilityMetres(0.37)).toBe(600);
     expect(visibilityMetres('')).toBeUndefined();
     expect(visibilityMetres(null)).toBeUndefined();
+  });
+});
+
+describe('visibility as the words of a report give it', () => {
+  it('reads metric groups, CAVOK, miles and fractions of miles', () => {
+    expect(visibilityInWords(['0350', 'FG'])).toBe(350);
+    expect(visibilityInWords(['9999'])).toBe(10_000);
+    expect(visibilityInWords(['CAVOK'])).toBe(10_000);
+    expect(visibilityInWords(['P6SM', 'SKC'])).toBe(10_000);
+    expect(visibilityInWords(['0SM', 'FG', 'VV001'])).toBe(0);
+    expect(visibilityInWords(['1', '1/2SM', 'BR'])).toBe(2400);
+    expect(visibilityInWords(['3/4SM'])).toBe(1200);
+    expect(visibilityInWords(['M1/4SM', 'FG'])).toBe(400);
+    expect(visibilityInWords(['3SM', 'BR'])).toBe(4800);
+  });
+
+  it('is undefined when the words give none, and the first one counts', () => {
+    expect(visibilityInWords(['26006KT', 'SCT026'])).toBeUndefined();
+    expect(visibilityInWords(['1506/1509', 'VRB03KT'])).toBeUndefined();
+    expect(visibilityInWords(['2400', '0900N'])).toBe(2400);
+  });
+
+  it('reads a METAR after its wind, as far as the remarks and the trend', () => {
+    expect(metarVisibility('METAR EFRO 141550Z AUTO 17004KT 0700 R21/0900N FG VV002 02/02 Q1009')).toBe(700);
+    expect(metarVisibility('METAR EHAM 141525Z 22010KT 190V260 9999 FEW031 17/10 Q1027 NOSIG')).toBe(10_000);
+    expect(metarVisibility('METAR LTFM 141550Z 01035G45KT 2400 0900N R35R/P1500U SHRA')).toBe(2400);
+    expect(metarVisibility('METAR KOKC 141510Z 03011KT 3/4SM TSRA BKN005 20/19 A3010 RMK AO2')).toBe(1200);
+    expect(metarVisibility('METAR CWEU 141600Z 03007KT 3/8SM IC FZFG VV004 M27/M30 A2966')).toBe(600);
+    expect(metarVisibility('METAR LFPO 141600Z VRB02KT CAVOK 20/08 Q1028 NOSIG')).toBe(10_000);
+    expect(metarVisibility('METAR UUEE 141600Z 36003G08MPS 310V080 CAVOK 08/07 Q1021 R06R/290245')).toBe(10_000);
+  });
+
+  it('is undefined for a METAR that gives none, and not fooled by the trend or remarks', () => {
+    expect(metarVisibility('METAR MKJP 141600Z 13011KT //// ////// 31/24 Q1013 RMK CLD FROM CEILOMETER 1200')).toBeUndefined();
+    expect(metarVisibility('METAR LTAI 141550Z 21009KT //// 15/14 Q1008 BECMG TL1600 9999 NSW')).toBeUndefined();
+    expect(metarVisibility('')).toBeUndefined();
+    expect(metarVisibility(undefined)).toBeUndefined();
   });
 });
 
@@ -94,6 +141,44 @@ describe('reading a TAF', () => {
     // A change it does not know is taken as TEMPO.
     const odd = parseTaf({ fcsts: [{ timeFrom: 1, timeTo: 2, fcstChange: 'INTER', visib: '1' }] });
     expect(odd.periods[0]).toMatchObject({ kind: 'TEMPO', visibility: 1600 });
+  });
+
+  it('reads 0SM, which the data API gives as nothing, from the text (United States)', () => {
+    const taf = parseTaf(sample('KBTR'));
+    expect(taf.periods.map((p) => [p.kind, p.visibility, p.ceiling])).toEqual([
+      ['BASE', 0, 100],
+      ['FM', 4800, null],
+      ['FM', 10_000, null],
+      ['FM', 2400, 200],
+    ]);
+  });
+
+  it('reads an FM group of 0SM FG SCT001 as 0 m with a ceiling of none, not as not stated', () => {
+    const entry = {
+      icaoId: 'KXXX',
+      issueTime: '2026-10-14T11:00:00.000Z',
+      validTimeFrom: 1791979200,
+      validTimeTo: 1792065600,
+      rawTAF: 'TAF KXXX 141100Z 1412/1512 25005KT P6SM FEW030 FM150300 00000KT 0SM FG SCT001 FM150900 25005KT 3SM BR OVC002',
+      fcsts: [
+        { timeFrom: 1791979200, timeTo: 1792014000, visib: '6+', clouds: [{ cover: 'FEW', base: 3000 }] },
+        { timeFrom: 1792014000, timeTo: 1792036800, fcstChange: 'FM', visib: '', clouds: [{ cover: 'SCT', base: 100 }] },
+        { timeFrom: 1792036800, timeTo: 1792065600, fcstChange: 'FM', visib: 3, clouds: [{ cover: 'OVC', base: 200 }] },
+      ],
+    };
+    expect(parseTaf(entry).periods.map((p) => [p.visibility, p.ceiling])).toEqual([[10_000, null], [0, null], [4800, 200]]);
+  });
+
+  it('keeps "not stated" where the text really gives no visibility, and where a group has none to match', () => {
+    const entry = { icaoId: 'GMMX', rawTAF: 'TAF GMMX 141100Z 1412/1518 26006KT SCT026 TEMPO 1415/1421 34016KT', fcsts: [
+      { timeFrom: 1791979200, timeTo: 1792087200, visib: '', clouds: [{ cover: 'SCT', base: 2600 }] },
+      { timeFrom: 1791988200, timeTo: 1792010400, fcstChange: 'TEMPO', visib: '' },
+    ] };
+    expect(parseTaf(entry).periods.map((p) => p.visibility)).toEqual([undefined, undefined]);
+    // Text that does not match the groups of the data API is not used: its own figures are.
+    const odd = { ...entry, rawTAF: 'TAF GMMX 141100Z 1412/1518 26006KT 0SM FEW030', fcsts: [{ timeFrom: 1, timeTo: 2, visib: 0.5 }, { timeFrom: 3, timeTo: 4, fcstChange: 'BECMG', visib: 1 }] };
+    expect(parseTaf(odd).periods.map((p) => p.visibility)).toEqual([800, 1600]);
+    expect(parseTaf({ ...odd, rawTAF: undefined }).periods.map((p) => p.visibility)).toEqual([800, 1600]);
   });
 
   it('gives null for an answer with no groups', () => {

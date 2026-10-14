@@ -148,6 +148,12 @@ describe('the METAR as conditions', () => {
     expect(observedConditions(obs({ rawOb: 'LFPO CAVOK 20/08', visib: '6+', fltCat: 'VFR' }))).toMatchObject({ visibility: 10_000, ceiling: null, category: 'VFR' });
   });
 
+  it('reads the visibility from the words of the report when they give it, else from the data API miles', () => {
+    expect(observedConditions(obs({ rawOb: 'METAR EFRO 141550Z AUTO 17004KT 0350 FG VV001', visib: 0.2 })).visibility).toBe(350);
+    expect(observedConditions(obs({ rawOb: 'METAR XXXX 141550Z 17004KT //// ////// 12/10', visib: 1.86 })).visibility).toBe(3000);
+    expect(observedConditions(obs({ rawOb: 'METAR KBTR 141553Z 00000KT 0SM FG VV001 20/20 A3000', visib: '' })).visibility).toBe(0);
+  });
+
   it('copes with a report without visibility, temperature or an error', () => {
     const now = observedConditions(obs({ rawOb: 'METAR MKJP 141600Z 13011KT //// ////// 31/24 Q1013', visib: undefined, temp: undefined, dewp: undefined }));
     expect(now).toMatchObject({ visibility: null, spread: null, ceiling: null, rvr: [] });
@@ -416,7 +422,7 @@ describe('the status fact', () => {
   const fog = obs({ rawOb: 'METAR EFRO 141550Z AUTO 17004KT 0700 R21/0900N FG VV002 02/02 Q1009', visib: 0.43, clouds: [{ cover: 'OVX', base: 200 }], temp: 2, dewp: 2 });
 
   it('gives the visibility and LVP when the METAR is over a limit', () => {
-    const vis = obs({ rawOb: 'METAR OOSH 0600 FG', visib: 0.5 });
+    const vis = obs({ rawOb: 'METAR OOSH 141550Z 11004KT 0800 FG', visib: 0.5 });
     expect(visibilityFact(outlook({ observation: vis }), fmt)).toEqual({ text: 'VIS 800 m, LVP', status: 'nogo' });
     expect(visibilityFact(outlook({ observation: fog }), fmt)).toEqual({ text: 'VIS 700 m, VV 200 ft, LVP', status: 'nogo' });
     const cig = obs({ rawOb: 'METAR KOKC 10SM OVC002', visib: 10, clouds: [{ cover: 'OVC', base: 200 }] });

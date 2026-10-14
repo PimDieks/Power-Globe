@@ -61,5 +61,14 @@
       {"timeFrom":1792044000,"timeTo":1792065600,"fcstChange":"TEMPO","probability":40,"visib":3.73,"wxString":"-RA -DZ","clouds":[{"cover":"BKN","base":900}]},
       {"timeFrom":1792065600,"timeTo":1792080000,"fcstChange":"TEMPO","probability":30,"visib":""}
     ]
+  },
+  "KBTR": {
+    "meta": {"icaoId": "KBTR", "issueTime": "2026-10-14T11:20:00.000Z", "validTimeFrom": 1791979200, "validTimeTo": 1792065600, "rawTAF": "TAF KBTR 141120Z 1412/1512 07004KT 0SM FG VV001 FM141400 00000KT 3SM BR SCT005 FM141700 14005KT P6SM SKC FM151100 00000KT 1 1/2SM BR BKN002"},
+    "fcsts": [
+      {"timeFrom":1791979200,"timeTo":1791986400,"visib":"","vertVis":100,"wxString":"FG","clouds":[{"cover":"OVX","base":null}]},
+      {"timeFrom":1791986400,"timeTo":1791997200,"fcstChange":"FM","visib":3,"wxString":"BR","clouds":[{"cover":"SCT","base":500}]},
+      {"timeFrom":1791997200,"timeTo":1792062000,"fcstChange":"FM","visib":"6+","clouds":[{"cover":"SKC","base":null}]},
+      {"timeFrom":1792062000,"timeTo":1792065600,"fcstChange":"FM","visib":1.5,"wxString":"BR","clouds":[{"cover":"BKN","base":200}]}
+    ]
   }
 }
