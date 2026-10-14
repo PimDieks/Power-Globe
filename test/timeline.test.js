@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PAST_HOURS, buildTimeline, forecastPosition, pastTimes, samePlace } from '../src/timeline.js';
+import { PAST_HOURS, buildTimeline, forecastPosition, pastTimes, samePlace, stepNearest } from '../src/timeline.js';
 import { cloudTimes, parseTime, startIndex } from '../src/weather.js';
 
 const hours = (from, count) => Array.from({ length: count }, (_, i) => new Date(Date.parse(`${from}Z`) + i * 3_600_000).toISOString().slice(0, 16));
@@ -76,5 +76,16 @@ describe('the moving clouds while the timeline plays through the past day', () =
     expect(cloudTimes(times, 14, { playing: true, lookahead: 2, hourlyBefore: now })).toEqual({ time: ms(14), ahead: [ms(15), ms(16)] });
     // In the future, every third hour (all the newest image anyway).
     expect(cloudTimes(times, 25, { playing: true, lookahead: 2, hourlyBefore: now })).toEqual({ time: ms(24), ahead: [ms(27)] });
+  });
+});
+
+describe('the step nearest a time', () => {
+  it('finds the exact hour, or the closest one when the timeline has gaps', () => {
+    expect(stepNearest(forecast, '2026-10-14T15:00')).toBe(15);
+    const threeHourly = hours('2026-10-14T00:00', 8).filter((_, i) => i % 3 === 0);
+    expect(stepNearest(threeHourly, '2026-10-14T04:00')).toBe(1);
+    expect(stepNearest(threeHourly, '2026-10-14T05:00')).toBe(2);
+    expect(stepNearest(forecast, '2026-12-01T00:00')).toBe(forecast.length - 1);
+    expect(stepNearest([], '2026-10-14T00:00')).toBe(-1);
   });
 });
