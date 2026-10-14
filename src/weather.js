@@ -374,8 +374,7 @@ export const CLOUD_PLAY_HOURS = 3;
 
 // The time (ms) the moving clouds show at `step`, and while `playing` the times of the next
 // `lookahead` steps to load images for in advance (without repeats). Times before `hourlyBefore`
-// (ms), the past hours shown before the forecast in the Clouds view, follow every step while
-// playing too: there the clouds use fewer, coarser tiles (see setupMovingClouds in map.js).
+// (ms, the present), where every hour has its own image, follow every step while playing too.
 export function cloudTimes(times, step, { playing = false, lookahead = 0, hourlyBefore = -Infinity } = {}) {
   const time = parseTime(times[step]);
   if (!playing) return { time, ahead: [] };

@@ -269,7 +269,11 @@ const pilot = setupPilotView({
   },
   traffic,
   background: () => [...document.body.children].filter((el) => !['pilot', 'announcer'].includes(el.id) && el.tagName !== 'SCRIPT'),
-  onOpen: () => globe.pauseAnimation(),
+  onOpen: () => {
+    // The clouds loop is for the globe, which the pilot view covers.
+    stopCloudsLoop();
+    globe.pauseAnimation();
+  },
   onClose: () => globe.resumeAnimation(),
   // Where focus goes when the view closes and the button it was opened from is not on screen.
   afterClose: () => {
@@ -387,6 +391,7 @@ function renderControls() {
     (key) => {
       state.basemap = key;
       basemap.setStyle(key);
+      els.cloudsLoop.hidden = key !== 'clouds';
       rebuildTimeline();
       try {
         localStorage.setItem(BASEMAP_KEY, key);
@@ -530,8 +535,9 @@ function invalidate() {
 function syncClouds(step = Math.round(state.t)) {
   const { times } = state.timeline;
   const lookahead = Math.ceil(CLOUD_LOOKAHEAD_HOURS / state.stepHours);
-  // In the past day the clouds follow every hour while playing too (see cloudTimes).
-  const hourlyBefore = parseTime(state.forecast.times[0]);
+  // In the past, where every hour has its own image, the clouds follow every hour while playing too
+  // (see cloudTimes).
+  const hourlyBefore = Date.now();
   const clouds = cloudTimes(times, step, { playing: state.playing, lookahead, hourlyBefore });
   basemap.setTime(clouds.time, clouds.ahead, state.playing);
 }
@@ -721,6 +727,8 @@ async function refresh(force = false) {
     state.winds = windGrids(state.forecast.values.wind_speed_10m, state.forecast.values.wind_direction_10m);
     const { times } = state.forecast;
     state.stepHours = seriesHours(times);
+    // The timeline starts afresh, and plays: the clouds loop and the timeline do not play together.
+    stopCloudsLoop();
     state.timeline = null;
     rebuildTimeline();
     for (const el of [els.play, els.slider, els.now]) el.disabled = false;

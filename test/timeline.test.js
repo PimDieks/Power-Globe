@@ -70,4 +70,11 @@ describe('the moving clouds while the timeline plays through the past day', () =
     expect(cloudTimes(times, 10, { playing: true, lookahead: 6, hourlyBefore })).toEqual({ time: ms(10), ahead: [ms(11), ms(12), ms(15)] });
     expect(cloudTimes(times, 13, { playing: true, lookahead: 3, hourlyBefore })).toEqual({ time: ms(12), ahead: [ms(15)] });
   });
+
+  it('follow every hour up to the present, which is past the forecast start', () => {
+    // Now is 11:10 today: the forecast's first eleven hours have images of their own too.
+    expect(cloudTimes(times, 14, { playing: true, lookahead: 2, hourlyBefore: now })).toEqual({ time: ms(14), ahead: [ms(15), ms(16)] });
+    // In the future, every third hour (all the newest image anyway).
+    expect(cloudTimes(times, 25, { playing: true, lookahead: 2, hourlyBefore: now })).toEqual({ time: ms(24), ahead: [ms(27)] });
+  });
 });
