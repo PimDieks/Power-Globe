@@ -90,6 +90,22 @@ describe('Power Globe API (worker)', () => {
     await expect(route(new URL('https://api.example/flights/area?lat=99&lon=0&nm=10'), {}, fetchFn)).rejects.toMatchObject({ status: 400 });
   });
 
+  it('serves TAFs as it serves METARs, from the same source and cached alike', async () => {
+    const fetchFn = vi.fn(async () => reply('[{"icaoId":"EHAM","rawTAF":"TAF EHAM 141030Z 1412/1518 23008KT 9999 FEW030"}]'));
+    const res = await route(new URL('https://api.example/taf?ids=eham,kjfk'), {}, fetchFn);
+    expect(fetchFn.mock.calls[0][0]).toBe('https://aviationweather.gov/api/data/taf?ids=EHAM,KJFK&format=json');
+    expect(res.headers.get('Content-Type')).toBe('application/json');
+    expect(res.headers.get('Cache-Control')).toBe((await route(new URL('https://api.example/metar?ids=EHAM'), {}, fetchFn)).headers.get('Cache-Control'));
+    expect((await res.json())[0].rawTAF).toContain('TAF EHAM');
+    // An airport without a TAF gets an empty answer from the source, and an empty list from here.
+    expect(await (await route(new URL('https://api.example/taf?ids=EHRD'), {}, async () => reply(''))).json()).toEqual([]);
+    for (const ids of ['', 'EHAM;DROP', 'EHAM,'.repeat(21) + 'EHAM', 'AB']) {
+      await expect(route(new URL(`https://api.example/taf?ids=${ids}`), {}, fetchFn)).rejects.toMatchObject({ status: 400 });
+    }
+    await expect(route(new URL('https://api.example/taf?ids=EHAM'), {}, async () => reply('busy', { status: 503 }))).rejects.toMatchObject({ status: 502 });
+    expect((await (await route(new URL('https://api.example/'), {}, fetchFn)).json()).routes).toContain('/taf?ids=');
+  });
+
   it('lets only the listed sites use it', () => {
     expect(corsHeaders('https://pimdieks.github.io')['Access-Control-Allow-Origin']).toBe('https://pimdieks.github.io');
     expect(corsHeaders('https://elsewhere.example')).toEqual({});
