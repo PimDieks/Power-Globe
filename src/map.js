@@ -10,7 +10,11 @@ import {
   FADE_FROM_DEG,
   MAP_LEVEL_LIMIT,
   TileStore,
+  coarserView,
   framesFor,
+  loopFrames,
+  loopPosition,
+  loopStatus,
   parseTimes,
   passedFrames,
   tileBounds,
@@ -90,7 +94,8 @@ const MAP_ALTITUDE = 1.3;
 // The image shows wherever tiles are missing: the poles (beyond Web Mercator), while tiles
 // load, or if the tile server cannot be reached.
 // Returns { setAltitude(altitude), setStyle(key), setFollowing(on), setTime(time, ahead),
-// cloudsAsOf(), cloudsShown() }. `onClouds()` is called when the moving clouds show another
+// cloudsAsOf(), cloudsShown(), and the clouds loop: startCloudsLoop({ manual }), stopCloudsLoop(),
+// advanceCloudsLoop(), cloudsLoop() }. `onClouds()` is called when the moving clouds show another
 // image, and `onCredit(html)` whenever the credit changes.
 export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCredit, onClouds } = {}) {
   let style = BASEMAPS[initial] ?? BASEMAPS.satellite;
@@ -115,8 +120,9 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     return baseEngine;
   };
   // Moving clouds over Europe and Africa, just above the map, for the Clouds view.
+  let lastCredit = null;
   const moving = setupMovingClouds(globe, findBaseEngine, () => {
-    onCredit?.(credit());
+    if (credit() !== lastCredit) onCredit?.((lastCredit = credit()));
     onClouds?.();
   });
   // The view's credit, and EUMETSAT's while its images are on screen.
@@ -166,12 +172,12 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     chart.set(style.chart);
     moving.setActive(Boolean(style.moving));
     setAltitude(altitude);
-    onCredit?.(credit());
+    onCredit?.((lastCredit = credit()));
   }
 
   chart.set(style.chart);
   moving.setActive(Boolean(style.moving));
-  onCredit?.(credit());
+  onCredit?.((lastCredit = credit()));
   return {
     setAltitude,
     setStyle,
@@ -182,6 +188,10 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     setTime: moving.setTime,
     cloudsAsOf: moving.asOf,
     cloudsShown: moving.shown,
+    startCloudsLoop: moving.startLoop,
+    stopCloudsLoop: moving.stopLoop,
+    advanceCloudsLoop: moving.advanceLoop,
+    cloudsLoop: moving.loopState,
   };
 }
 
@@ -372,29 +382,62 @@ function mercatorTile(x, y, level, radius, material) {
 }
 
 // Leaves the images out beyond AREA_DEG from the point beneath the satellite, fading them in from
-// FADE_FROM_DEG. That point is along +z, where three-globe puts 0° N, 0° E.
+// FADE_FROM_DEG. That point is along +z, where three-globe puts 0° N, 0° E. The image can also
+// fade into a second one, `userData.cross.map2`, by `userData.cross.crossMix` (0 to 1), for the
+// clouds loop.
 function fadeToArea(material) {
   const cos = (deg) => Math.cos(deg * DEG).toFixed(6);
   material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, material.userData.cross);
     shader.vertexShader = `varying vec3 vSatelliteDir;
 ${shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vSatelliteDir = position;')}`;
     shader.fragmentShader = `varying vec3 vSatelliteDir;
+uniform sampler2D map2;
+uniform float crossMix;
 ${shader.fragmentShader.replace(
   '#include <map_fragment>',
   `#include <map_fragment>
+  diffuseColor.rgb = mix(diffuseColor.rgb, texture2D(map2, vMapUv).rgb, crossMix);
   diffuseColor.a *= smoothstep(${cos(AREA_DEG)}, ${cos(FADE_FROM_DEG)}, normalize(vSatelliteDir).z);`,
 )}`;
   };
   material.customProgramCacheKey = () => 'fade-to-satellite-area';
 }
 
+// Drawn a little nearer than they are too: seen from afar, depth is not precise enough to tell
+// them from the map's tiles beneath.
+function tileMaterial(texture) {
+  const material = new THREE.MeshLambertMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -8,
+  });
+  material.userData.cross = { map2: { value: texture }, crossMix: { value: 0 } };
+  fadeToArea(material);
+  return material;
+}
+
+// The tile store keeps this many images: each takes about 1 MB once decoded. While the clouds
+// loop runs it keeps LOOP_STORE_MAX: the loop's 25 images of up to ANIMATION_MAX_TILES (8) tiles
+// each, and the still view's tiles on show. Only the two images the loop fades between are on
+// the graphics card at a time.
+const STORE_MAX = 100;
+const LOAD_TIMEOUT_MS = 20_000;
+const LOOP_STORE_MAX = 230;
+
 // The moving clouds of the Clouds view (see meteosat.js), in a layer of tiles of their own just
 // above the map, which goes on showing yesterday's clouds beneath them and elsewhere. They show
 // the image for the timeline's time, the newest one for times after it. A new image (or the
 // tiles for a new view) takes the place of the one on show only once all its tiles in view have
 // loaded, so the clouds never flash blank or half drawn; while the timeline plays, the next
-// images load ahead. `baseEngine()` is the map's own tile engine, whose tile level this follows.
-// Returns { setActive(on), update(), setFollowing(on), setTime(time, ahead), asOf(), shown() }.
+// images load ahead, as coarser tiles (see coarserView). The clouds loop plays the last 12 hours
+// like a weather radar, once nearly all its images have loaded, each fading into the next.
+// `baseEngine()` is the map's own tile engine, whose tile level this follows.
+// Returns { setActive(on), update(), setFollowing(on), setTime(time, ahead, playing), asOf(),
+// shown(), startLoop({ manual }), stopLoop(), advanceLoop(), loopState() }.
 function setupMovingClouds(globe, baseEngine, onChange) {
   // 0.0002 globe radii is about 1.3 km above the ground.
   const radius = globe.getGlobeRadius() * 1.0002;
@@ -406,37 +449,51 @@ function setupMovingClouds(globe, baseEngine, onChange) {
   let times = null;
   let timesTimer = null;
   let loadingTimes = false;
-  // The timeline's time and, while it plays, the next times it will reach (ms).
+  // The timeline's time, while it plays the next times it will reach (ms), and whether it plays.
   let time = Date.now();
   let ahead = [];
+  let playing = false;
   // The images asked for last time, and those the timeline has passed on its way to the wanted
   // one while they loaded (see passedFrames).
   let lastFrames = [];
   let passed = [];
-  // The tiles wanted for the current view, or null when there is nothing to show.
-  let view = null;
+  // The tiles in view: `full` for a still view and `coarse` for images that follow one another
+  // (see coarserView), or null when zoomed in closer than the images have detail for.
+  let views = null;
   // On show: the image's time, and a mesh per tile by "level/x/y", with the store's key for its
   // image as `userData.key`.
   let shownFrame = null;
   const meshes = new Map();
   const shownKeys = new Set();
+  // The clouds loop while it runs: { frames, status ('loading' or 'playing'), progress (0 to 1),
+  // playable (the frames with every tile), manual, index, start, raf }.
+  let loop = null;
+  let loopFailed = false;
 
   const store = new TileStore({
+    max: STORE_MAX,
+    // A request that has not been answered after LOAD_TIMEOUT_MS counts as failed, so that a few
+    // stalled ones cannot hold up all the others.
     load: (url) =>
       new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error(`No answer for ${url}`)), LOAD_TIMEOUT_MS);
         loader.load(
           url,
           (image) => {
+            clearTimeout(timeout);
             const texture = new THREE.Texture(image);
             texture.colorSpace = THREE.SRGBColorSpace;
             texture.needsUpdate = true;
-            // Sent to the graphics card as it arrives, rather than a dozen at once when the
-            // image it belongs to goes on show.
-            globe.renderer?.()?.initTexture(texture);
+            // Sent to the graphics card as it arrives, rather than a dozen at once when the image
+            // it belongs to goes on show. Not the loop's many images: each goes there when shown.
+            if (!loop) globe.renderer?.()?.initTexture(texture);
             resolve(texture);
           },
           undefined,
-          reject,
+          (err) => {
+            clearTimeout(timeout);
+            reject(err);
+          },
         );
       }),
     inUse: (key) => shownKeys.has(key),
@@ -448,11 +505,48 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     const mesh = meshes.get(tile);
     group.remove(mesh);
     shownKeys.delete(mesh.userData.key);
-    // The image stays in the store; only its copy on the graphics card goes.
+    // The images stay in the store; only their copies on the graphics card go.
     mesh.material.map?.dispose();
+    mesh.material.userData.cross.map2.value?.dispose();
     mesh.material.dispose();
     mesh.geometry.dispose();
     meshes.delete(tile);
+  }
+
+  // The mesh for `tile` ("level/x/y"), made with `texture` if there is none yet.
+  function meshFor(tile, texture) {
+    let mesh = meshes.get(tile);
+    if (!mesh) {
+      const [level, x, y] = tile.split('/').map(Number);
+      mesh = mercatorTile(x, y, level, radius, tileMaterial(texture));
+      // Beneath the weather layers, which are drawn from -3 up.
+      mesh.renderOrder = -4;
+      mesh.raycast = () => {};
+      meshes.set(tile, mesh);
+      group.add(mesh);
+    }
+    return mesh;
+  }
+
+  // Shows images `a` and `b` (textures) on the mesh, `mix` of the way from one to the other, and
+  // lets the graphics card forget those it showed before. `key` is the store's key for `a`.
+  function paint(mesh, key, a, b = a, mix = 0) {
+    const { cross } = mesh.material.userData;
+    for (const old of [mesh.material.map, cross.map2.value]) if (old !== a && old !== b) old?.dispose();
+    mesh.material.map = a;
+    cross.map2.value = b;
+    cross.crossMix.value = mix;
+    shownKeys.delete(mesh.userData.key);
+    mesh.userData.key = key;
+    shownKeys.add(key);
+  }
+
+  function setShown(frame) {
+    group.visible = meshes.size > 0;
+    const next = meshes.size ? frame : null;
+    if (next === shownFrame) return;
+    shownFrame = next;
+    onChange?.();
   }
 
   function setOpacity(opacity) {
@@ -502,12 +596,16 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     }
   }
 
-  // Shows `frame` for the tiles in view once all of them have loaded, and says whether it did. A
+  const tileKeys = ({ level, tiles }) => tiles.map(({ x, y }) => `${level}/${x}/${y}`);
+  const jobsFor = (frames, { level, tiles }) =>
+    frames.flatMap((frame) => tiles.map(({ x, y }) => ({ key: `${frame}/${level}/${x}/${y}`, url: tileUrl(x, y, level, frame) })));
+
+  // Shows `frame` for the tiles of `view` once all of them have loaded, and says whether it did. A
   // tile that failed is asked for again after a pause; one that failed twice is left empty rather
   // than hold up the rest, and not filled with an image of another time. If none loaded, what is on
   // show stays.
-  function swap(frame) {
-    const tiles = view.tiles.map(({ x, y }) => `${view.level}/${x}/${y}`);
+  function swap(frame, view) {
+    const tiles = tileKeys(view);
     if (!tiles.length) {
       clear();
       return true;
@@ -521,62 +619,119 @@ function setupMovingClouds(globe, baseEngine, onChange) {
       const { state, value: texture } = entries[i];
       const key = `${frame}/${tile}`;
       if (state !== 'done') return;
-      let mesh = meshes.get(tile);
-      if (mesh?.userData.key === key) return;
-      if (mesh) {
-        shownKeys.delete(mesh.userData.key);
-        mesh.material.map.dispose();
-        mesh.material.map = texture;
-      } else {
-        // Drawn a little nearer than they are too: seen from afar, depth is not precise enough to
-        // tell them from the map's tiles beneath.
-        const material = new THREE.MeshLambertMaterial({
-          map: texture,
-          transparent: true,
-          depthWrite: false,
-          polygonOffset: true,
-          polygonOffsetFactor: -2,
-          polygonOffsetUnits: -8,
-        });
-        fadeToArea(material);
-        const [level, x, y] = tile.split('/').map(Number);
-        mesh = mercatorTile(x, y, level, radius, material);
-        // Beneath the weather layers, which are drawn from -3 up.
-        mesh.renderOrder = -4;
-        mesh.raycast = () => {};
-        meshes.set(tile, mesh);
-        group.add(mesh);
-      }
-      mesh.userData.key = key;
-      shownKeys.add(key);
+      const mesh = meshFor(tile, texture);
+      if (mesh.userData.key !== key || mesh.material.userData.cross.crossMix.value) paint(mesh, key, texture);
     });
-    group.visible = meshes.size > 0;
-    const next = meshes.size ? frame : null;
-    if (next !== shownFrame) {
-      shownFrame = next;
+    setShown(frame);
+    return true;
+  }
+
+  // The loop's images `a` and `b` on its tiles, `mix` of the way from one to the other.
+  function showLoop(a, b, mix) {
+    const tiles = tileKeys(views.coarse);
+    const keep = new Set(tiles);
+    for (const tile of [...meshes.keys()]) if (!keep.has(tile)) removeMesh(tile);
+    for (const tile of tiles) {
+      const ta = store.get(`${a}/${tile}`).value;
+      const tb = store.get(`${b}/${tile}`).value;
+      paint(meshFor(tile, ta), `${a}/${tile}`, ta, tb, mix);
+    }
+    setShown(a);
+  }
+
+  function animateLoop() {
+    if (!globalThis.requestAnimationFrame) return;
+    const step = (now) => {
+      if (loop?.status !== 'playing') return;
+      const { index, next, mix } = loopPosition(now - loop.start, loop.playable.length);
+      showLoop(loop.playable[index], loop.playable[next], mix);
+      loop.raf = requestAnimationFrame(step);
+    };
+    loop.raf = requestAnimationFrame(step);
+  }
+
+  function stopLoop({ failed = false } = {}) {
+    if (!loop) return;
+    if (loop.raf) cancelAnimationFrame(loop.raf);
+    loop = null;
+    loopFailed = failed;
+    store.max = STORE_MAX;
+    store.evict();
+    for (const mesh of meshes.values()) mesh.material.userData.cross.crossMix.value = 0;
+    onChange?.();
+  }
+
+  // Loads the loop's images for the tiles in view, and starts or holds it as they arrive.
+  function refreshLoop() {
+    const view = views.coarse;
+    store.want(jobsFor(loop.frames, view));
+    const tiles = tileKeys(view);
+    let done = 0;
+    let settled = true;
+    const playable = loop.frames.filter((frame) => {
+      let complete = true;
+      for (const tile of tiles) {
+        const entry = store.get(`${frame}/${tile}`);
+        if (entry?.state === 'done') done++;
+        else {
+          complete = false;
+          if (!(entry?.failures >= 2)) settled = false;
+        }
+      }
+      return complete;
+    });
+    const status = tiles.length ? loopStatus({ frames: loop.frames.length, complete: playable.length, settled }) : 'failed';
+    if (status === 'failed') {
+      stopLoop({ failed: true });
+      return;
+    }
+    const progress = done / (loop.frames.length * tiles.length);
+    const changed = Math.floor(progress * 20) !== Math.floor(loop.progress * 20);
+    loop.progress = progress;
+    loop.playable = playable;
+    if (status === 'ready' && loop.status === 'loading') {
+      loop.status = 'playing';
+      loop.start = performance.now();
+      loop.index = 0;
+      showLoop(playable[0], playable[0], 0);
+      if (!loop.manual) animateLoop();
+      onChange?.();
+    } else if (status === 'loading' && loop.status === 'playing') {
+      // The view moved on to tiles not loaded yet: the loop waits for them.
+      if (loop.raf) cancelAnimationFrame(loop.raf);
+      loop.status = 'loading';
+      onChange?.();
+    } else if (changed) {
       onChange?.();
     }
-    return true;
   }
 
   function refresh() {
     if (!active) {
+      stopLoop();
       store.clear();
       clear();
       return;
     }
-    if (!times || !view) {
+    if (!times || !views) {
       store.want([]);
-      if (!view) fadeOut();
+      if (!views) {
+        stopLoop();
+        fadeOut();
+      }
       return;
     }
     stopFading();
+    if (loop) {
+      refreshLoop();
+      return;
+    }
+    const view = playing ? views.coarse : views.full;
     const frames = framesFor(time, ahead, times);
     passed = passedFrames([...passed, ...lastFrames], frames[0], shownFrame);
     lastFrames = frames;
-    const { level, tiles } = view;
-    store.want([...frames, ...passed].flatMap((frame) => tiles.map(({ x, y }) => ({ key: `${frame}/${level}/${x}/${y}`, url: tileUrl(x, y, level, frame) }))));
-    for (const frame of [frames[0], ...passed]) if (swap(frame)) break;
+    store.want(jobsFor([...frames, ...passed], view));
+    for (const frame of [frames[0], ...passed]) if (swap(frame, view)) break;
   }
 
   // Works out the tiles in view, one level coarser than the map's own (the images are twice as
@@ -587,11 +742,11 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     if (level == null) {
       // The globe has not initialised yet.
       retry = setTimeout(() => settled.update(), 1000);
-      view = null;
+      views = null;
       return;
     }
     if (level > MAP_LEVEL_LIMIT || !camera?.position) {
-      view = null;
+      views = null;
       return;
     }
     // The camera always looks at the middle of the globe. Its position is up to date before its
@@ -610,7 +765,7 @@ function setupMovingClouds(globe, baseEngine, onChange) {
       return point.dot(eye.position) > r2 && frustum.containsPoint(point);
     };
     const tileLevel = Math.max(0, level - 1);
-    view = { level: tileLevel, tiles: tilesInView(tileLevel, inView) };
+    views = { full: { level: tileLevel, tiles: tilesInView(tileLevel, inView) }, coarse: coarserView(tileLevel, inView) };
   }
 
   let retry = null;
@@ -650,6 +805,7 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     setActive(on) {
       if (on === active) return;
       active = on;
+      loopFailed = false;
       if (on) {
         loadTimes();
         settled.update();
@@ -657,7 +813,8 @@ function setupMovingClouds(globe, baseEngine, onChange) {
         clearTimeout(timesTimer);
         clearTimeout(retry);
         settled.cancel();
-        view = null;
+        views = null;
+        stopLoop();
         store.clear();
         clear();
       }
@@ -666,20 +823,63 @@ function setupMovingClouds(globe, baseEngine, onChange) {
       if (active) settled.update();
     },
     setFollowing: settled.setFollowing,
-    // `next` and `nextAhead` in milliseconds.
-    setTime(next, nextAhead = []) {
-      if (next === time && nextAhead.join() === ahead.join()) return;
+    // `next` and `nextAhead` in milliseconds; `nextPlaying` while the timeline plays.
+    setTime(next, nextAhead = [], nextPlaying = false) {
+      if (next === time && nextAhead.join() === ahead.join() && nextPlaying === playing) return;
       time = next;
       ahead = nextAhead;
+      playing = nextPlaying;
       if (active) refresh();
     },
     // The time of the image on show when the timeline is later than it (the newest image, or
-    // while the next one loads), else null.
+    // while the next one loads), else null. Not while the loop runs, whose images are its own.
     asOf() {
-      return active && shownFrame !== null && time > shownFrame ? shownFrame : null;
+      return active && !loop && shownFrame !== null && time > shownFrame ? shownFrame : null;
     },
     // The time of the image on show, or null when none is.
     shown: () => shownFrame,
+    // Starts the clouds loop; `manual` steps it on with advanceLoop() instead of playing it.
+    // Returns whether it could start (the clouds are shown, their times known and some in view).
+    startLoop({ manual = false } = {}) {
+      loopFailed = false;
+      if (!active || !times || !views?.coarse.tiles.length) return false;
+      if (loop) stopLoop();
+      loop = { frames: loopFrames(times), status: 'loading', progress: 0, playable: [], manual, index: 0, start: 0, raf: null };
+      store.max = LOOP_STORE_MAX;
+      refresh();
+      onChange?.();
+      return true;
+    },
+    stopLoop() {
+      loopFailed = false;
+      if (!loop) return;
+      stopLoop();
+      refresh();
+    },
+    // One image on, for a loop started `manual`; after the newest it ends.
+    advanceLoop() {
+      if (loop?.status !== 'playing') return;
+      loop.index++;
+      if (loop.index >= loop.playable.length) {
+        stopLoop();
+        refresh();
+        return;
+      }
+      showLoop(loop.playable[loop.index], loop.playable[loop.index], 0);
+    },
+    // The loop for the page to show: null when off, else { status: 'loading' | 'playing' |
+    // 'failed', progress (0 to 1), frame (the image on show while playing), last (whether a manual
+    // loop is on its newest image) }.
+    loopState() {
+      if (loopFailed) return { status: 'failed', progress: 0, frame: null, last: false };
+      if (!loop) return null;
+      return {
+        status: loop.status,
+        progress: loop.progress,
+        frame: loop.status === 'playing' ? shownFrame : null,
+        last: loop.manual && loop.index >= loop.playable.length - 1,
+      };
+    },
   };
 }
 

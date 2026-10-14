@@ -373,7 +373,8 @@ input:focus-visible {
   outline-offset: 2px;
 }
 
-button[aria-checked='true'] {
+button[aria-checked='true'],
+#clouds-loop[aria-pressed='true'] {
   background: rgba(155, 209, 255, 0.24);
   border-color: var(--accent);
   color: #fff;
@@ -1207,6 +1208,15 @@ input:disabled {
   accent-color: var(--accent);
 }
 
+#clouds-loop {
+  flex: none;
+  white-space: nowrap;
+}
+
+#clouds-loop[hidden] {
+  display: none;
+}
+
 #time-label {
   flex: none;
   min-width: 11ch;
@@ -1525,6 +1535,15 @@ body:not(.idle) #caption {
   #time-slider {
     order: 3;
     flex-basis: 100%;
+  }
+
+  /* In the Clouds view the loop button shares the slider's row. */
+  #timeline:has(#clouds-loop:not([hidden])) #time-slider {
+    flex: 1 1 60%;
+  }
+
+  #clouds-loop {
+    order: 4;
   }
 
   .pilot-hud {

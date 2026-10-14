@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ANIMATION_MAX_TILES,
   AREA_DEG,
   Backoff,
+  LOOP_FRAME_MS,
+  LOOP_HOLD_MS,
+  coarserView,
+  loopFrames,
+  loopPosition,
+  loopStatus,
   MAX_ATTEMPTS,
   TileStore,
   frameFor,
@@ -220,7 +227,8 @@ describe('TileStore', () => {
     // After the pause the owner is told, and asks again.
     onSettle.mockImplementation(() => store.want(jobs(['a', 'b'])));
     await vi.advanceTimersByTimeAsync(200);
-    expect(load.mock.calls.map(([url]) => url)).toEqual(['u:a', 'u:a', 'u:b']);
+    // The tile not asked for yet goes first, then the failed one again.
+    expect(load.mock.calls.map(([url]) => url)).toEqual(['u:a', 'u:b', 'u:a']);
     expect(store.get('a')).toMatchObject({ state: 'done', failures: 1 });
     expect(store.get('b').state).toBe('done');
   });
@@ -385,6 +393,23 @@ describe('TileStore', () => {
     expect(load.mock.calls.map(([url]) => url)).toEqual(['u:a', 'u:b', 'u:a']);
   });
 
+  it('asks for new tiles before failed ones again, so a broken tile cannot hold up the rest', async () => {
+    vi.useFakeTimers();
+    const load = vi.fn(async (url) => {
+      if (url === 'u:bad') throw new Error('broken');
+      return url;
+    });
+    let store;
+    const onSettle = () => store.want(jobs(['bad', 'a', 'b']));
+    store = new TileStore({ load, concurrency: 1, backoff: new Backoff({ first: 1000 }), onSettle });
+    store.want(jobs(['bad', 'a', 'b']));
+    await vi.advanceTimersByTimeAsync(1500);
+    // After the pause the one request let through is a new tile, not the broken one.
+    expect(load.mock.calls.map(([url]) => url).slice(0, 2)).toEqual(['u:bad', 'u:a']);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(store.get('b').state).toBe('done');
+  });
+
   it('lets go of every loaded image when cleared, but not of those loading', async () => {
     vi.useFakeTimers();
     const dispose = vi.fn();
@@ -398,5 +423,53 @@ describe('TileStore', () => {
     store.clear();
     expect([...store.entries.keys()]).toEqual(['c']);
     expect(dispose.mock.calls.map(([v]) => v).sort()).toEqual(['A', 'B']);
+  });
+});
+
+describe('animation tiles', () => {
+  it('takes the finest level with at most a few tiles in view', () => {
+    // Europe at about 0.7 globe radii up: much of a quarter of the globe.
+    const inView = (lat, lng) => lat > 25 && lat < 70 && lng > -20 && lng < 40;
+    const still = tilesInView(4, inView).length;
+    const coarse = coarserView(4, inView);
+    expect(still).toBeGreaterThan(ANIMATION_MAX_TILES);
+    expect(coarse.tiles.length).toBeLessThanOrEqual(ANIMATION_MAX_TILES);
+    expect(coarse.level).toBe(3);
+    expect(coarse.tiles).toEqual(tilesInView(3, inView));
+    // Few enough already: the same tiles.
+    expect(coarserView(2, inView)).toEqual({ level: 2, tiles: tilesInView(2, inView) });
+    expect(coarserView(1, () => true, 0).level).toBe(0);
+  });
+});
+
+describe('the clouds loop', () => {
+  it('takes the last 12 hours every half hour, oldest first, from the newest half hour', () => {
+    const frames = loopFrames(TIMES);
+    expect(frames).toHaveLength(25);
+    expect(frames.at(-1)).toBe(at('2026-10-14T06:30:00Z'));
+    expect(frames[0]).toBe(at('2026-10-13T18:30:00Z'));
+    expect(frames[1] - frames[0]).toBe(30 * MIN);
+    // A newest image off the half hour: the loop ends on the half hour before it.
+    expect(loopFrames({ ...TIMES, end: at('2026-10-14T06:50:00Z') }).at(-1)).toBe(at('2026-10-14T06:30:00Z'));
+    // Never before the first image there is.
+    expect(loopFrames({ start: at('2026-10-14T03:00:00Z'), end: at('2026-10-14T06:30:00Z'), step: 10 * MIN })).toHaveLength(8);
+  });
+
+  it('fades each image into the next, holds the newest, and starts again', () => {
+    expect(loopPosition(0, 25)).toEqual({ index: 0, next: 1, mix: 0 });
+    expect(loopPosition(LOOP_FRAME_MS * 2.5, 25)).toEqual({ index: 2, next: 3, mix: 0.5 });
+    const run = 24 * LOOP_FRAME_MS;
+    expect(loopPosition(run + 10, 25)).toEqual({ index: 24, next: 24, mix: 0 });
+    expect(loopPosition(run + LOOP_HOLD_MS - 1, 25).index).toBe(24);
+    expect(loopPosition(run + LOOP_HOLD_MS, 25)).toEqual({ index: 0, next: 1, mix: 0 });
+    expect(loopPosition(123_456, 1)).toEqual({ index: 0, next: 0, mix: 0 });
+  });
+
+  it('starts once nearly all images are there, and gives up only when there are not two', () => {
+    expect(loopStatus({ frames: 25, complete: 19, settled: false })).toBe('loading');
+    expect(loopStatus({ frames: 25, complete: 20, settled: false })).toBe('ready');
+    expect(loopStatus({ frames: 25, complete: 5, settled: true })).toBe('ready');
+    expect(loopStatus({ frames: 25, complete: 1, settled: true })).toBe('failed');
+    expect(loopStatus({ frames: 2, complete: 1, settled: false })).toBe('loading');
   });
 });

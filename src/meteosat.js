@@ -112,6 +112,57 @@ export function passedFrames(asked, wanted, shown, max = 2) {
     .slice(0, max);
 }
 
+// While the timeline plays through the past or the clouds loop, many images follow one another:
+// they use the finest tiles of which no more than this many cover the view, about half the detail
+// of the still view when zoomed in to Europe (8 tiles where it has 21) and the same when looking
+// at the whole globe (4).
+export const ANIMATION_MAX_TILES = 8;
+
+// The tiles in view at `level`, or at the finest coarser level where at most `max` of them are.
+export function coarserView(level, inView, max = ANIMATION_MAX_TILES) {
+  for (let l = level; ; l--) {
+    const tiles = tilesInView(l, inView);
+    if (tiles.length <= max || l <= 0) return { level: l, tiles };
+  }
+}
+
+// The clouds loop: the last LOOP_HOURS of images, one every LOOP_STEP_MS, like a weather radar.
+export const LOOP_HOURS = 12;
+export const LOOP_STEP_MS = 30 * 60_000;
+// Each image shows for LOOP_FRAME_MS, fading into the next, and the newest stays LOOP_HOLD_MS
+// before the loop starts again.
+export const LOOP_FRAME_MS = 400;
+export const LOOP_HOLD_MS = 1500;
+
+// The loop's image times, oldest first: every half hour back from the newest half hour there is.
+export function loopFrames({ start, end }, hours = LOOP_HOURS, step = LOOP_STEP_MS) {
+  const last = Math.floor(end / step) * step;
+  const frames = [];
+  for (let t = last - hours * 3_600_000; t <= last; t += step) if (t >= start) frames.push(t);
+  return frames;
+}
+
+// Where the loop is `elapsed` ms after it started, with `count` images: the image on show, the
+// next one, and how far (0 to 1) the first has faded into the second. The newest image does not
+// fade back into the oldest: the loop jumps back, as a radar loop does.
+export function loopPosition(elapsed, count, { frameMs = LOOP_FRAME_MS, holdMs = LOOP_HOLD_MS } = {}) {
+  if (count < 2) return { index: 0, next: 0, mix: 0 };
+  const run = (count - 1) * frameMs;
+  const t = elapsed % (run + holdMs);
+  if (t >= run) return { index: count - 1, next: count - 1, mix: 0 };
+  const index = Math.floor(t / frameMs);
+  return { index, next: index + 1, mix: (t - index * frameMs) / frameMs };
+}
+
+// Whether the loop can start: 'ready' once nearly all of its `frames` images have every tile
+// (`complete` of them), 'failed' when everything has been tried and fewer than two are complete,
+// else 'loading'. `settled` says whether every tile has loaded or been given up on.
+export function loopStatus({ frames, complete, settled }) {
+  if (complete >= Math.max(2, Math.ceil(0.8 * frames))) return 'ready';
+  if (settled) return complete >= 2 ? 'ready' : 'failed';
+  return 'loading';
+}
+
 // The address of one tile's image at `frame` (ms).
 export function tileUrl(x, y, level, frame) {
   const params = new URLSearchParams({
@@ -197,13 +248,17 @@ export class TileStore {
   want(jobs) {
     const now = this.now();
     this.wanted = new Set(jobs.map((j) => j.key));
-    this.queue = [];
+    // Tiles not asked for yet go first and failed ones after them, so that a few that keep
+    // failing (or hang) cannot hold up the rest.
+    const fresh = [];
+    const again = [];
     for (const job of jobs) {
       const entry = this.entries.get(job.key);
-      if (this.due(job.key, now)) this.queue.push(job);
+      if (this.due(job.key, now)) (entry ? again : fresh).push(job);
       // A failed tile that is not due yet: look again when it is.
       else if (entry.state === 'failed' && entry.failures < MAX_ATTEMPTS) this.wake(entry.retryAt - now);
     }
+    this.queue = [...fresh, ...again];
     this.pump();
   }
 

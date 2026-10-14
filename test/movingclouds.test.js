@@ -161,4 +161,82 @@ describe('the moving clouds of the Clouds view', () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(basemap.cloudsAsOf()).toBeNull();
   });
+
+  describe('the clouds loop', () => {
+    afterEach(() => {
+      engine.level = 3;
+    });
+
+    it('loads the last 12 hours for the tiles in view, then plays, and stops with the view', async () => {
+      const basemap = setupBasemap(globe, 'backdrop.jpg', { initial: 'clouds' });
+      basemap.setTime(at('2026-10-14T07:00:00Z'));
+      await vi.advanceTimersByTimeAsync(2000);
+      images.loads.length = 0;
+      expect(basemap.cloudsLoop()).toBeNull();
+      expect(basemap.startCloudsLoop()).toBe(true);
+      expect(basemap.cloudsLoop().status).toBe('loading');
+      await vi.advanceTimersByTimeAsync(2000);
+      const loop = basemap.cloudsLoop();
+      expect(loop.status).toBe('playing');
+      expect(loop.progress).toBe(1);
+      // 25 images, each for the few tiles in view, and nothing else (the newest was on show).
+      expect(timesLoaded()).toHaveLength(24);
+      expect(timesLoaded()[0]).toBe('2026-10-13T18:30:00Z');
+      const perImage = images.loads.length / 24;
+      expect(Number.isInteger(perImage)).toBe(true);
+      expect(perImage).toBeLessThanOrEqual(8);
+      // The loop's images are its own: no note about how old the timeline's clouds are.
+      expect(basemap.cloudsAsOf()).toBeNull();
+      // Zoomed in past the clouds' detail, the loop stops.
+      engine.level = 9;
+      basemap.setAltitude(0.05);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(basemap.cloudsLoop()).toBeNull();
+    });
+
+    it('stops when the view changes, and asks nothing more after', async () => {
+      const basemap = setupBasemap(globe, 'backdrop.jpg', { initial: 'clouds' });
+      await vi.advanceTimersByTimeAsync(2000);
+      basemap.startCloudsLoop();
+      await vi.advanceTimersByTimeAsync(0);
+      basemap.setStyle('satellite');
+      expect(basemap.cloudsLoop()).toBeNull();
+      const asked = images.loads.length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(images.loads.length).toBe(asked);
+      expect(basemap.startCloudsLoop()).toBe(false);
+    });
+
+    it('steps one image at a time when asked to, and ends after the newest', async () => {
+      const basemap = setupBasemap(globe, 'backdrop.jpg', { initial: 'clouds' });
+      await vi.advanceTimersByTimeAsync(2000);
+      basemap.startCloudsLoop({ manual: true });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(basemap.cloudsLoop()).toMatchObject({ status: 'playing', frame: at('2026-10-13T18:30:00Z'), last: false });
+      // Nothing moves by itself.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(basemap.cloudsLoop().frame).toBe(at('2026-10-13T18:30:00Z'));
+      basemap.advanceCloudsLoop();
+      expect(basemap.cloudsLoop().frame).toBe(at('2026-10-13T19:00:00Z'));
+      for (let i = 0; i < 23; i++) basemap.advanceCloudsLoop();
+      expect(basemap.cloudsLoop()).toMatchObject({ frame: at('2026-10-14T06:30:00Z'), last: true });
+      basemap.advanceCloudsLoop();
+      expect(basemap.cloudsLoop()).toBeNull();
+    });
+
+    it('plays without images that do not come', async () => {
+      const basemap = setupBasemap(globe, 'backdrop.jpg', { initial: 'clouds' });
+      await vi.advanceTimersByTimeAsync(2000);
+      images.held.add('2026-10-13T18:30:00Z');
+      basemap.startCloudsLoop();
+      // Those requests hang (until they count as failed), the rest load meanwhile, and the loop
+      // plays without the missing image.
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(basemap.cloudsLoop().status).toBe('playing');
+      expect(basemap.cloudsLoop().progress).toBeLessThan(1);
+      expect(basemap.cloudsLoop().frame).toBe(at('2026-10-13T19:00:00Z'));
+      basemap.stopCloudsLoop();
+      expect(basemap.cloudsLoop()).toBeNull();
+    });
+  });
 });
