@@ -1,11 +1,18 @@
 // The Ops view of the airport panel: its tabs, and the frame the Ops parts plug into. A part is
 //
-//   { id, title, factLabel, analyse(ctx) → data, fact(data, ctx) → { text, status } | null, html(data, ctx) → string }
+//   { id, title, factLabel, needs, analyse(ctx), fact(data, ctx), html(data, ctx), bind(root, api), unbind(root) }
 //
-// `analyse` does the work once per render, `fact` gives the part's one line for the status strip
-// at the top and `html` its section. To add a part, write one module that exports such an object
-// and add it to OPS_PARTS below; nothing else changes. `ctx` is what main.js knows about the open
-// airport (airport, hourly, error, observation, limits, time, now and the time formatters).
+// `analyse` does the work once per render and gives `data`; `fact` gives the part's one line for the
+// status strip at the top ({ text, status } or null) and `html` its section. `needs` lists the
+// names the part reads from `ctx`, which main.js builds for the open airport (airport, hourly,
+// error, observation, limits, limitsLabel, time, now and the time formatters, see opsclock.js);
+// a part whose needs are not all there says so instead of failing. `bind` and `unbind` (both
+// optional) are called when the Ops tab is shown and when it goes: `root` is the element the HTML
+// is put in, which stays the same across renders, so a part listens to it for what happens in its
+// section (events are delegated), and starts and stops anything of its own, such as polling.
+// `api` is { getContext(), rerender(), setTime(time, { quiet }) }: the context now, drawing the
+// tab again, and setting the timeline. To add a part, write one module that exports such an object
+// and add it to OPS_PARTS below; nothing else changes.
 import { escapeHtml } from './airportview.js';
 import { STATUS } from './runways.js';
 import { runwayPart } from './opsrunwayview.js';
@@ -20,9 +27,9 @@ export const DETAIL_TABS = [
 const TAB_KEY = 'power-globe:airport-tab';
 
 // The tab remembered for this browser, or the first.
-export function readTab(storage = globalThis.localStorage) {
+export function readTab(storage) {
   try {
-    const saved = storage.getItem(TAB_KEY);
+    const saved = (storage ?? globalThis.localStorage).getItem(TAB_KEY);
     if (DETAIL_TABS.some((tab) => tab.id === saved)) return saved;
   } catch {
     // Nothing saved, or storage unavailable.
@@ -30,9 +37,9 @@ export function readTab(storage = globalThis.localStorage) {
   return DETAIL_TABS[0].id;
 }
 
-export function saveTab(id, storage = globalThis.localStorage) {
+export function saveTab(id, storage) {
   try {
-    storage.setItem(TAB_KEY, id);
+    (storage ?? globalThis.localStorage).setItem(TAB_KEY, id);
   } catch {
     // Remembering the tab is only a convenience.
   }
@@ -75,10 +82,18 @@ export function stripHtml(entries) {
   return `<ul class="ops-strip" aria-label="Key facts">${items}</ul>`;
 }
 
-// The whole Ops tab for `parts`: the status strip, then a section per part. A part that throws
-// leaves a note in its place and the others as they are.
+// The names a part needs that `ctx` does not have.
+const missing = (part, ctx) => (part.needs ?? []).filter((name) => !(name in ctx));
+
+// The whole Ops tab for `parts`: the status strip, then a section per part. A part that throws, or
+// lacks something in `ctx`, leaves a note in its place and the others as they are.
 export function opsPanelHtml(parts, ctx) {
   const entries = parts.map((part) => {
+    const lacking = missing(part, ctx);
+    if (lacking.length) {
+      console.error(`Ops part "${part.id}" needs ${lacking.join(', ')} in its context`);
+      return { part, fact: null, html: '<p>This part could not be shown.</p>' };
+    }
     const data = attempt(part, 'analyse', () => part.analyse(ctx));
     const ok = data !== FAILED;
     const fact = ok ? attempt(part, 'fact', () => part.fact?.(data, ctx) ?? null) : FAILED;
@@ -92,4 +107,32 @@ export function opsPanelHtml(parts, ctx) {
     })
     .join('');
   return `${stripHtml(entries)}${sections}`;
+}
+
+// The Ops tab in `root`: draws it, and gives the parts their `bind` and `unbind` calls. `getContext()`
+// gives the context for the open airport, `requestRender()` asks for the panel to be drawn
+// again, `setTime(time, { quiet })` sets the timeline to a GMT time.
+export function createOpsHost({ root, getContext, requestRender, setTime, parts = OPS_PARTS }) {
+  let mounted = false;
+  const api = { getContext, rerender: requestRender, setTime };
+  return {
+    // Idempotent: called whenever the panel's state changes.
+    mount() {
+      if (mounted) return;
+      mounted = true;
+      for (const part of parts) attempt(part, 'bind', () => part.bind?.(root, api));
+    },
+    unmount() {
+      if (!mounted) return;
+      mounted = false;
+      for (const part of parts) attempt(part, 'unbind', () => part.unbind?.(root));
+    },
+    // Draws the tab for `ctx`; focus stays on the same element (marked data-focus-key) across it.
+    render(ctx) {
+      const active = root.contains(document.activeElement) ? document.activeElement.closest?.('[data-focus-key]') : null;
+      const key = active?.dataset.focusKey;
+      root.innerHTML = opsPanelHtml(parts, ctx);
+      if (key) root.querySelector(`[data-focus-key="${CSS.escape(key)}"]`)?.focus();
+    },
+  };
 }

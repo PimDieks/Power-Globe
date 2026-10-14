@@ -23,6 +23,23 @@ describe('the airport panel tabs', () => {
     expect(() => saveTab('ops', broken)).not.toThrow();
   });
 
+  it('survives a localStorage that throws when it is looked up', () => {
+    const had = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new Error('SecurityError');
+      },
+    });
+    try {
+      expect(readTab()).toBe('details');
+      expect(() => saveTab('ops')).not.toThrow();
+    } finally {
+      if (had) Object.defineProperty(globalThis, 'localStorage', had);
+      else delete globalThis.localStorage;
+    }
+  });
+
   it('moves between tabs with the arrow keys, Home and End, wrapping round', () => {
     expect(tabAfterKey('ArrowRight', 0, 2)).toBe(1);
     expect(tabAfterKey('ArrowRight', 1, 2)).toBe(0);
@@ -117,6 +134,8 @@ describe('the runway part in the Ops tab', () => {
     formatClock: (t) => `${t.slice(11, 16)} UTC`,
     formatClockShort: (t) => t.slice(11, 16),
     formatHour: (t) => t.slice(11, 16),
+    formatTick: (t) => String(Number(t.slice(11, 13))),
+    limitsLabel: 'Regional',
     zone: 'UTC',
     ...over,
   });
@@ -133,16 +152,19 @@ describe('the runway part in the Ops tab', () => {
     expect(html.match(/class="ops-hour"/g)).toHaveLength(24);
     expect(html.match(/aria-current="time"/g)).toHaveLength(1);
     expect(html).toContain('data-time="2026-10-14T14:00" data-readout');
-    // Four ends in each column.
-    expect(html.match(/<i class="ops-cell/g)).toHaveLength(24 * 4);
+    // A cell for each of the two runways in every column, not for each of the four ends.
+    expect(html.match(/<i class="ops-cell/g)).toHaveLength(24 * 2);
+    expect(html).toContain('<span>09/27</span><span>06/24</span>');
     // Numbers are in the hover text, not in the strip.
     expect(html).toContain('favoured 27, crosswind');
     expect(html).toContain('Local time, UTC');
+    expect(html).toContain('Limits (Regional): crosswind 25 kt, tailwind 10 kt');
+    expect(html).toContain('Set them in the wind check');
   });
 
   it('shows the timeline hour in the readout, or the first hour when the timeline is elsewhere', () => {
-    expect(opsPanelHtml(OPS_PARTS, ctx())).toMatch(/<p class="ops-readout" data-default="14:00 UTC · /);
-    expect(opsPanelHtml(OPS_PARTS, ctx({ time: '2026-12-01T00:00' }))).toMatch(/<p class="ops-readout" data-default="12:00 UTC · /);
+    expect(opsPanelHtml(OPS_PARTS, ctx())).toMatch(/<p class="ops-readout" data-default="14:00 · /);
+    expect(opsPanelHtml(OPS_PARTS, ctx({ time: '2026-12-01T00:00' }))).toMatch(/<p class="ops-readout" data-default="12:00 · /);
   });
 
   it('says why there is no chart', () => {

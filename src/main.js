@@ -26,7 +26,8 @@ import { setupSearch } from './search.js';
 import { airportPanelWeather, conditionsAt, loadAirports, searchAirports } from './airports.js';
 import { airportDetailsHtml, airportPlace, panelStays, verdictText } from './airportview.js';
 import { setupWindCheck } from './windcheck.js';
-import { DETAIL_TABS, OPS_PARTS, opsPanelHtml, readTab, saveTab, tabAfterKey } from './ops.js';
+import { DETAIL_TABS, OPS_PARTS, createOpsHost, readTab, saveTab, tabAfterKey } from './ops.js';
+import { formatClock, formatClockShort, formatTick, zoneName } from './opsclock.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
@@ -1361,21 +1362,6 @@ function detailIndex(data) {
   return Math.max(0, data.time.indexOf(time));
 }
 
-// A GMT time as the reader's local clock time, with the day when it is not today and, unless
-// `withZone` is false, the zone: "15:00 CEST", "Thu 02:00 CEST".
-function formatClock(time, withZone = true) {
-  const date = new Date(parseTime(time));
-  const day = date.toDateString() === new Date().toDateString() ? {} : { weekday: 'short' };
-  return date.toLocaleTimeString(undefined, { ...day, hour: '2-digit', minute: '2-digit', ...(withZone ? { timeZoneName: 'short' } : {}) });
-}
-
-const formatClockShort = (time) => formatClock(time, false);
-
-// Just the hour, for the labels along an axis: "5 PM" or "17".
-const formatTick = (time) => new Date(parseTime(time)).toLocaleTimeString(undefined, { hour: 'numeric' });
-
-const localZone = () => new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(new Date()).find((p) => p.type === 'timeZoneName')?.value ?? 'local time';
-
 // The airport panel's tabs: shown for an airport only, with the body as the selected tab's panel.
 function syncDetailTabs() {
   const show = !!state.detail?.airport;
@@ -1392,6 +1378,8 @@ function syncDetailTabs() {
     els.detailsBody.removeAttribute('role');
     els.detailsBody.removeAttribute('aria-labelledby');
   }
+  if (show && state.detailTab === 'ops') ops.mount();
+  else ops.unmount();
 }
 
 function selectDetailTab(id) {
@@ -1427,25 +1415,42 @@ els.detailsTabs.addEventListener('keydown', (event) => {
   tabs[next].focus();
 });
 
-// An hour in the Ops tab sets the timeline to it, so the map and the panel agree.
-els.detailsBody.addEventListener('click', (event) => {
-  const time = event.target.closest('[data-time]')?.dataset.time;
-  const step = time && state.timeline ? stepNearest(state.timeline.times, time) : -1;
-  if (step < 0) return;
-  stopCloudsLoop();
-  setPlaying(false);
-  seek(step);
-  announce(`Timeline set to ${formatTime(time)}.`);
+// The Ops tab (see ops.js): what its parts read, and what they may ask of the page.
+const ops = createOpsHost({
+  root: els.detailsBody,
+  getContext: airportContext,
+  requestRender: () => renderDetails(),
+  // An hour in the Ops tab sets the timeline to it, so the map and the panel agree.
+  setTime(time, { quiet = false } = {}) {
+    const step = state.timeline ? stepNearest(state.timeline.times, time) : -1;
+    if (step < 0) return;
+    stopCloudsLoop();
+    setPlaying(false);
+    seek(step);
+    if (!quiet) announce(`Timeline set to ${formatTime(time)}.`);
+  },
 });
 
-// Hovering or focusing an hour shows its numbers under the strip; leaving it shows the timeline's hour again.
-function showReadout(event) {
-  const readout = els.detailsBody.querySelector('.ops-readout');
-  if (!readout) return;
-  const hour = event.type === 'pointerout' || event.type === 'focusout' ? null : event.target.closest?.('[data-readout]');
-  readout.textContent = hour ? hour.dataset.readout : readout.dataset.default;
+// What is known of the open airport, for the airport panel's tabs.
+function airportContext() {
+  const detail = state.detail;
+  return {
+    airport: detail.airport,
+    hourly: detail.hourly,
+    time: currentTime(),
+    now: Date.now(),
+    limits: windCheck.limits(),
+    limitsLabel: windCheck.label(),
+    formatTime,
+    formatHour,
+    formatClock,
+    formatClockShort,
+    formatTick,
+    zone: zoneName(),
+    observation: detail.observation,
+    error: detail.error,
+  };
 }
-for (const type of ['pointerover', 'pointerout', 'focusin', 'focusout']) els.detailsBody.addEventListener(type, showReadout);
 
 // Updates only the panel's body, so the heading and close button keep their focus.
 function renderDetails() {
@@ -1457,25 +1462,8 @@ function renderDetails() {
   }
   if (detail?.airport) {
     if (!detail.hourly && !detail.error) return;
-    const context = {
-      airport: detail.airport,
-      hourly: detail.hourly,
-      time: currentTime(),
-      limits: windCheck.limits(),
-      limitsLabel: windCheck.label(),
-      formatTime,
-      formatHour,
-      observation: detail.observation,
-      error: detail.error,
-    };
-    // The redraw replaces the buttons, so focus goes back to the same hour afterwards.
-    const focused = els.detailsBody.contains(document.activeElement) ? document.activeElement.closest('[data-time]') : null;
-    const focusedAt = focused && { time: focused.dataset.time, part: focused.classList.contains('ops-segment') ? 'ops-segment' : 'ops-hour' };
-    els.detailsBody.innerHTML =
-      state.detailTab === 'ops'
-        ? opsPanelHtml(OPS_PARTS, { ...context, now: Date.now(), formatClock, formatClockShort, formatTick, zone: localZone() })
-        : airportDetailsHtml(context);
-    if (focusedAt) els.detailsBody.querySelector(`.${focusedAt.part}[data-time="${focusedAt.time}"]`)?.focus();
+    if (state.detailTab === 'ops') ops.render(airportContext());
+    else els.detailsBody.innerHTML = airportDetailsHtml(airportContext());
     return;
   }
   if (!detail?.data || !state.forecast) return;
