@@ -7,7 +7,7 @@
 //   GET /flights/area?lat&lon&nm  aircraft around a point, up to 250 NM (adsb.lol, adsb.fi), cached 10 s
 //   GET /flights/military         military aircraft worldwide (same feeds), cached 30 s
 //   GET /track?icao24=<hex>       where an aircraft has been on its current flight (OpenSky Network),
-//                                 cached 1 min per aircraft
+//                                 cached 1 min per aircraft, at most 13 an hour asked of OpenSky
 //   GET /metar?ids=EHAM,KJFK      latest METARs (NOAA Aviation Weather Center), cached 2 min
 //   GET /satellites/<group>       orbital elements as TLE (CelesTrak), cached 2 h
 //   GET /forecast?<Open-Meteo query>  Open-Meteo forecasts (up to 100 places), cached 30 min
@@ -41,6 +41,16 @@ const MAX_FORECAST_PLACES = 100;
 export const MAX_TRACK_POINTS = 300;
 const TRACK_SECONDS = 60;
 const FT_PER_M = 3.28084;
+// A track costs 4 OpenSky credits, and the worldwide flights use most of the same account's
+// daily budget. So tracks are asked for at most TRACKS_PER_HOUR times an hour (counted in the edge
+// cache, so per Cloudflare location, and approximately): an account has 4,000 credits a day,
+// 1,000 tracks, and a third of that is about 333 a day, 13 an hour (24 x 13 x 4 = 1,248
+// credits); anonymous use has 400 credits, a third of which is 33 tracks a day, 1 an hour.
+// Beyond that /track answers "not now" until the hour is over. Each visitor may also ask for
+// at most TRACK_RATE_LIMIT tracks a minute, far under the limit for other requests.
+export const TRACKS_PER_HOUR = 13;
+export const TRACKS_PER_HOUR_ANONYMOUS = 1;
+export const TRACK_RATE_LIMIT = 10;
 // Answers kept to serve when a service fails or limits us.
 const BACKUP_SECONDS = 6 * 3600;
 // Give up on a service after this long, and remember a failure for a while so that neither the
@@ -118,15 +128,21 @@ function coolOff(err) {
 // refusal is about the connection that asked, so asking direct and through the relay have their own.
 const feedKey = (origin, env, feed) => new Request(`${origin}/__feeds/${relayOn(env) ? 'relay' : 'direct'}/${feed.name}`);
 
-// Why the feed is being left alone, if it is. A cache that fails counts as no memory.
-async function leftAlone(cache, key) {
+// What is remembered of a feed being left alone ({ until, message }), if it is. A cache that
+// fails counts as no memory.
+async function memoryOf(cache, key) {
   try {
     const res = await cache?.match(key);
     const memory = res && (await res.json());
-    return memory?.until > Date.now() ? memory.message : undefined;
+    return memory?.until > Date.now() ? memory : undefined;
   } catch {
     return undefined;
   }
+}
+
+// Why the feed is being left alone, if it is.
+async function leftAlone(cache, key) {
+  return (await memoryOf(cache, key))?.message;
 }
 
 async function leaveAlone(cache, key, seconds, message) {
@@ -211,8 +227,10 @@ export function compactTrack(data, max = MAX_TRACK_POINTS) {
 // refuses or limits us.
 async function track(icao24, fetchFn, env, cache, origin) {
   const key = feedKey(origin, env, { name: 'opensky-tracks' });
-  const reason = await leftAlone(cache, key);
-  if (reason) throw new HttpError(502, `OpenSky is not asked for now (${reason})`);
+  const memory = await memoryOf(cache, key);
+  // The answer is remembered no longer than the feed is left alone.
+  if (memory) throw new HttpError(502, `OpenSky is not asked for now (${memory.message})`, { cacheSeconds: Math.ceil((memory.until - Date.now()) / 1000) });
+  await takeTrackTurn(cache, origin, env);
   let data = null;
   try {
     const res = await upstream(fetchFn, `https://opensky-network.org/api/tracks/all?icao24=${icao24}&time=0`, { headers: await openskyHeaders(fetchFn, env) }, env);
@@ -226,7 +244,45 @@ async function track(icao24, fetchFn, env, cache, origin) {
     }
   }
   const points = compactTrack(data);
-  return json({ source: 'OpenSky Network', icao24, callsign: String(data?.callsign ?? '').trim(), startTime: points[0]?.[0] ?? null, points }, TRACK_SECONDS);
+  const endTime = Number(data?.endTime);
+  return json(
+    { source: 'OpenSky Network', icao24, callsign: String(data?.callsign ?? '').trim(), startTime: points[0]?.[0] ?? null, endTime: points.length && Number.isFinite(endTime) ? endTime : null, points },
+    TRACK_SECONDS,
+  );
+}
+
+// Counts a track asked of OpenSky against this hour's allowance, or refuses it when that is used.
+// The count lives in the edge cache until the hour is over; without a cache there is no ceiling.
+async function takeTrackTurn(cache, origin, env) {
+  const hour = Math.floor(Date.now() / 3_600_000);
+  const key = new Request(`${origin}/__tracks/${hour}`);
+  const seconds = Math.max(1, Math.ceil(((hour + 1) * 3_600_000 - Date.now()) / 1000));
+  let used = 0;
+  try {
+    const res = await cache?.match(key);
+    used = Number((res && (await res.json()))?.count) || 0;
+  } catch {
+    used = 0;
+  }
+  if (used >= (openskyAccount(env) ? TRACKS_PER_HOUR : TRACKS_PER_HOUR_ANONYMOUS)) {
+    throw new HttpError(503, 'Tracks are not available for now (the hourly limit is reached)', { cacheSeconds: seconds });
+  }
+  try {
+    await cache?.put(key, new Response(JSON.stringify({ count: used + 1 }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${seconds}` } }));
+  } catch (err) {
+    console.error('Could not count a track', err);
+  }
+}
+
+// Where an answer is kept in the edge cache. A track is kept per aircraft, whatever else the
+// request carries (the case of the address, other parameters), so that none of those can ask
+// OpenSky again for the same aircraft.
+function cacheUrl(url) {
+  if (url.pathname.replace(/\/+$/, '') === '/track') {
+    const icao24 = (url.searchParams.get('icao24') ?? '').toLowerCase();
+    if (/^[0-9a-f]{6}$/.test(icao24)) return `${url.origin}/track?icao24=${icao24}`;
+  }
+  return url.toString();
 }
 
 const json = (body, maxAge) =>
@@ -347,14 +403,20 @@ export default {
 
     const url = new URL(request.url);
     const cache = globalThis.caches?.default;
-    const key = new Request(url.toString(), { method: 'GET' });
+    const key = new Request(cacheUrl(url), { method: 'GET' });
     const backupKey = new Request(`${url.origin}/__backup${url.pathname}${url.search}`, { method: 'GET' });
+    const isTrack = url.pathname.replace(/\/+$/, '') === '/track';
     // An old track would draw a flight that is long over, so tracks have no backup copy.
-    const backedUp = !url.pathname.startsWith('/track');
+    const backedUp = !isTrack;
     let res = await cache?.match(key);
     if (!res) {
       const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
-      if (url.pathname.startsWith('/tiles/') ? overLimit(`tiles:${ip}`, Date.now(), TILE_RATE_LIMIT) : overLimit(ip)) {
+      const limited = url.pathname.startsWith('/tiles/')
+        ? overLimit(`tiles:${ip}`, Date.now(), TILE_RATE_LIMIT)
+        : isTrack
+          ? overLimit(`track:${ip}`, Date.now(), TRACK_RATE_LIMIT)
+          : overLimit(ip);
+      if (limited) {
         return new Response(JSON.stringify({ error: 'Too many requests; slow down' }), { status: 429, headers: { ...cors, 'Content-Type': 'application/json', 'Retry-After': '60' } });
       }
       try {
@@ -376,7 +438,7 @@ export default {
         } else {
           res = new Response(JSON.stringify({ error: err.message }), {
             status: err.status ?? 502,
-            headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${FAILURE_SECONDS}` },
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${Math.max(1, Math.min(FAILURE_SECONDS, err.cacheSeconds ?? FAILURE_SECONDS))}` },
           });
           // Bad requests are the visitor's; failures upstream are remembered briefly.
           if (cache && (err.status ?? 502) >= 429) ctx?.waitUntil(cache.put(key, res.clone()));
