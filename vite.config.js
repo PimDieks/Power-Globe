@@ -11,6 +11,9 @@ export default defineConfig({
       // No trailing slashes: Vite only trims them when both sides end in "/", and on Windows the
       // path ends in "\", which left the alias matching nothing.
       'satellite.js/sgp4': fileURLToPath(new URL('./node_modules/satellite.js/dist', import.meta.url)),
+      // The map's tile engine is a copy with a way to free tiles out of view (see its header). Every
+      // import of it goes to the copy, three-globe's included.
+      'three-slippy-map-globe': fileURLToPath(new URL('./src/vendor/three-slippy-map-globe.mjs', import.meta.url)),
     },
   },
 });
