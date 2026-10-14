@@ -1,10 +1,9 @@
 // The Ops view's traffic part: aircraft about to land at the open airport, those holding, the
 // runways the traffic uses and the movements per hour, as HTML, and the running of it (a monitor
-// of src/opstraffic.js fed from the traffic module while the tab is open, what it marks on the
-// map, and a click on an aircraft). It is a part for ops.js.
+// of src/opstraffic.js fed from the traffic module while the panel is open, what it marks on the
+// map while the Traffic tab is open, and a click on an aircraft). It is a part for ops.js.
 import { escapeHtml } from './airportview.js';
 import { distanceKm, knownRoute } from './flightroute.js';
-import { STATUS } from './runways.js';
 import { OpsTraffic, routeHint } from './opstraffic.js';
 
 // The area watched around the airport, in nautical miles: a little more than the range in which
@@ -181,13 +180,18 @@ export const trafficSectionHtml = (data, ctx) => `<div class="ops-traffic" data-
 
 // ----- running -----
 
-// The monitor of the airport last watched, kept when the tab closes so the same airport opened
-// again goes on (the time between is not counted as monitored), and the live session, if any.
+// The monitor of the airport last watched, kept when the watch ends so the same airport opened
+// again goes on (the time between is not counted as monitored), with when the feed last answered;
+// and the live session, if any.
 let kept = null;
+// { api, source, ident, airport, monitor, error, unsubscribe, watching, view }: the watch runs while
+// the part is bound (the Traffic tab is shown: `view` is { root, onClick, timer, clearTimer }, and
+// the aircraft are marked on the map) or watching (summary mode: the same feed and monitor, nothing
+// drawn on the map or in a section).
 let session = null;
 
 function monitorFor(airport) {
-  if (kept?.ident !== airport.ident) kept = { ident: airport.ident, monitor: new OpsTraffic(airport) };
+  if (kept?.ident !== airport.ident) kept = { ident: airport.ident, monitor: new OpsTraffic(airport), fedAt: null };
   return kept.monitor;
 }
 
@@ -200,7 +204,7 @@ function attach(airport) {
   session.source.watchArea({ lat: airport.lat, lng: airport.lng, nm: WATCH_NM });
 }
 
-// Switches to the airport of the context if the panel moved on to another with the tab open.
+// Switches to the airport of the context if the panel moved on to another.
 function follow(ctx) {
   if (session && ctx.airport && ctx.airport.ident !== session.ident) {
     attach(ctx.airport);
@@ -208,18 +212,18 @@ function follow(ctx) {
   }
 }
 
+// Marks the map for the report, while the tab is shown.
 function publish() {
-  if (!session) return;
+  if (!session?.view || !session.airport) return;
   const report = session.monitor.report(Date.now());
   session.source.setOverlay(overlayFor(report, session.airport));
 }
 
-// Draws the section and the part's fact in the status strip again, in place, so nothing else in
+// Draws the section, if the tab is shown, and the summary line again, in place, so nothing else in
 // the tab is touched (the runway outlook may be being used).
 function refreshView() {
   if (!session) return;
-  const { root, api } = session;
-  const section = root.querySelector('[data-ops-traffic]');
+  const { view, api } = session;
   let ctx;
   try {
     ctx = api.getContext();
@@ -227,23 +231,16 @@ function refreshView() {
     return;
   }
   follow(ctx);
-  const data = analyse(ctx);
+  const section = view?.root.querySelector('[data-ops-traffic]');
   if (section) {
+    const data = analyse(ctx);
     // Focus stays on the same aircraft across the redraw.
     const active = globalThis.document?.activeElement;
-    const focused = active && root.contains?.(active) ? active.dataset?.focusKey : null;
+    const focused = active && view.root.contains?.(active) ? active.dataset?.focusKey : null;
     section.innerHTML = trafficBodyHtml(data, ctx);
-    if (focused) root.querySelector(`[data-focus-key="${focused.replace(/["\\]/g, '\\$&')}"]`)?.focus();
+    if (focused) view.root.querySelector(`[data-focus-key="${focused.replace(/["\\]/g, '\\$&')}"]`)?.focus();
   }
-  const li = root.querySelector('.ops-strip li[data-part="traffic"]');
-  const fact = trafficFact(data);
-  if (li && fact) {
-    const status = STATUS[fact.status] ? fact.status : 'unknown';
-    li.className = `status-${status}`;
-    li.querySelector('.ops-fact').textContent = fact.text;
-    li.querySelector('.status-icon').textContent = STATUS[status].icon;
-    li.querySelector('.visually-hidden').textContent = ` (${STATUS[status].label})`;
-  }
+  api.refreshSummary?.();
 }
 
 function onFeed(event) {
@@ -260,37 +257,91 @@ function onFeed(event) {
     session.error = null;
     const list = session.source.aircraft();
     session.monitor.update(list, { now: Date.now(), area: event.area, hints: routeHints(list, session.airport), qnhHpa: ctx.observation?.qnh });
+    kept.fedAt = Date.now();
   }
   publish();
   refreshView();
 }
 
-// Starts watching the open airport; called when the Ops tab is shown.
-export function bind(root, api, { setTimer = setInterval, clearTimer = clearInterval } = {}) {
-  unbind();
+// Starts the watch of the open airport, if it is not running.
+function start(api) {
+  if (session) {
+    session.api = api;
+    return session;
+  }
   const source = api.getContext().trafficSource;
-  if (!source) return;
+  if (!source) return null;
+  session = { api, source, ident: null, airport: null, monitor: null, error: null, unsubscribe: null, watching: false, view: null };
+  attach(api.getContext().airport);
+  session.unsubscribe = source.subscribe(onFeed);
+  return session;
+}
+
+// Stops watching, and takes everything off the map.
+function end() {
+  if (!session) return;
+  const { source, unsubscribe } = session;
+  session = null;
+  unsubscribe?.();
+  source.watchArea(null);
+  source.setOverlay(null);
+}
+
+// Called when the panel is open on another tab: the area is watched for the summary line, with
+// nothing marked on the map.
+export function watch(api) {
+  if (start(api)) session.watching = true;
+}
+
+export function unwatch() {
+  if (!session) return;
+  session.watching = false;
+  if (!session.view) end();
+}
+
+// Called when the Traffic tab is shown: the section is kept up to date, the aircraft are marked on
+// the map and an aircraft pressed in the section is selected.
+export function bind(root, api, { setTimer = setInterval, clearTimer = clearInterval } = {}) {
+  if (session?.watching) dropView();
+  else unbind();
+  if (!start(api)) return;
+  const { source } = session;
   const onClick = (event) => {
     const id = event.target.closest?.('[data-aircraft]')?.dataset.aircraft;
     if (id) source.select(id);
   };
   root.addEventListener('click', onClick);
-  session = { root, api, source, onClick, ident: null, airport: null, monitor: null, error: null, timer: null, unsubscribe: null, clearTimer };
-  attach(api.getContext().airport);
-  session.unsubscribe = source.subscribe(onFeed);
-  session.timer = setTimer(refreshView, REFRESH_MS);
+  session.view = { root, onClick, timer: setTimer(refreshView, REFRESH_MS), clearTimer };
+  // What the watch already knows is marked at once; before any answer there is nothing to mark.
+  if (session.monitor.since != null) publish();
 }
 
-// Stops watching, and takes everything off the map.
-export function unbind() {
-  if (!session) return;
-  const { root, source, onClick, timer, unsubscribe, clearTimer } = session;
-  session = null;
-  unsubscribe?.();
+// Takes the section's part away and the marks off the map.
+function dropView() {
+  if (!session?.view) return;
+  const { root, onClick, timer, clearTimer } = session.view;
+  session.view = null;
   clearTimer(timer);
   root.removeEventListener('click', onClick);
-  source.watchArea(null);
-  source.setOverlay(null);
+  session.source.setOverlay(null);
+}
+
+// Called when the tab goes: the marks come off the map, and the area is watched no longer unless the
+// summary line still watches it.
+export function unbind() {
+  if (!session) return;
+  dropView();
+  if (!session.watching) end();
+}
+
+// Another airport is being opened: the area of the old one is let go of now, and the watch moves on
+// when the panel is drawn for the new one.
+export function release() {
+  if (!session) return;
+  session.ident = null;
+  session.airport = null;
+  session.source.watchArea(null);
+  session.source.setOverlay(null);
 }
 
 // ----- the part -----
@@ -304,30 +355,39 @@ function analyse(ctx) {
     error: session?.error ?? null,
     watching: Boolean(session),
     layerOn: ctx.trafficSource?.layerOn?.() ?? true,
+    fedAt: kept?.ident === ctx.airport.ident ? kept.fedAt : null,
   };
 }
 
-// The part's line for the status strip: holding makes it "marginal", for a duty manager to look at.
+// The part's line for the summary line: holding makes it "marginal", for a duty manager to look at.
+// When the feed has not answered for a while it is no longer the present (see ops.js).
 function trafficFact(data) {
   if (!data.started) return { text: data.error ? 'Flight data unavailable' : 'Waiting for flight data', status: 'unknown' };
   const { report } = data;
-  return { text: report.status, status: report.coverage.holdingReliable && report.holding.count ? 'caution' : 'ok' };
+  return { text: report.status, status: report.coverage.holdingReliable && report.holding.count ? 'caution' : 'ok', asOf: data.fedAt };
 }
 
 export const trafficPart = {
   id: 'traffic',
+  tab: 'traffic',
+  overlay: 'trafficMarks',
   title: 'Traffic',
   factLabel: 'Traffic',
   needs: ['airport', 'now', 'formatTick', 'trafficSource'],
+  // The feed answers every 15 seconds, so two minutes of silence is a feed in trouble.
+  staleAfterMs: 120_000,
   analyse,
   fact: trafficFact,
   html: trafficSectionHtml,
   bind,
   unbind,
+  watch,
+  unwatch,
+  release,
 };
 
 // For tests: forget the monitor kept for the last airport.
 export const forgetTraffic = () => {
-  unbind();
+  end();
   kept = null;
 };

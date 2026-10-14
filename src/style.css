@@ -776,12 +776,15 @@ input:disabled {
   font-variant-numeric: tabular-nums;
 }
 
-/* The airport panel's tabs: Details and Ops. */
+/* The airport panel's tabs: Details, Weather, Traffic and Access. On a narrow screen they scroll
+   sideways rather than squeeze. */
 .detail-tabs {
   display: flex;
   gap: 4px;
   margin: 0 0 10px;
   border-bottom: 1px solid var(--panel-border);
+  overflow-x: auto;
+  scrollbar-width: none;
 }
 
 .detail-tabs[hidden] {
@@ -789,7 +792,8 @@ input:disabled {
 }
 
 .detail-tab {
-  flex: 1;
+  flex: 1 0 auto;
+  padding-inline: 10px;
   border: 0;
   border-bottom: 2px solid transparent;
   border-radius: 8px 8px 0 0;
@@ -804,23 +808,54 @@ input:disabled {
   background: rgba(155, 209, 255, 0.12);
 }
 
-/* The Ops tab: a status strip of key facts, then a section per part. */
-.ops-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  margin: 0 0 6px;
-  padding: 8px 10px;
-  list-style: none;
-  border: 1px solid var(--panel-border);
-  border-radius: 10px;
-  font-size: 0.85rem;
+/* The summary line above the tabs: the key facts of every part, each a button that shows its part. */
+.details-summary {
+  margin: 0 0 8px;
 }
 
-.ops-strip li {
+.details-summary:empty,
+.details-summary[hidden] {
+  display: none;
+}
+
+.ops-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.ops-fact-button {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  min-height: 24px;
+  padding: 1px 7px 1px 3px;
+  border: 1px solid color-mix(in srgb, var(--status, var(--muted)) 55%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--status, var(--muted)) 12%, transparent);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+
+.ops-fact-button:hover {
+  background: color-mix(in srgb, var(--status, var(--muted)) 24%, transparent);
+}
+
+.ops-fact-button .status-icon {
+  flex: none;
+  font-size: 0.62rem;
+}
+
+@media (pointer: coarse) {
+  .ops-fact-button {
+    min-height: 30px;
+  }
 }
 
 .ops-fact-label {
@@ -834,6 +869,10 @@ input:disabled {
 
 .ops-section h3 {
   margin-top: 14px;
+}
+
+.ops-section {
+  scroll-margin-top: 8px;
 }
 
 .side-panel p.ops-zone {

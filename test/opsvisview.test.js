@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { opsPanelHtml, OPS_PARTS } from '../src/ops.js';
+import { analysePart, opsPanelHtml, OPS_PARTS, summaryHtml } from '../src/ops.js';
 import { formatClock, formatClockShort, formatTick } from '../src/opsclock.js';
 import { CLOCK_CHECK_MS } from '../src/opsrunwayview.js';
 import { DEFAULT_LVP_LIMITS, readLimits, saveLimits } from '../src/opsvis.js';
@@ -40,6 +40,8 @@ function hourly(visibility) {
 const fog = toObservation({ rawOb: 'METAR EFRO 141550Z AUTO 17004KT 0700 R21/0900N FG VV002 02/02 Q1009', obsTime: NOW / 1000 - 1800, temp: 2, dewp: 2, visib: 0.43, clouds: [{ cover: 'OVX', base: 200 }] });
 
 const html = (extra) => opsPanelHtml([visibilityPart], ctx(extra));
+// The part's fact, as the summary line shows it.
+const summary = (extra) => summaryHtml([analysePart(visibilityPart, ctx(extra))]);
 const count = (text, re) => (text.match(re) ?? []).length;
 
 describe('the low visibility part is one of the Ops parts', () => {
@@ -64,8 +66,7 @@ describe('the section', () => {
   it('has the status fact, the METAR now, the lines and a row per source', () => {
     const out = full();
     expect(out).toContain('Low visibility outlook');
-    expect(out).toContain('<span class="ops-fact-label">Visibility</span> <span class="ops-fact">VIS 700 m, VV 200 ft, LVP</span>');
-    expect(out).toContain('class="ops-strip"');
+    expect(summary({ hourly: hourly(Array.from({ length: 30 }, () => 10_000)), observation: fog, taf: parseTaf(sample('EFRO')) })).toContain('<span class="ops-fact-label">Visibility</span> <span class="ops-fact">VIS 700 m, VV 200 ft, LVP</span>');
     expect(out).toContain('<span>Vertical visibility</span><b>200 ft</b>');
     expect(out).toContain('<span>RVR</span><b>21 900 m</b>');
     expect(out).toContain('<span>Spread</span><b>0 °C (2 / 2)</b>');
@@ -129,7 +130,7 @@ describe('the section', () => {
     expect(out).not.toContain('vis-chart');
     expect(out).toContain('data-limit="lvpVisibility"');
     expect(out).toContain('An aid to planning');
-    expect(out).toContain('<span class="ops-fact">No data</span>');
+    expect(summary()).toContain('<span class="ops-fact">No data</span>');
   });
 
   it('copes with a small field that has only the model, and with an airport whose METAR failed', () => {
@@ -402,7 +403,7 @@ describe('the part at work in the panel', () => {
 describe('times in the section', () => {
   it('are written by the formatters of the context (local time with the zone for the fact)', () => {
     const out = html({ observation: fog, taf: parseTaf(sample('EFRO')), formatClock, formatClockShort, formatTick });
-    expect(out).toContain('ops-fact');
+    expect(summary({ observation: fog, taf: parseTaf(sample('EFRO')), formatClock, formatClockShort, formatTick })).toContain('ops-fact');
     expect(out).toContain('Local time, UTC');
   });
 });

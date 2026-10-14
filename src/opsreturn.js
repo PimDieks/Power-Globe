@@ -1,19 +1,19 @@
-// The way back from an aircraft picked while an airport's Ops tab was open. The airport panel and the
-// aircraft panel share one place on screen, so picking an aircraft replaces the airport's; the Ops
-// tab goes on watching meanwhile (its traffic, the marks on the map) and the panel can return to the
+// The way back from an aircraft picked while an airport's Traffic tab was open. The airport panel
+// and the aircraft panel share one place on screen, so picking an aircraft replaces the airport's;
+// the airport's traffic watch goes on meanwhile (its marks on the map) and the panel can return to the
 // airport. These decide what happens, from the page's state ({ detail, detailTab, opsReturn }): the
 // airport detail to return to is `opsReturn`. Pure, so that main.js only carries the decisions out.
 
-// The airport detail to return to for an aircraft picked now: the one open on its Ops tab, or the one
+// The airport detail to return to for an aircraft picked now: the one open on its Traffic tab, or the one
 // already being returned to while another aircraft is picked from the aircraft panel; else null.
 export function opsReturnFor({ detail, detailTab, opsReturn }, item) {
   if (item?.kind !== 'aircraft') return null;
-  if (detail?.airport && detailTab === 'ops') return detail;
+  if (detail?.airport && detailTab === 'traffic') return detail;
   if (detail?.traffic) return opsReturn ?? null;
   return null;
 }
 
-// Whether the Ops tab keeps watching though the panel shows an aircraft.
+// Whether the airport's traffic watch goes on though the panel shows an aircraft.
 export const opsKeepsWatching = ({ detail, opsReturn }) => Boolean(detail?.traffic && opsReturn);
 
 // What the page does when the selected aircraft is deselected (another picked, the layer switched
@@ -24,7 +24,7 @@ export function afterDeselect({ detail }) {
 }
 
 // What Escape does, in order: stop following; go back to the airport from an aircraft picked on its
-// Ops tab, as the back button does; go back to the wind check; close the panel; else nothing.
+// Traffic tab, as the back button does; go back to the wind check; close the panel; else nothing.
 export function escapeAction({ detail, opsReturn }, { following = false } = {}) {
   if (following) return 'stop-following';
   if (opsKeepsWatching({ detail, opsReturn })) return 'back-to-airport';

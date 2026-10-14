@@ -235,6 +235,7 @@ export function unbind() {
 
 export const runwayPart = {
   id: 'runway',
+  tab: 'weather',
   title: 'Runway and wind outlook',
   factLabel: 'Runway',
   // What the part reads from the context.

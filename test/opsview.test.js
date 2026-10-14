@@ -4,7 +4,7 @@ import { createOpsHost, opsPanelHtml } from '../src/ops.js';
 import { CLOCK_CHECK_MS, bind, endLabelCells, hourIndexAt, hourLabel, runwayPart, unbind } from '../src/opsrunwayview.js';
 import { runwayOutlook } from '../src/opsrunway.js';
 
-describe('what a part needs, and mounting', () => {
+describe('what a part needs, and binding', () => {
   it('says a part could not be shown when the context lacks what it needs', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const part = { id: 'n', title: 'N', needs: ['zone', 'thing'], analyse: vi.fn(() => ({})), html: () => '<p>fine</p>' };
@@ -19,10 +19,11 @@ describe('what a part needs, and mounting', () => {
 
   it('binds each part once when the tab is mounted and unbinds it when it goes', () => {
     const calls = [];
-    const a = { id: 'a', title: 'A', analyse: () => 1, html: () => '', bind: (root, api) => calls.push(['bind a', root, api]), unbind: (root) => calls.push(['unbind a', root]) };
-    const b = { id: 'b', title: 'B', analyse: () => 1, html: () => '' };
+    const a = { id: 'a', tab: 'weather', title: 'A', analyse: () => 1, html: () => '', bind: (root, api) => calls.push(['bind a', root, api]), unbind: (root) => calls.push(['unbind a', root]) };
+    const b = { id: 'b', tab: 'weather', title: 'B', analyse: () => 1, html: () => '' };
     const c = {
       id: 'c',
+      tab: 'weather',
       title: 'C',
       analyse: () => 1,
       html: () => '',
@@ -33,15 +34,15 @@ describe('what a part needs, and mounting', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const root = { addEventListener: () => {}, removeEventListener: () => {} };
     const host = createOpsHost({ root, getContext: () => ({}), requestRender: () => {}, setTime: () => {}, parts: [a, b, c] });
-    host.mount();
-    host.mount();
+    host.show('weather');
+    host.show('weather');
     expect(calls.map((c) => c[0])).toEqual(['bind a']);
     expect(calls[0][1]).toBe(root);
-    expect(Object.keys(calls[0][2]).sort()).toEqual(['getContext', 'rerender', 'setTime']);
-    host.unmount();
-    host.unmount();
+    expect(Object.keys(calls[0][2]).sort()).toEqual(['getContext', 'mapProfile', 'refreshSummary', 'rerender', 'setTime']);
+    host.stop();
+    host.stop();
     expect(calls.map((c) => c[0])).toEqual(['bind a', 'unbind a']);
-    host.mount();
+    host.show('weather');
     expect(calls).toHaveLength(3);
     spy.mockRestore();
   });
@@ -68,9 +69,9 @@ describe('a field being typed in', () => {
     vi.useFakeTimers();
     const requestRender = vi.fn();
     let version = 1;
-    const part = { id: 'p', title: 'P', analyse: () => 1, html: () => `<p>v${version}</p>` };
-    const host = createOpsHost({ root, getContext: () => ({}), requestRender, setTime: () => {}, parts: [part] });
-    host.mount();
+    const part = { id: 'p', tab: 'weather', title: 'P', analyse: () => 1, html: () => `<p>v${version}</p>` };
+    const host = createOpsHost({ root, getContext: () => ({}), requestRender, setTime: () => {}, parts: [part], setTimer: () => 1, clearTimer: () => {} });
+    host.show('weather');
     const typed = () => handlers.get('input')({ target: { closest: (sel) => (sel === '[data-editing]' ? {} : null) } });
     return { root, handlers, host, requestRender, typed, bump: () => (version += 1), leave: (inside) => (focusInside = inside) };
   }
@@ -113,9 +114,9 @@ describe('a field being typed in', () => {
   it('forgets it when the tab goes', () => {
     const { root, handlers, host, typed } = setup();
     typed();
-    host.unmount();
+    host.stop();
     expect(handlers.size).toBe(0);
-    host.mount();
+    host.show('weather');
     host.render({});
     expect(root.innerHTML).toContain('v1');
   });

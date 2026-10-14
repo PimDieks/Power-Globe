@@ -3,7 +3,6 @@
 // tab is open (the lightning monitor, and the rings and image on the map). It is a part for ops.js.
 import { escapeHtml } from './airportview.js';
 import { LightningMonitor, RING_KM, isCovered, loadFrameImage, makeGeometry } from './lightning.js';
-import { factItemHtml } from './opsfact.js';
 import { LEVEL_STATUS, analyseLightning, lightningFact, motionLine, trendText } from './opslightning.js';
 
 // The compass is drawn 200 units wide, the airport in the middle and the outer ring (30 km) at
@@ -127,6 +126,9 @@ export function releaseLightning() {
   halt();
 }
 
+// The session: { api, root, watching, key, result, geometry, overlay, covers, images, monitor }. It
+// runs while the part is bound (its tab is shown, with `root` and the map's rings and image) or
+// watching (summary mode: the same images and monitor, nothing drawn on the map or in a section).
 let bound = null;
 
 // The monitor, with the newest image of each airport it has looked at, is made once and kept
@@ -187,12 +189,12 @@ function follow(airport) {
   if (!bound.covers(airport.lat, airport.lng)) return null;
   bound.key = key;
   bound.geometry = makeGeometry(airport.lat, airport.lng);
-  bound.overlay?.show({ geometry: bound.geometry, image: bound.images.get(key)?.image ?? null });
+  if (bound.root) bound.overlay?.show({ geometry: bound.geometry, image: bound.images.get(key)?.image ?? null });
   bound.monitor.start({ lat: airport.lat, lon: airport.lng });
   return null;
 }
 
-// A result came in: draws the section and its fact in the strip again, and the map.
+// A result came in: draws the section if the tab is shown, and the summary line, and the map.
 function update(result) {
   const state = bound;
   if (!state || state.key === null) return;
@@ -203,30 +205,63 @@ function update(result) {
     return;
   }
   state.result = result;
-  const data = analyseLightning({ airport: ctx.airport, hourly: ctx.hourly, now: ctx.now, result });
-  const inner = state.root.querySelector('[data-part="lightning"] .ops-lightning');
-  if (inner) inner.innerHTML = lightningInnerHtml(data, ctx);
-  const item = state.root.querySelector('.ops-strip li[data-part="lightning"]');
-  if (item) item.outerHTML = factItemHtml(lightningPart, lightningFact(data));
-  state.overlay?.show({ geometry: state.geometry, image: state.images.get(state.key)?.image ?? null });
+  if (state.root) {
+    const data = analyseLightning({ airport: ctx.airport, hourly: ctx.hourly, now: ctx.now, result });
+    const inner = state.root.querySelector('[data-part="lightning"] .ops-lightning');
+    if (inner) inner.innerHTML = lightningInnerHtml(data, ctx);
+    state.overlay?.show({ geometry: state.geometry, image: state.images.get(state.key)?.image ?? null });
+  }
+  state.api.refreshSummary?.();
 }
 
-// Called when the Ops tab is shown. `deps` are for tests.
-export function bind(root, api, deps = {}) {
-  unbind();
+function open(api, deps) {
   const holder = deps.createMonitor ? makeHolder(deps) : (shared ??= makeHolder(deps));
-  bound = { root, api, key: null, result: null, geometry: null, overlay: deps.overlay ?? overlay, covers: deps.covers ?? isCovered, ...holder };
+  bound = { root: null, api, watching: false, key: null, result: null, geometry: null, overlay: deps.overlay ?? overlay, covers: deps.covers ?? isCovered, ...holder };
 }
 
-// Called when the tab goes, or the panel closes: nothing is fetched or drawn after.
+// Called when the panel is open on another tab: the lightning is looked at for the summary line,
+// with nothing drawn. `deps` are for tests.
+export function watch(api, deps = {}) {
+  if (!bound) open(api, deps);
+  bound.watching = true;
+}
+
+export function unwatch() {
+  if (!bound) return;
+  bound.watching = false;
+  if (!bound.root) end();
+}
+
+// Called when the Weather tab is shown: the section and the map are kept up to date. `deps` are
+// for tests.
+export function bind(root, api, deps = {}) {
+  if (!bound?.watching) unbind();
+  if (!bound) open(api, deps);
+  bound.root = root;
+  bound.api = api;
+  // An airport already looked at for the summary line gets its rings and image now.
+  if (bound.key !== null) bound.overlay?.show({ geometry: bound.geometry, image: bound.images.get(bound.key)?.image ?? null });
+}
+
+// Called when the tab goes: the map is cleared, and the lightning is looked at no longer unless the
+// summary line still watches it.
 export function unbind() {
   if (!bound) return;
+  if (bound.root) bound.overlay?.hide();
+  bound.root = null;
+  if (!bound.watching) end();
+}
+
+// Nothing is fetched or drawn after.
+function end() {
   halt();
   bound = null;
 }
 
 export const lightningPart = {
   id: 'lightning',
+  tab: 'weather',
+  overlay: 'lightning',
   title: 'Storms and lightning',
   factLabel: 'Lightning',
   needs: ['airport', 'hourly', 'now', 'zone'],
@@ -235,4 +270,7 @@ export const lightningPart = {
   html: lightningSectionHtml,
   bind,
   unbind,
+  watch,
+  unwatch,
+  release: releaseLightning,
 };

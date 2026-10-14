@@ -270,6 +270,7 @@ export function unbind() {
 
 export const visibilityPart = {
   id: 'visibility',
+  tab: 'weather',
   title: 'Low visibility outlook',
   factLabel: 'Visibility',
   // What the part reads from the context.

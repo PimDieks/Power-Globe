@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { toAirport } from '../src/airports.js';
-import { OPS_PARTS, opsPanelHtml } from '../src/ops.js';
+import { OPS_PARTS, analysePart, opsPanelHtml, summaryHtml } from '../src/ops.js';
 import { OpsTraffic } from '../src/opstraffic.js';
 import {
   MAX_INBOUND_SHOWN,
@@ -15,6 +15,8 @@ import {
   trafficBodyHtml,
   trafficPart,
   unbind,
+  unwatch,
+  watch,
 } from '../src/opstrafficview.js';
 
 const EHAM = toAirport(['EHAM', 'AMS', 'Amsterdam Airport Schiphol', 'Amsterdam', 'NL', 52.3086, 4.7639, -11, 1, 1, [['09', 87, '27', 267, 11329, 'ASP', 148, 52.3166, 4.74635, 52.3184, 4.79689]], 248]);
@@ -234,19 +236,13 @@ describe('the part', () => {
   function page() {
     const handlers = new Map();
     const section = { innerHTML: '' };
-    const fact = { textContent: '' };
-    const icon = { textContent: '' };
-    const hidden = { textContent: '' };
-    const li = { className: '', querySelector: (sel) => ({ '.ops-fact': fact, '.status-icon': icon, '.visually-hidden': hidden })[sel] };
     return {
       handlers,
       section,
-      fact,
-      li,
       root: {
         addEventListener: (type, fn) => handlers.set(type, fn),
         removeEventListener: (type, fn) => handlers.get(type) === fn && handlers.delete(type),
-        querySelector: (sel) => (sel === '[data-ops-traffic]' ? section : sel === '.ops-strip li[data-part="traffic"]' ? li : null),
+        querySelector: (sel) => (sel === '[data-ops-traffic]' ? section : null),
       },
     };
   }
@@ -264,8 +260,8 @@ describe('the part', () => {
     const ctx = { airport: EHAM, now: Date.now(), formatTick, trafficSource: src };
     const html = opsPanelHtml([trafficPart], ctx);
     expect(html).toContain('data-part="traffic"');
-    expect(html).toContain('Waiting for flight data');
-    expect(html).toContain('<h3 id="ops-traffic-title">Traffic</h3>');
+    expect(summaryHtml([analysePart(trafficPart, ctx)])).toContain('Waiting for flight data');
+    expect(html).toContain('<h3 id="ops-traffic-title" tabindex="-1">Traffic</h3>');
     expect(html).toContain('data-ops-traffic');
     expect(html).toContain('No inbound traffic seen.');
     // Without the page's feed it says it could not be shown.
@@ -276,8 +272,9 @@ describe('the part', () => {
 
   it('starts watching the airport when bound, feeds the monitor from each answer, and marks the map', () => {
     const src = source();
-    const { root, section, fact, li } = page();
-    bind(root, { getContext: context(src), rerender: vi.fn() }, quiet);
+    const { root, section } = page();
+    const api = { getContext: context(src), rerender: vi.fn(), refreshSummary: vi.fn() };
+    bind(root, api, quiet);
     expect(src.watched.at(-1)).toEqual({ lat: EHAM.lat, lng: EHAM.lng, nm: WATCH_NM });
     expect(src.listeners.size).toBe(1);
     expect(src.overlays).toHaveLength(0);
@@ -287,11 +284,11 @@ describe('the part', () => {
     expect(src.overlays.at(-1)).toMatchObject({ inbound: ['inb1'], holding: [], stacks: [], runwayUse: { ident: 'EHAM' } });
     expect(section.innerHTML).toContain('KLM1');
     expect(section.innerHTML).toContain('about 14 min');
-    expect(fact.textContent).toBe('1 inbound in 30 min');
-    expect(li.className).toBe('status-ok');
-    // The section and the fact the panel draws agree.
+    // The summary line is asked to draw its fact again, and the section and the fact agree.
+    expect(api.refreshSummary).toHaveBeenCalled();
     const ctx = context(src)();
-    expect(opsPanelHtml([trafficPart], ctx)).toContain('1 inbound in 30 min');
+    expect(opsPanelHtml([trafficPart], ctx)).toContain('about 14 min');
+    expect(summaryHtml([analysePart(trafficPart, ctx)])).toContain('1 inbound in 30 min');
   });
 
   it('says so when the feed fails, and goes on when it comes back', () => {
@@ -300,7 +297,7 @@ describe('the part', () => {
     bind(root, { getContext: context(src), rerender: vi.fn() }, quiet);
     src.emit({ error: 'answered 502' });
     expect(section.innerHTML).toContain('did not answer (answered 502)');
-    expect(opsPanelHtml([trafficPart], context(src)())).toContain('Flight data unavailable');
+    expect(summaryHtml([analysePart(trafficPart, context(src)())])).toContain('Flight data unavailable');
     src.list = [inbound()];
     src.emit({ area: { lat: 52.25, lng: 4.75, nm: 200 }, name: 'adsb.lol' });
     expect(section.innerHTML).not.toContain('did not answer');
@@ -399,6 +396,73 @@ describe('the part', () => {
     expect(section.innerHTML).toBe('');
     timers[0]();
     expect(section.innerHTML).toContain('No inbound traffic seen.');
+  });
+
+  describe('in summary mode (the panel is open on another tab)', () => {
+    const answer = (src) => src.emit({ area: { lat: 52.25, lng: 4.75, nm: 200 }, name: 'adsb.lol' });
+
+    it('watches the area and keeps the fact up to date, but marks nothing on the map', () => {
+      const src = source();
+      const api = { getContext: context(src), rerender: vi.fn(), refreshSummary: vi.fn() };
+      watch(api);
+      expect(src.watched.at(-1)).toEqual({ lat: EHAM.lat, lng: EHAM.lng, nm: WATCH_NM });
+      src.list = [inbound()];
+      answer(src);
+      expect(src.overlays).toHaveLength(0);
+      expect(api.refreshSummary).toHaveBeenCalled();
+      expect(summaryHtml([analysePart(trafficPart, context(src)())])).toContain('1 inbound in 30 min');
+    });
+
+    it('goes on across the change to the tab and back, marking the map only while the tab is shown', () => {
+      const src = source();
+      const api = { getContext: context(src), rerender: vi.fn(), refreshSummary: vi.fn() };
+      watch(api);
+      src.list = [inbound()];
+      answer(src);
+      // The tab is shown: bound first, then watching ends, as the host does it. The watch is not restarted.
+      const { root, handlers, section } = page();
+      bind(root, api, quiet);
+      unwatch();
+      expect(src.watched).toHaveLength(1);
+      expect(src.listeners.size).toBe(1);
+      expect(src.overlays.at(-1)).toMatchObject({ inbound: ['inb1'] });
+      expect(handlers.has('click')).toBe(true);
+      answer(src);
+      expect(section.innerHTML).toContain('KLM1');
+      // The tab goes: the marks and the click go, the watch stays for the summary line.
+      watch(api);
+      unbind();
+      expect(src.overlays.at(-1)).toBeNull();
+      expect(handlers.size).toBe(0);
+      expect(src.listeners.size).toBe(1);
+      expect(src.watched.at(-1)).not.toBeNull();
+      // Nothing is drawn on the map when an answer comes in now.
+      const marks = src.overlays.length;
+      answer(src);
+      expect(src.overlays).toHaveLength(marks);
+      // Watching ends with the panel: the feed is let go of.
+      unwatch();
+      expect(src.listeners.size).toBe(0);
+      expect(src.watched.at(-1)).toBeNull();
+    });
+
+    it('lets go of the area at once on release, and watches the next airport when the panel is drawn for it', () => {
+      const src = source();
+      let airport = EHAM;
+      const api = { getContext: context(src, () => airport), rerender: vi.fn(), refreshSummary: vi.fn() };
+      watch(api);
+      trafficPart.release();
+      expect(src.watched.at(-1)).toBeNull();
+      airport = EGLL;
+      trafficPart.analyse(context(src, () => airport)());
+      expect(src.watched.at(-1)).toMatchObject({ lat: EGLL.lat });
+    });
+
+    it('does nothing without the feed of the page, or when released with nothing watching', () => {
+      expect(() => watch({ getContext: () => ({ airport: EHAM, now: 1, formatTick }) })).not.toThrow();
+      expect(() => trafficPart.release()).not.toThrow();
+      expect(() => unwatch()).not.toThrow();
+    });
   });
 
   it('has a monitor for its airport that is the real one: a plain OpsTraffic', () => {

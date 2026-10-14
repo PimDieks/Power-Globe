@@ -5,23 +5,23 @@ const airport = { airport: { ident: 'EHAM' }, hourly: {}, fromList: false };
 const aircraft = { kind: 'aircraft', id: 'abc123' };
 const satellite = { kind: 'satellite', index: 3 };
 
-describe('the way back from an aircraft picked on the Ops tab', () => {
-  it('remembers the airport when an aircraft is picked while its Ops tab is open, and not otherwise', () => {
-    expect(opsReturnFor({ detail: airport, detailTab: 'ops', opsReturn: null }, aircraft)).toBe(airport);
-    // The details tab, a spot, nothing open, or a satellite: nothing to go back to.
+describe('the way back from an aircraft picked on the Traffic tab', () => {
+  it('remembers the airport when an aircraft is picked while its Traffic tab is open, and not otherwise', () => {
+    expect(opsReturnFor({ detail: airport, detailTab: 'traffic', opsReturn: null }, aircraft)).toBe(airport);
+    // The other tabs, a spot, nothing open, or a satellite: nothing to go back to.
     expect(opsReturnFor({ detail: airport, detailTab: 'details', opsReturn: null }, aircraft)).toBeNull();
-    expect(opsReturnFor({ detail: { lat: 1, lng: 2 }, detailTab: 'ops', opsReturn: null }, aircraft)).toBeNull();
-    expect(opsReturnFor({ detail: null, detailTab: 'ops', opsReturn: null }, aircraft)).toBeNull();
-    expect(opsReturnFor({ detail: airport, detailTab: 'ops', opsReturn: null }, satellite)).toBeNull();
+    expect(opsReturnFor({ detail: { lat: 1, lng: 2 }, detailTab: 'traffic', opsReturn: null }, aircraft)).toBeNull();
+    expect(opsReturnFor({ detail: null, detailTab: 'traffic', opsReturn: null }, aircraft)).toBeNull();
+    expect(opsReturnFor({ detail: airport, detailTab: 'traffic', opsReturn: null }, satellite)).toBeNull();
   });
 
   it('keeps the airport when another aircraft is picked from the aircraft panel', () => {
-    expect(opsReturnFor({ detail: { traffic: aircraft }, detailTab: 'ops', opsReturn: airport }, { kind: 'aircraft', id: 'def456' })).toBe(airport);
+    expect(opsReturnFor({ detail: { traffic: aircraft }, detailTab: 'traffic', opsReturn: airport }, { kind: 'aircraft', id: 'def456' })).toBe(airport);
     // An aircraft panel with no airport behind it has none to keep.
-    expect(opsReturnFor({ detail: { traffic: aircraft }, detailTab: 'ops', opsReturn: null }, aircraft)).toBeNull();
+    expect(opsReturnFor({ detail: { traffic: aircraft }, detailTab: 'traffic', opsReturn: null }, aircraft)).toBeNull();
   });
 
-  it('keeps the Ops tab watching only while the aircraft panel has an airport behind it', () => {
+  it('keeps the Traffic tab watching only while the aircraft panel has an airport behind it', () => {
     expect(opsKeepsWatching({ detail: { traffic: aircraft }, opsReturn: airport })).toBe(true);
     expect(opsKeepsWatching({ detail: { traffic: aircraft }, opsReturn: null })).toBe(false);
     expect(opsKeepsWatching({ detail: airport, opsReturn: null })).toBe(false);
@@ -29,7 +29,7 @@ describe('the way back from an aircraft picked on the Ops tab', () => {
   });
 
   it('closes the aircraft panel and the way back when the aircraft is deselected, so nothing is left watching', () => {
-    // The Flights layer is switched off with an aircraft picked from the Ops tab: the page deselects it.
+    // The Flights layer is switched off with an aircraft picked from the Traffic tab: the page deselects it.
     const state = { detail: { traffic: aircraft }, opsReturn: airport };
     const next = afterDeselect(state);
     expect(next).toEqual({ detail: null, opsReturn: null });
