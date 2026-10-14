@@ -26,12 +26,12 @@ import { setupSearch } from './search.js';
 import { airportPanelWeather, conditionsAt, loadAirports, searchAirports } from './airports.js';
 import { airportDetailsHtml, airportPlace, panelStays, verdictText } from './airportview.js';
 import { setupWindCheck } from './windcheck.js';
-import { DETAIL_TABS, OPS_PARTS, createOpsHost, readTab, saveTab, tabAfterKey } from './ops.js';
+import { DETAIL_TABS, createOpsHost, isTopicTab, readTab, saveTab, tabAfterKey } from './ops.js';
 import { formatClock, formatClockShort, formatTick, zoneName } from './opsclock.js';
 import { afterDeselect, backAction, escapeAction, opsKeepsWatching, opsReturnFor } from './opsreturn.js';
-import { releaseLightning, setLightningOverlay } from './opslightningview.js';
+import { setLightningOverlay } from './opslightningview.js';
 import { setupLightningOverlay } from './lightningmap.js';
-import { releaseAccess, setAccessOverlay } from './opsaccessview.js';
+import { setAccessOverlay } from './opsaccessview.js';
 import { setupAccessOverlay } from './accessmap.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
@@ -91,6 +91,7 @@ const els = {
   refresh: document.getElementById('refresh'),
   details: document.getElementById('details'),
   detailsTitle: document.getElementById('details-title'),
+  detailsSummary: document.getElementById('details-summary'),
   detailsTabs: document.getElementById('details-tabs'),
   detailsBody: document.getElementById('details-body'),
   detailsClose: document.getElementById('details-close'),
@@ -179,10 +180,10 @@ const state = {
   fieldFade: 0,
   // Open details: a spot { lat, lng, data } or an airport { airport, hourly, fromList }.
   detail: null,
-  // The airport panel's tab, 'details' or 'ops' (see ops.js); remembered per browser.
+  // The airport panel's tab: 'details', 'weather', 'traffic' or 'access' (see ops.js); remembered per browser.
   detailTab: readTab(),
-  // The airport detail to go back to from an aircraft picked while its Ops tab was open, or null.
-  // The tab keeps watching meanwhile (see opstrafficview.js).
+  // The airport detail to go back to from an aircraft picked while one of its topic tabs was open, or null.
+  // The airport keeps being watched meanwhile (see opstrafficview.js).
   opsReturn: null,
   // Whether the wind check is in use: its panel is open, or one of its airports is.
   windCheck: false,
@@ -254,7 +255,7 @@ const traffic = setupTraffic({
     stopFollowing();
     const next = afterDeselect(state);
     if (!next) return;
-    // The aircraft's panel goes, and the way back to an airport's Ops tab with it: the tab stops watching.
+    // The aircraft's panel goes, and the way back to an airport's tab with it: what the airport watched stops.
     const returning = state.opsReturn;
     Object.assign(state, next);
     els.details.classList.add('hidden');
@@ -337,12 +338,12 @@ const airportMap = setupAirportMap({
   },
 });
 
-// The Ops tab's lightning part draws its rings and image on the map through this.
+// The lightning part draws its rings and image on the map, while the Weather tab is open, through this.
 setLightningOverlay(setupLightningOverlay(globe));
 // The Ops tab's access part draws the road traffic through this: dots at the measurement sites, lines for jams and closures.
 setAccessOverlay(setupAccessOverlay(globe));
 
-// What the Ops tab's traffic part reads from the page and asks of it (see opstrafficview.js).
+// What the traffic part reads from the page and asks of it (see opstrafficview.js).
 const opsTraffic = {
   subscribe: traffic.subscribe,
   watchArea: traffic.watchArea,
@@ -929,7 +930,7 @@ function openSidePanel({ keepTraffic = false } = {}) {
 function showTraffic(item, title) {
   // Tapping the aircraft that is followed keeps following it.
   if (state.follow && !(item.kind === 'aircraft' && item.id === state.follow.id)) stopFollowing();
-  // An aircraft picked while the Ops tab is open (or from the aircraft picked that way) can go back to the airport.
+  // An aircraft picked while a topic tab is open (or from the aircraft picked that way) can go back to the airport.
   const back = opsReturnFor(state, item);
   openSidePanel({ keepTraffic: true });
   windCheck.close();
@@ -1233,18 +1234,17 @@ async function showAirport(airport, { fromList = false } = {}) {
   openSidePanel();
   windCheck.close();
   syncWindCheckButton();
-  // `observation` and `taf`: undefined while the METAR or TAF loads (the TAF is asked for when the
-  // Ops tab is shown), null if there is none. `error`: why there is no forecast, once it is known.
+  // `observation` and `taf`: undefined while the METAR or TAF loads, null if there is none. `error`: why there is no forecast, once it is known.
   const detail = { airport, hourly: null, fromList, observation: undefined, taf: undefined, error: null };
-  // The lightning of the airport that was open stops now, not when the new one has its forecast.
-  releaseLightning();
-  releaseAccess();
+  // What the airport that was open was watching (lightning, traffic) stops now, not when the new one
+  // has its forecast, and its summary line goes.
+  ops.release();
   state.opsReturn = null;
   setBackLabel('Wind check');
   state.detail = detail;
   syncDetailTabs();
-  // With the Ops tab showing, the TAF is asked for with the METAR, not once the forecast is there.
-  if (state.detailTab === 'ops') requestTaf(detail);
+  // The summary line needs the TAF whatever the tab, so it is asked for with the METAR.
+  requestTaf(detail);
   // The airport's own label on the map shows it is open (see airportmap.js): no pin of its own.
   mapFeatures.setMarker(null);
   airportMap.select(airport);
@@ -1257,6 +1257,8 @@ async function showAirport(airport, { fromList = false } = {}) {
   latestObservation(airport.ident)
     .then((observation) => {
       detail.observation = observation;
+      // When it was fetched, for the summary line to know how old it is (see ops.js).
+      detail.observationAt = Date.now();
     })
     .catch((err) => {
       console.error(err);
@@ -1267,6 +1269,7 @@ async function showAirport(airport, { fromList = false } = {}) {
   const showForecast = (hourly) => {
     if (state.detail !== detail) return;
     detail.hourly = hourly;
+    detail.hourlyAt = Date.now();
     detail.error = null;
     renderDetails();
     const conditions = conditionsAt(hourly, currentTime());
@@ -1336,7 +1339,7 @@ function setBackLabel(text) {
   els.detailsBack.lastChild.textContent = ` ${text}`;
 }
 
-// Back from an aircraft picked in the Ops tab to the airport, as it was.
+// Back from an aircraft picked in a topic tab to the airport, on the tab it came from.
 function backToAirport() {
   const detail = state.opsReturn;
   if (!detail) return;
@@ -1349,8 +1352,8 @@ function backToAirport() {
   airportMap.select(detail.airport);
   syncDetailTabs();
   renderDetails();
-  // Focus goes to the Ops tab it came from, the aircraft's button being gone.
-  document.getElementById('details-tab-ops')?.focus();
+  // Focus goes to the tab it came from, the aircraft's button being gone.
+  document.getElementById(`details-tab-${state.detailTab}`)?.focus();
 }
 
 // Back from an airport to the wind check list, with focus on the airport just shown.
@@ -1439,6 +1442,8 @@ function detailIndex(data) {
 function syncDetailTabs() {
   const show = !!state.detail?.airport;
   els.detailsTabs.hidden = !show;
+  els.detailsSummary.hidden = !show;
+  els.details.classList.toggle('with-tabs', show);
   for (const tab of els.detailsTabs.children) {
     const on = tab.dataset.tab === state.detailTab;
     tab.setAttribute('aria-selected', String(on));
@@ -1451,9 +1456,11 @@ function syncDetailTabs() {
     els.detailsBody.removeAttribute('role');
     els.detailsBody.removeAttribute('aria-labelledby');
   }
-  if (show && state.detailTab === 'ops') ops.mount();
-  // An aircraft picked from the Ops tab leaves it watching, for the way back.
-  else if (!opsKeepsWatching(state)) ops.unmount();
+  if (show) ops.show(state.detailTab);
+  // An aircraft picked from a tab leaves the tab's own watching on for the way back, and the summary
+  // line, which is hidden meanwhile, no longer watches anything.
+  else if (opsKeepsWatching(state)) ops.hold();
+  else ops.stop();
 }
 
 function selectDetailTab(id) {
@@ -1489,12 +1496,17 @@ els.detailsTabs.addEventListener('keydown', (event) => {
   tabs[next].focus();
 });
 
-// The Ops tab (see ops.js): what its parts read, and what they may ask of the page.
+// The summary line and the Weather, Traffic and Access tabs (see ops.js): what their parts read, and
+// what they may ask of the page.
 const ops = createOpsHost({
   root: els.detailsBody,
+  summaryRoot: els.detailsSummary,
   getContext: airportContext,
   requestRender: () => renderDetails(),
-  // An hour in the Ops tab sets the timeline to it, so the map and the panel agree.
+  selectTab: (id) => selectDetailTab(id),
+  // The airport map shows what fits the tab (see mapprofile.js).
+  onProfile: (profile) => airportMap.setProfile(profile),
+  // An hour in the Weather tab sets the timeline to it, so the map and the panel agree.
   setTime(time, { quiet = false } = {}) {
     const step = state.timeline ? stepNearest(state.timeline.times, time) : -1;
     if (step < 0) return;
@@ -1505,7 +1517,7 @@ const ops = createOpsHost({
   },
 });
 
-// Asks for the open airport's TAF, once; the Ops tab is drawn again when it arrives.
+// Asks for the open airport's TAF, once; the panel is drawn again when it arrives.
 function requestTaf(detail) {
   if (detail.taf !== undefined || detail.tafAsked) return;
   detail.tafAsked = true;
@@ -1520,7 +1532,7 @@ function requestTaf(detail) {
     .finally(() => state.detail === detail && renderDetails());
 }
 
-// What is known of the open airport, for the airport panel's tabs.
+// What is known of the open airport, for the airport panel's tabs and summary line.
 function airportContext() {
   // While an aircraft picked from the tab is open, the airport it was picked at.
   const detail = state.detail?.airport ? state.detail : state.opsReturn;
@@ -1539,6 +1551,8 @@ function airportContext() {
     formatTick,
     zone: zoneName(),
     observation: detail.observation,
+    observationAsOf: detail.observationAt,
+    hourlyAsOf: detail.hourlyAt,
     taf: detail.taf,
     error: detail.error,
   };
@@ -1554,10 +1568,11 @@ function renderDetails() {
   }
   if (detail?.airport) {
     if (!detail.hourly && !detail.error) return;
-    if (state.detailTab === 'ops') {
-      requestTaf(detail);
-      ops.render(airportContext());
-    } else els.detailsBody.innerHTML = airportDetailsHtml(airportContext());
+    requestTaf(detail);
+    const ctx = airportContext();
+    if (!isTopicTab(state.detailTab)) els.detailsBody.innerHTML = airportDetailsHtml(ctx);
+    // The summary line, and the tab's parts if it is one of theirs.
+    ops.render(ctx);
     return;
   }
   if (!detail?.data || !state.forecast) return;

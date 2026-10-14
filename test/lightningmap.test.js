@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CANVAS_PX, LABEL_PX, OVERLAY_RINGS_KM, paintIntensity, setupLightningOverlay } from '../src/lightningmap.js';
+import { CANVAS_PX, LABEL_PX, OVERLAY_RINGS_KM, RING_PX, RING_SEGMENTS, paintIntensity, setupLightningOverlay } from '../src/lightningmap.js';
 import { MAX_COUNT, RAMP, RING_KM, makeGeometry } from '../src/lightning.js';
 
 const RAD = Math.PI / 180;
@@ -71,7 +71,9 @@ describe('the lightning overlay on the globe', () => {
     data.set([...pixel(10), 255], 12);
     return { width: 2, height: 2, data };
   })();
-  const meshes = () => added.filter((o) => o.isMesh);
+  // The lightning image's mesh, and the rings' ribbons.
+  const meshes = () => added.filter((o) => o.isMesh && o.material.map);
+  const rings = () => added.filter((o) => o.isMesh && !o.material.map);
   const sprites = () => added.filter((o) => o.isSprite);
 
   it('makes nothing until it is shown', () => {
@@ -80,10 +82,15 @@ describe('the lightning overlay on the globe', () => {
     expect(canvases).toHaveLength(0);
   });
 
-  it('adds one mesh over the weather and under the runways, and a label for each ring', () => {
+  it('adds one mesh over the weather and under the runways, a ribbon and a label for each ring', () => {
     const overlay = setupLightningOverlay(globe);
     overlay.show({ geometry, image: null });
     expect(meshes()).toHaveLength(1);
+    expect(rings()).toHaveLength(4);
+    // Over the image, under the runways (5 and 6).
+    expect(rings().every((r) => r.renderOrder > 4 && r.renderOrder < 5 && r.visible)).toBe(true);
+    // The labels are drawn after the rings they sit on, and still under the runways.
+    expect(sprites().every((l) => l.renderOrder > rings()[0].renderOrder && l.renderOrder < 5)).toBe(true);
     expect(meshes()[0].visible).toBe(true);
     expect(meshes()[0].renderOrder).toBe(4);
     expect(sprites()).toHaveLength(4);
@@ -111,16 +118,42 @@ describe('the lightning overlay on the globe', () => {
     expect(uv[0]).toBe(0);
   });
 
-  it('draws all four rings, 5, 10, 20 and 30 km, around the middle of the window', () => {
+  it('draws all four rings, 5, 10, 20 and 30 km, as geometry on the globe around the airport, not on the texture', () => {
     const overlay = setupLightningOverlay(globe);
     overlay.show({ geometry, image });
     expect(OVERLAY_RINGS_KM).toEqual([5, 10, 20, 30]);
     expect(OVERLAY_RINGS_KM).toEqual(RING_KM);
-    const arcs = canvases[0].calls.filter((c) => c[0] === 'arc');
-    expect(arcs.map((a) => a[3])).toEqual(OVERLAY_RINGS_KM.map((km) => (km / (2 * geometry.halfKm)) * CANVAS_PX));
-    expect(arcs[0].slice(1, 3)).toEqual([CANVAS_PX / 2, CANVAS_PX / 2]);
-    // The 30 km ring is half the window across, inside the picture.
-    expect(arcs[3][3]).toBeLessThan(CANVAS_PX / 2);
+    expect(canvases[0].calls.filter((c) => c[0] === 'arc')).toHaveLength(0);
+    const km = (x, y, z) => {
+      // Great-circle distance from the airport, on the globe of radius 100 (haversine).
+      const lat = Math.asin(y / Math.hypot(x, y, z));
+      const lng = Math.atan2(x, z);
+      const a = Math.sin((lat - geometry.lat * RAD) / 2) ** 2 + Math.cos(lat) * Math.cos(geometry.lat * RAD) * Math.sin((lng - geometry.lon * RAD) / 2) ** 2;
+      return 2 * 6371 * Math.asin(Math.sqrt(a));
+    };
+    rings().forEach((ring, k) => {
+      const p = ring.geometry.attributes.position.array;
+      const vertices = RING_SEGMENTS * 4;
+      expect(ring.geometry.drawRange.count).toBe(RING_SEGMENTS * 6);
+      for (let v = 0; v < vertices; v++) expect(km(p[v * 3], p[v * 3 + 1], p[v * 3 + 2])).toBeCloseTo(OVERLAY_RINGS_KM[k], 1);
+      // A few screen pixels wide, whatever the zoom.
+      expect(ring.material.uniforms.uWidth.value).toBe(RING_PX);
+    });
+    expect(RING_PX).toBeGreaterThanOrEqual(2);
+    expect(RING_PX).toBeLessThanOrEqual(6);
+  });
+
+  it('gives the ribbons the size of the screen, and keeps it up to date while shown', () => {
+    const listeners = new Map();
+    vi.stubGlobal('window', { innerWidth: 390, innerHeight: 800, addEventListener: (t, f) => listeners.set(t, f), removeEventListener: (t) => listeners.delete(t) });
+    const overlay = setupLightningOverlay(globe);
+    overlay.show({ geometry, image });
+    expect(rings().every((r) => r.material.uniforms.uViewport.value.x === 390 && r.material.uniforms.uViewport.value.y === 800)).toBe(true);
+    window.innerWidth = 1200;
+    listeners.get('resize')();
+    expect(rings().every((r) => r.material.uniforms.uViewport.value.x === 1200)).toBe(true);
+    overlay.hide();
+    expect(listeners.size).toBe(0);
   });
 
   it('labels each ring on the ring, to the north, small and the same size on the screen', () => {
@@ -209,7 +242,8 @@ describe('the lightning overlay on the globe', () => {
     const overlay = setupLightningOverlay(globe);
     overlay.show({ geometry, image: null });
     expect(drawn).toHaveLength(0);
-    expect(canvases[0].calls.filter((c) => c[0] === 'arc')).toHaveLength(OVERLAY_RINGS_KM.length);
+    expect(canvases[0].calls.filter((c) => c[0] === 'arc')).toHaveLength(0);
+    expect(rings()).toHaveLength(OVERLAY_RINGS_KM.length);
   });
 
   it('lets go of the mesh, labels, canvases and textures on hide', () => {
@@ -237,6 +271,7 @@ describe('the lightning overlay on the globe', () => {
     overlay.show({ geometry, image });
     expect(canvases.length).toBeGreaterThan(made);
     expect(meshes()).toHaveLength(1);
+    expect(rings()).toHaveLength(4);
     expect(sprites()).toHaveLength(4);
     expect(meshes()[0].visible).toBe(true);
     expect(drawn).toHaveLength(2);
@@ -253,6 +288,9 @@ describe('the lightning overlay on the globe', () => {
     expect(meshes()[0]).toBe(mesh);
     expect(mesh.geometry.attributes.position.array).toBe(buffer);
     expect(Math.asin(buffer[1] / Math.hypot(buffer[0], buffer[1], buffer[2])) / RAD).toBeCloseTo(other.bbox.south, 4);
+    // The rings moved with it: the first vertex of the 5 km ring is 5 km north of the new airport.
+    const first = rings()[0].geometry.attributes.position.array;
+    expect(Math.asin(first[1] / Math.hypot(first[0], first[1], first[2])) / RAD).toBeCloseTo(other.lat + 5 / 111.195, 2);
     // The labels moved with it.
     const { x, y, z } = sprites()[0].position;
     expect(Math.asin(y / Math.hypot(x, y, z)) / RAD).toBeCloseTo(other.lat + 5 / 111.195, 4);

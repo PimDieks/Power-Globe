@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FRAME_MS, LightningMonitor, RAMP, analyseImage, decodeBlob, makeGeometry, summarise, unavailable } from '../src/lightning.js';
-import { OPS_PARTS, createOpsHost, opsPanelHtml } from '../src/ops.js';
+import { OPS_PARTS, analysePart, createOpsHost, opsPanelHtml, summaryHtml } from '../src/ops.js';
 import { LEVEL_STATUS, RISK_STATUS, analyseLightning, lightningFact, motionLine, riskFields, trendText } from '../src/opslightning.js';
-import { bind, compassSvg, lightningInnerHtml, lightningPart, lightningSectionHtml, releaseLightning, setLightningOverlay, unbind } from '../src/opslightningview.js';
+import { bind, compassSvg, lightningInnerHtml, lightningPart, lightningSectionHtml, START_DELAY_MS, releaseLightning, setLightningOverlay, unbind, unwatch, watch } from '../src/opslightningview.js';
 
 const MIN = 60_000;
 const at = (iso) => Date.parse(iso);
@@ -289,16 +289,13 @@ function fakeOverlay() {
   return { calls, show: (arg) => calls.push(['show', arg]), hide: () => calls.push(['hide']) };
 }
 
-// A root with the two places the part writes to, and no way to listen: the part must not need one.
+// A root with the place the part writes to, and no way to listen: the part must not need one.
 function fakeRoot() {
   const inner = { innerHTML: '' };
-  const item = { outerHTML: '' };
   const root = {
     inner,
-    item,
     querySelector(selector) {
       if (selector === '[data-part="lightning"] .ops-lightning') return inner;
-      if (selector === '.ops-strip li[data-part="lightning"]') return item;
       return null;
     },
     addEventListener: vi.fn(),
@@ -321,7 +318,7 @@ describe('keeping it up to date', () => {
     const api = { getContext: () => {
       if (!state.context) throw new TypeError('no details open');
       return state.context;
-    }, rerender: vi.fn(), setTime: vi.fn() };
+    }, rerender: vi.fn(), setTime: vi.fn(), refreshSummary: vi.fn() };
     const images = [];
     const loadImage = async (url) => {
       const img = { width: 2, height: 2, data: new Uint8ClampedArray(16), url };
@@ -386,9 +383,8 @@ describe('keeping it up to date', () => {
     const result = none();
     s.made[0].options.onUpdate(result);
     expect(s.root.inner.innerHTML).toContain('No lightning within 30 km');
-    expect(s.root.item.outerHTML).toContain('data-part="lightning"');
-    expect(s.root.item.outerHTML).toContain('status-ok');
-    expect(s.root.item.outerHTML).toContain('No lightning within 30 km');
+    // The summary line draws its fact again; the part leaves the line alone.
+    expect(s.api.refreshSummary).toHaveBeenCalledTimes(1);
     expect(s.api.rerender).not.toHaveBeenCalled();
     const [name, arg] = s.overlay.calls.at(-1);
     expect(name).toBe('show');
@@ -536,6 +532,160 @@ describe('keeping it up to date', () => {
   });
 });
 
+describe('summary mode (the panel is open on another tab)', () => {
+  afterEach(() => {
+    unwatch();
+    unbind();
+  });
+
+  function setup() {
+    const monitors = fakeMonitors();
+    const overlay = fakeOverlay();
+    const state = { context: { airport: EHAM, hourly: null, now: NOW, zone: 'CEST' } };
+    const api = { getContext: () => state.context, rerender: vi.fn(), setTime: vi.fn(), refreshSummary: vi.fn() };
+    const deps = { createMonitor: monitors.createMonitor, overlay, delayMs: 0 };
+    return { ...monitors, overlay, api, deps, state };
+  }
+  const draw = (airport = EHAM) => lightningPart.analyse({ airport, hourly: null, now: NOW, zone: 'CEST' });
+
+  it('looks at the airport and tells the summary line of each result, with nothing on the map', () => {
+    const s = setup();
+    watch(s.api, s.deps);
+    draw();
+    expect(s.made[0].started).toEqual([{ lat: EHAM.lat, lon: EHAM.lng }]);
+    s.made[0].options.onUpdate(none());
+    expect(s.api.refreshSummary).toHaveBeenCalledTimes(1);
+    expect(draw().lightning).toBeTruthy();
+    expect(s.overlay.calls).toEqual([]);
+  });
+
+  it('is not started by drawing before it is asked to watch', () => {
+    const s = setup();
+    draw();
+    expect(s.made).toHaveLength(0);
+  });
+
+  it('goes on across the change to the tab and back, showing the map only while the tab is shown', () => {
+    const s = setup();
+    watch(s.api, s.deps);
+    draw();
+    // The tab is shown: bound first, then the watch ends, as the host does it. The monitor is not restarted.
+    bind(fakeRoot(), s.api, s.deps);
+    unwatch();
+    expect(s.made).toHaveLength(1);
+    expect(s.made[0].started).toHaveLength(1);
+    expect(s.made[0].stopped).toBe(0);
+    expect(s.overlay.calls.map((c) => c[0])).toEqual(['show']);
+    // The tab goes: the map is cleared, the lightning is still looked at.
+    watch(s.api, s.deps);
+    unbind();
+    expect(s.overlay.calls.map((c) => c[0])).toEqual(['show', 'hide']);
+    expect(s.made[0].stopped).toBe(0);
+    s.made[0].options.onUpdate(none());
+    expect(s.overlay.calls).toHaveLength(2);
+    expect(s.api.refreshSummary).toHaveBeenCalled();
+    // The panel closes: nothing is looked at.
+    unwatch();
+    expect(s.made[0].stopped).toBe(1);
+  });
+
+  it('lets go of the airport on release and starts again for the next one when it is drawn', () => {
+    const s = setup();
+    watch(s.api, s.deps);
+    draw();
+    lightningPart.release();
+    expect(s.made[0].stopped).toBe(1);
+    draw({ ident: 'EGLL', lat: 51.47, lng: -0.45 });
+    expect(s.made[0].started.map((a) => a.lat)).toEqual([EHAM.lat, 51.47]);
+  });
+
+  it('does nothing when it is ended with nothing watched', () => {
+    expect(() => unwatch()).not.toThrow();
+  });
+
+  it('waits a moment after an airport is opened before it asks for anything, and not at all if another is opened meanwhile', () => {
+    vi.useFakeTimers();
+    try {
+      const s = setup();
+      const deps = { ...s.deps, delayMs: START_DELAY_MS, setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: (t) => clearTimeout(t) };
+      watch(s.api, deps);
+      draw();
+      expect(s.made[0].started).toEqual([]);
+      vi.advanceTimersByTime(START_DELAY_MS - 1);
+      expect(s.made[0].started).toEqual([]);
+      // Another airport is opened before the wait is over: only that one is asked for.
+      draw({ ident: 'EGLL', lat: 51.47, lng: -0.45 });
+      vi.advanceTimersByTime(START_DELAY_MS);
+      expect(s.made[0].started).toEqual([{ lat: 51.47, lon: -0.45 }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts at once when the tab is shown while it waits, and with the tab shown from the start', () => {
+    vi.useFakeTimers();
+    try {
+      const s = setup();
+      const deps = { ...s.deps, delayMs: START_DELAY_MS, setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: (t) => clearTimeout(t) };
+      watch(s.api, deps);
+      draw();
+      bind(fakeRoot(), s.api, deps);
+      expect(s.made[0].started).toHaveLength(1);
+      vi.advanceTimersByTime(START_DELAY_MS * 2);
+      expect(s.made[0].started).toHaveLength(1);
+      unbind();
+      unwatch();
+      // Bound from the start: no wait.
+      const t = setup();
+      bind(fakeRoot(), t.api, { ...t.deps, delayMs: START_DELAY_MS });
+      draw();
+      expect(t.made[0].started).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('asks for nothing while the page is hidden, and goes on when it is shown again', () => {
+    const listeners = new Map();
+    const doc = { hidden: false, addEventListener: (t, f) => listeners.set(t, f), removeEventListener: (t) => listeners.delete(t) };
+    vi.stubGlobal('document', doc);
+    try {
+      const s = setup();
+      watch(s.api, s.deps);
+      draw();
+      expect(s.made[0].started).toHaveLength(1);
+      doc.hidden = true;
+      listeners.get('visibilitychange')();
+      expect(s.made[0].stopped).toBe(1);
+      // Drawing another airport while hidden does not start anything either.
+      draw({ ident: 'EGLL', lat: 51.47, lng: -0.45 });
+      expect(s.made[0].started).toHaveLength(1);
+      doc.hidden = false;
+      listeners.get('visibilitychange')();
+      expect(s.made[0].started.map((a) => a.lat)).toEqual([EHAM.lat, 51.47]);
+      // Ending the watch takes the listener away.
+      unwatch();
+      expect(listeners.size).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('draws the rings and image only while the map profile turns them on', () => {
+    const s = setup();
+    const profile = { lightning: false };
+    const api = { ...s.api, mapProfile: () => profile };
+    bind(fakeRoot(), api, s.deps);
+    draw();
+    expect(s.overlay.calls).toEqual([]);
+    s.made[0].options.onUpdate(none());
+    expect(s.overlay.calls).toEqual([]);
+    profile.lightning = true;
+    s.made[0].options.onUpdate(none());
+    expect(s.overlay.calls.map((c) => c[0])).toEqual(['show']);
+  });
+});
+
 describe('the part in the Ops tab', () => {
   afterEach(() => unbind());
 
@@ -543,7 +693,7 @@ describe('the part in the Ops tab', () => {
     expect(OPS_PARTS.map((p) => p.id).slice(0, 3)).toEqual(['runway', 'visibility', 'lightning']);
     const ctx = { airport: TOKYO, hourly: stormy(), now: NOW, zone: 'CEST', limits: {}, limitsLabel: '', time: '', formatClock: () => '', formatClockShort: () => '', formatTick: () => '' };
     const html = opsPanelHtml([lightningPart], ctx);
-    expect(html).toContain('<li class="status-nogo" data-part="lightning">');
+    expect(summaryHtml([analysePart(lightningPart, ctx)])).toContain('class="ops-fact-button status-nogo" data-part="lightning"');
     expect(html).toContain('<section class="ops-section" data-part="lightning"');
     expect(html).toContain('Storms and lightning');
     expect(html).toContain('<div class="ops-lightning">');
@@ -559,11 +709,11 @@ describe('the part in the Ops tab', () => {
     const monitors = fakeMonitors();
     const root = { addEventListener() {}, removeEventListener() {}, querySelector: () => null };
     const part = { ...lightningPart, bind: (r, api) => lightningPart.bind(r, api, { createMonitor: monitors.createMonitor, overlay: fakeOverlay() }) };
-    const host = createOpsHost({ root, getContext: () => ({ airport: EHAM, hourly: null, now: NOW, zone: 'CEST' }), requestRender: () => {}, setTime: () => {}, parts: [part] });
-    host.mount();
+    const host = createOpsHost({ root, getContext: () => ({ airport: EHAM, hourly: null, now: NOW, zone: 'CEST' }), requestRender: () => {}, setTime: () => {}, parts: [part], setTimer: () => 1, clearTimer: () => {} });
+    host.show('weather');
     opsPanelHtml([lightningPart], { airport: EHAM, hourly: null, now: NOW, zone: 'CEST' });
     expect(monitors.made[0].started).toHaveLength(1);
-    host.unmount();
+    host.stop();
     expect(monitors.made[0].stopped).toBe(1);
   });
 });
