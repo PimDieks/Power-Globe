@@ -12,7 +12,8 @@
     "test": "vitest run",
     "airports": "node scripts/build-airports.mjs",
     "satellites": "node scripts/fetch-satellites.mjs",
-    "data": "node scripts/build-data.mjs"
+    "data": "node scripts/build-data.mjs",
+    "postinstall": "node scripts/patch-tile-engine.mjs"
   },
   "dependencies": {
     "globe.gl": "^2.46.2",

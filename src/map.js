@@ -113,6 +113,8 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
       baseEngine = findTileEngine(globe, chart.engine);
       if (baseEngine) {
         seeThroughNoData(baseEngine, () => style.noDataBlack);
+        settleLevels(baseEngine, globe);
+        boundAfterAdding(baseEngine, globe);
         // Tiles loaded before the hook was in place.
         if (style.noDataBlack) globe.globeTileEngineClearCache();
       }
@@ -153,7 +155,8 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
   function setAltitude(value) {
     altitude = value;
     tilesTuned ||= matchTileDetailToScreen(globe, chart.engine);
-    findBaseEngine();
+    boundTiles(findBaseEngine(), globe.camera());
+    boundTiles(chart.engine, globe.camera());
     chart.update();
     moving.update();
     const t = Math.min(1, Math.max(0, (altitude - 0.4) / (MAP_ALTITUDE + 0.6 - 0.4)));
@@ -202,6 +205,97 @@ function findTileEngine(globe, exclude) {
     if (!engine && obj !== exclude && Array.isArray(obj.thresholds) && 'tileUrl' in obj) engine = obj;
   });
   return engine;
+}
+
+// The tile engines keep every tile they load for as long as the view stays at its level or
+// closer: the coarse tiles passed on the way in, and every tile flown over while following an
+// aircraft, so their memory grew for as long as the page was open. Beyond this many tiles, those
+// out of view are let go, farthest from the middle of the view first. The engine loads a tile
+// again when it comes back into view: it is told the tile has gone through the record each tile
+// carries (see scripts/patch-tile-engine.mjs). Returns the number of tiles let go.
+export const MAX_TILES = 300;
+const sphere = new THREE.Sphere();
+// The zoom level of one of the tile engine's tiles, from its width.
+const tileLevel = (tile) => Math.round(Math.log2((2 * Math.PI) / tile.geometry.parameters.phiLength));
+export function boundTiles(engine, camera, max = MAX_TILES) {
+  if (!camera?.isCamera || !(engine?.children?.length > max)) return 0;
+  camera.updateMatrixWorld();
+  const frustum = new THREE.Frustum().setFromProjectionMatrix(
+    new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse),
+  );
+  const eye = camera.position.clone();
+  // How far around a globe of `radius` the camera sees, as an angle from the point beneath it.
+  const horizon = (radius) => Math.acos(Math.min(1, radius / eye.length()));
+  const away = [];
+  for (const tile of engine.children) {
+    if (!tile.userData.tile || !tile.geometry) continue;
+    if (!tile.geometry.boundingSphere) tile.geometry.computeBoundingSphere();
+    sphere.copy(tile.geometry.boundingSphere).applyMatrix4(tile.matrixWorld);
+    const angle = eye.angleTo(sphere.center);
+    // Coarser tiles than the view's are only seen where they are on the near side of the globe.
+    // Tiles of the view's own level are kept while they are anywhere in the camera's view, near
+    // side or far, as that is where the engine asks for them again.
+    const reach = Math.asin(Math.min(1, sphere.radius / sphere.center.length()));
+    if (tileLevel(tile) < engine.level && angle - reach > horizon(tile.geometry.parameters.radius)) {
+      away.push({ tile, angle });
+      continue;
+    }
+    // A margin, so that a tile at the edge of the view is not let go and asked for again.
+    sphere.radius *= 1.5;
+    if (!frustum.intersectsSphere(sphere)) away.push({ tile, angle });
+  }
+  away.sort((a, b) => b.angle - a.angle);
+  const forget = away.slice(0, engine.children.length - max);
+  for (const { tile } of forget) {
+    engine.remove(tile);
+    tile.geometry.dispose();
+    tile.material.map?.dispose();
+    tile.material.dispose();
+    delete tile.userData.tile.obj;
+  }
+  return forget.length;
+}
+
+// Tiles also arrive after the camera has stopped, so the limit is checked again shortly after.
+function boundAfterAdding(engine, globe) {
+  const add = engine.add.bind(engine);
+  let timer = null;
+  engine.add = (...objects) => {
+    const result = add(...objects);
+    timer ??= setTimeout(() => {
+      timer = null;
+      boundTiles(engine, globe.camera());
+    }, 200);
+    return result;
+  };
+}
+
+// The tile level the engine picks for a camera (see updatePov in three-slippy-map-globe): the
+// first of its thresholds, in globe radii above the ground, that the camera is above.
+export function tileLevelFor(engine, camera, radius) {
+  const height = (camera.position.length() - radius) / radius;
+  const i = engine.thresholds.findIndex((t) => t && t <= height);
+  return Math.min(engine.maxLevel, Math.max(engine.minLevel ?? 0, i < 0 ? engine.thresholds.length : i));
+}
+
+// three-globe tells its tile engine of every move of the camera, and the engine loads the tiles
+// in view at every level it passes, most of them on screen for a moment if at all: a zoom out from
+// an airport asked for over a thousand. A new level waits until the zoom pauses (250 ms, see
+// whenSettled), or at most LEVEL_MAX_WAIT_MS while it goes on; moves within a level go through at
+// once.
+const LEVEL_MAX_WAIT_MS = 500;
+export function settleLevels(engine, globe) {
+  if (!engine.updatePov) return;
+  const updatePov = engine.updatePov.bind(engine);
+  const settled = whenSettled(() => updatePov(globe.camera()), { maxWait: LEVEL_MAX_WAIT_MS });
+  engine.updatePov = (camera) => {
+    if (camera?.position && tileLevelFor(engine, camera, globe.getGlobeRadius()) !== engine.level) {
+      settled.update();
+      return;
+    }
+    settled.cancel();
+    updatePov(camera);
+  };
 }
 
 // Pixels this dark (linear colour, about 5/255 before decoding) are taken as no data. Real
@@ -256,7 +350,7 @@ function setupChartLayer(globe) {
   engine.visible = false;
   // Its dark backing sphere would hide the map below.
   engine.children[0].material.visible = false;
-  const tileLevel = (tile) => Math.round(Math.log2((2 * Math.PI) / tile.geometry.parameters.phiLength));
+  boundAfterAdding(engine, globe);
   // Tiles see through to the map, and only the current level shows: coarser tiles kept for
   // later would otherwise show through between the finer ones' lines and labels.
   const showLevel = () => {
