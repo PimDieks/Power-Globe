@@ -20,7 +20,7 @@ export const TILE_PIXELS = 512;
 // 0.8 km in central Europe, already finer than the images themselves (about 1 to 2 km).
 export const MAX_LEVEL = 6;
 // The finest level of the map's own tiles the images are shown over (a 512 pixel image covers
-// four tiles of the next level). Closer in, the map shows the satellite imagery instead.
+// four tiles of the next level). Closer in, the map's own tiles show instead.
 export const MAP_LEVEL_LIMIT = MAX_LEVEL + 1;
 
 const EARTH_HALF = 20037508.342789244;
@@ -50,12 +50,6 @@ export function tileAngle(x, y, level) {
   const { west, east, south, north } = tileBounds(x, y, level);
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   return satelliteAngle(clamp(0, south, north), clamp(0, west, east));
-}
-
-// Whether the middle of the tile is within the area, halfway through the fade.
-export function coversTile(x, y, level) {
-  const { west, east, south, north } = tileBounds(x, y, level);
-  return satelliteAngle((south + north) / 2, (west + east) / 2) < (FADE_FROM_DEG + AREA_DEG) / 2;
 }
 
 // Tiles at `level` with some part inside the area the images cover, and some part in view:
@@ -137,13 +131,15 @@ export function tileUrl(x, y, level, frame) {
 }
 
 // A pause after failures: 5 seconds after the first, doubling up to two minutes, and gone after a
-// success.
+// success. Failures during a pause, such as the other requests sent along with the one that failed
+// first, do not make it longer: only one after the pause has ended does.
 export class Backoff {
   constructor({ first = 5000, max = 120_000 } = {}) {
     Object.assign(this, { first, max, delay: 0, until: 0 });
   }
 
   fail(now) {
+    if (this.delay && now < this.until) return;
     this.delay = this.delay ? Math.min(this.max, this.delay * 2) : this.first;
     this.until = now + this.delay;
   }
@@ -159,22 +155,27 @@ export class Backoff {
   }
 }
 
+// A tile that failed this many times is not asked for again while it is kept.
+export const MAX_ATTEMPTS = 3;
+
 // Loaded tile images by key, with a bounded number kept and a bounded number loading at once.
 // `want(jobs)` names the tiles needed now, most urgent first, as [{ key, url }]: tiles not yet
-// loaded are queued and anything queued but no longer wanted is dropped. `get(key)` gives
-// { state: 'loading' | 'done' | 'failed', value, failures }. After a failure nothing new starts
-// until the back-off has passed, then one at a time until one loads, and a failed tile is asked
-// for again only once its own pause has passed. `onSettle()` is
-// called after every load that ends and when a back-off is over. The least recently used entries
-// beyond `max` are dropped, except wanted ones, loading ones and those `inUse(key)`.
+// loaded are queued, each once, and anything queued but no longer wanted is dropped. `get(key)`
+// gives { state: 'loading' | 'done' | 'failed', value, failures }. After a failure nothing new
+// starts until the back-off has passed, then one at a time until one loads; a failed tile is asked
+// for again only once its own pause has passed, and at most MAX_ATTEMPTS times in all. `onSettle()`
+// is called after every load that ends and when a pause is over. The least recently used entries
+// beyond `max` are dropped, except wanted ones, loading ones and those `inUse(key)`. A 512 pixel
+// image takes about 1 MB once decoded, hence the modest default.
 export class TileStore {
-  constructor({ load, max = 240, concurrency = 6, backoff = new Backoff(), now = Date.now, onSettle = () => {}, inUse = () => false, dispose = () => {} }) {
+  constructor({ load, max = 100, concurrency = 6, backoff = new Backoff(), now = Date.now, onSettle = () => {}, inUse = () => false, dispose = () => {} }) {
     Object.assign(this, { load, max, concurrency, backoff, now, onSettle, inUse, dispose });
     this.entries = new Map();
     this.queue = [];
     this.wanted = new Set();
     this.loading = 0;
     this.timer = null;
+    this.timerDue = 0;
   }
 
   get(key) {
@@ -187,15 +188,21 @@ export class TileStore {
     return entry;
   }
 
+  // Whether the tile should be asked for now: not had yet, or failed and due again.
+  due(key, now) {
+    const entry = this.entries.get(key);
+    return !entry || (entry.state === 'failed' && entry.failures < MAX_ATTEMPTS && now >= entry.retryAt);
+  }
+
   want(jobs) {
     const now = this.now();
     this.wanted = new Set(jobs.map((j) => j.key));
     this.queue = [];
     for (const job of jobs) {
       const entry = this.entries.get(job.key);
-      if (!entry || (entry.state === 'failed' && now >= entry.retryAt)) this.queue.push(job);
+      if (this.due(job.key, now)) this.queue.push(job);
       // A failed tile that is not due yet: look again when it is.
-      else if (entry.state === 'failed') this.wake(entry.retryAt - now);
+      else if (entry.state === 'failed' && entry.failures < MAX_ATTEMPTS) this.wake(entry.retryAt - now);
     }
     this.pump();
   }
@@ -203,18 +210,27 @@ export class TileStore {
   pump() {
     // After a failure one request goes first, and the rest follow once one has worked.
     while (this.loading < (this.backoff.delay ? 1 : this.concurrency) && this.queue.length) {
-      const wait = this.backoff.wait(this.now());
+      const now = this.now();
+      const wait = this.backoff.wait(now);
       if (wait) {
         this.wake(wait);
         return;
       }
-      this.start(this.queue.shift());
+      // A tile named twice, or started meanwhile, is not asked for again.
+      const job = this.queue.shift();
+      if (this.due(job.key, now)) this.start(job);
     }
   }
 
-  // Calls `onSettle()` and carries on loading after `wait` ms, unless that is already arranged.
+  // Calls `onSettle()` and carries on loading after `wait` ms, or sooner if that is already
+  // arranged.
   wake(wait) {
-    if (this.timer) return;
+    const due = this.now() + wait;
+    if (this.timer) {
+      if (this.timerDue <= due) return;
+      clearTimeout(this.timer);
+    }
+    this.timerDue = due;
     this.timer = setTimeout(() => {
       this.timer = null;
       this.onSettle();
@@ -256,11 +272,17 @@ export class TileStore {
     }
   }
 
-  // Forgets the queue, e.g. when the moving clouds are not shown. Loads under way still finish.
+  // Forgets the queue and every tile not loading, e.g. when the moving clouds are not shown. Loads
+  // under way still finish; call again once they have.
   clear() {
     this.queue = [];
     this.wanted = new Set();
     clearTimeout(this.timer);
     this.timer = null;
+    for (const [key, entry] of this.entries) {
+      if (entry.state === 'loading') continue;
+      this.entries.delete(key);
+      if (entry.value) this.dispose(entry.value);
+    }
   }
 }

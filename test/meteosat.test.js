@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AREA_DEG,
   Backoff,
+  MAX_ATTEMPTS,
   TileStore,
-  coversTile,
   frameFor,
   framesFor,
   parseTimes,
@@ -69,11 +69,6 @@ describe('tile maths', () => {
     expect(tilesInView(4, inView)).toEqual([{ x: 7, y: 5 }, { x: 8, y: 5 }]);
     expect(tilesInView(4, () => false)).toEqual([]);
   });
-
-  it('hands the map over to close up imagery only where the images cover the tile', () => {
-    expect(coversTile(129, 88, 8)).toBe(true); // Paris
-    expect(coversTile(255, 64, 8)).toBe(false); // Kazakhstan
-  });
 });
 
 describe('image times', () => {
@@ -127,17 +122,20 @@ describe('image times', () => {
 });
 
 describe('Backoff', () => {
-  it('waits longer after each failure, up to a limit, and not at all after a success', () => {
+  it('waits longer after each failure once the last pause is over, up to a limit, and not at all after a success', () => {
     const b = new Backoff({ first: 5000, max: 20_000 });
     expect(b.wait(0)).toBe(0);
     b.fail(0);
     expect(b.wait(0)).toBe(5000);
-    b.fail(0);
-    expect(b.wait(0)).toBe(10_000);
-    b.fail(0);
-    b.fail(0);
-    expect(b.wait(0)).toBe(20_000);
-    expect(b.wait(15_000)).toBe(5000);
+    // During the pause, failures do not lengthen it.
+    b.fail(1000);
+    expect(b.wait(0)).toBe(5000);
+    b.fail(5000);
+    expect(b.wait(5000)).toBe(10_000);
+    b.fail(15_000);
+    b.fail(35_000);
+    expect(b.wait(35_000)).toBe(20_000);
+    expect(b.wait(50_000)).toBe(5000);
     b.succeed();
     expect(b.wait(0)).toBe(0);
   });
@@ -252,5 +250,153 @@ describe('TileStore', () => {
     store.want([]);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not lengthen the pause for failures sent together with the first', async () => {
+    vi.useFakeTimers();
+    const backoff = new Backoff({ first: 5000, max: 120_000 });
+    const load = vi.fn(async () => {
+      throw new Error('blip');
+    });
+    const store = new TileStore({ load, concurrency: 6, backoff });
+    store.want(jobs(['a', 'b', 'c', 'd', 'e', 'f']));
+    await flush();
+    expect(load).toHaveBeenCalledTimes(6);
+    expect(backoff.delay).toBe(5000);
+    // A failure after the pause has ended does lengthen it.
+    backoff.fail(Date.now() + 6000);
+    expect(backoff.delay).toBe(10_000);
+  });
+
+  it('wakes at the earliest time asked for, not the first', async () => {
+    vi.useFakeTimers();
+    const onSettle = vi.fn();
+    const store = new TileStore({ load: async () => 'x', onSettle });
+    store.wake(120_000);
+    store.wake(5000);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(onSettle).toHaveBeenCalledTimes(1);
+    // And a later time does not put off an earlier one.
+    store.wake(5000);
+    store.wake(60_000);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(onSettle).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks again soon after a short pause even when a long one was arranged before', async () => {
+    vi.useFakeTimers();
+    const now = () => Date.now();
+    const load = vi.fn(async (url) => url);
+    const onSettle = vi.fn();
+    const store = new TileStore({ load, onSettle, now });
+    // A tile due again in two minutes arranges a wake-up then.
+    store.entries.set('old', { state: 'failed', failures: 1, retryAt: now() + 120_000, value: null });
+    store.want(jobs(['old']));
+    // A back-off of five seconds after that must not wait the two minutes.
+    store.backoff.fail(now());
+    store.want(jobs(['old', 'new']));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(load.mock.calls.map(([url]) => url)).toEqual(['u:new']);
+  });
+
+  it('asks once for a tile named twice, and not again while it loads', async () => {
+    vi.useFakeTimers();
+    const { load, calls } = pending();
+    const store = new TileStore({ load, concurrency: 6 });
+    store.want(jobs(['a', 'a', 'b']));
+    await flush();
+    store.want(jobs(['a', 'b', 'a']));
+    await flush();
+    expect(calls.map((c) => c.url)).toEqual(['u:a', 'u:b']);
+    calls[0].resolve('A');
+    await flush();
+    store.want(jobs(['a']));
+    await flush();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not start a queued tile that another call started meanwhile', async () => {
+    vi.useFakeTimers();
+    const { load, calls } = pending();
+    const store = new TileStore({ load, concurrency: 1 });
+    store.want(jobs(['a', 'b']));
+    await flush();
+    // 'b' waits in the queue; it is then started directly and the queue still names it.
+    store.start({ key: 'b', url: 'u:b' });
+    await flush();
+    calls[1].resolve('B');
+    await flush();
+    calls[0].resolve('A');
+    await flush();
+    expect(calls.map((c) => c.url)).toEqual(['u:a', 'u:b']);
+  });
+
+  it(`gives up on a tile after ${MAX_ATTEMPTS} failed attempts`, async () => {
+    vi.useFakeTimers();
+    const load = vi.fn(async () => {
+      throw new Error('broken tile');
+    });
+    const store = new TileStore({ load, backoff: new Backoff({ first: 1000, max: 1000 }) });
+    // Other tiles settling ask for it again and again.
+    for (let i = 0; i < 600; i++) {
+      store.want(jobs(['bad']));
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    expect(load).toHaveBeenCalledTimes(MAX_ATTEMPTS);
+    expect(store.get('bad')).toMatchObject({ state: 'failed', failures: MAX_ATTEMPTS });
+  });
+
+  it('keeps wanted tiles beyond the bound', async () => {
+    vi.useFakeTimers();
+    const store = new TileStore({ load: async (url) => url, max: 2, concurrency: 10 });
+    store.want(jobs(['a', 'b', 'c', 'd']));
+    await flush();
+    expect(store.entries.size).toBe(4);
+    for (const key of ['a', 'b', 'c', 'd']) expect(store.get(key).state).toBe('done');
+    // Once no longer wanted they go, down to the bound.
+    store.want(jobs(['e']));
+    await flush();
+    expect(store.entries.size).toBe(2);
+  });
+
+  it('does not ask for a failed tile before its own pause has passed, even after a success', async () => {
+    vi.useFakeTimers();
+    let fail = true;
+    const load = vi.fn(async (url) => {
+      if (fail && url === 'u:a') throw new Error('refused');
+      return url;
+    });
+    const store = new TileStore({ load, concurrency: 1, backoff: new Backoff({ first: 5000 }) });
+    store.want(jobs(['a']));
+    await flush();
+    // Another tile loads after the pause, which ends the back-off.
+    await vi.advanceTimersByTimeAsync(5000);
+    store.entries.get('a').retryAt = Date.now() + 30_000;
+    store.want(jobs(['b']));
+    await flush();
+    expect(store.backoff.delay).toBe(0);
+    fail = false;
+    store.want(jobs(['a']));
+    await flush();
+    expect(load.mock.calls.map(([url]) => url)).toEqual(['u:a', 'u:b']);
+    await vi.advanceTimersByTimeAsync(30_000);
+    store.want(jobs(['a']));
+    await flush();
+    expect(load.mock.calls.map(([url]) => url)).toEqual(['u:a', 'u:b', 'u:a']);
+  });
+
+  it('lets go of every loaded image when cleared, but not of those loading', async () => {
+    vi.useFakeTimers();
+    const dispose = vi.fn();
+    const { load, calls } = pending();
+    const store = new TileStore({ load, concurrency: 6, dispose });
+    store.want(jobs(['a', 'b', 'c']));
+    await flush();
+    calls[0].resolve('A');
+    calls[1].resolve('B');
+    await flush();
+    store.clear();
+    expect([...store.entries.keys()]).toEqual(['c']);
+    expect(dispose.mock.calls.map(([v]) => v).sort()).toEqual(['A', 'B']);
   });
 });
