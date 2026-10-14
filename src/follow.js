@@ -60,9 +60,9 @@ export const cameraAltitude = (altitude, ac) => Math.max(altitude, drawnAltitude
 
 // How far the middle of the part of the screen left free (from `top` down to `bottom`, in pixels)
 // lies above the middle of the screen, as a share of the screen's height. On phones the details
-// panel covers the lower part; at least 80 px stay free.
-export function visibleShift({ top, bottom, height }) {
-  const free = Math.max(top + 80, bottom);
+// panel covers the lower part; at least `minFree` px stay free.
+export function visibleShift({ top, bottom, height, minFree = 80 }) {
+  const free = Math.max(top + minFree, bottom);
   return (height / 2 - (top + free) / 2) / height;
 }
 

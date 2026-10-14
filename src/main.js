@@ -26,6 +26,7 @@ import { setupWindCheck } from './windcheck.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
+import { dragged, followStep, startFollow, stopReason, shiftedLat, visibleShift } from './follow.js';
 import { latestObservation } from './metar.js';
 import { explain } from './api.js';
 
@@ -93,6 +94,7 @@ const els = {
   searchResults: document.getElementById('search-results'),
   searchStatus: document.getElementById('search-status'),
   detailsBack: document.getElementById('details-back'),
+  detailsFollow: document.getElementById('details-follow'),
   traffic: {
     flights: document.getElementById('toggle-flights'),
     military: document.getElementById('toggle-military'),
@@ -145,6 +147,8 @@ const state = {
   windCheck: false,
   // Zoomed-in area with finer data: { shape, bounds, data, winds, times, fade }, or null.
   region: null,
+  // The aircraft the camera is following, see follow.js, or null.
+  follow: null,
   autoRotate: !reducedMotion,
 };
 
@@ -197,6 +201,7 @@ const traffic = setupTraffic({
   els: els.traffic,
   onSelect: (item, title) => showTraffic(item, title),
   onDeselect: () => {
+    stopFollowing();
     if (!state.detail?.traffic) return;
     state.detail = null;
     els.details.classList.add('hidden');
@@ -503,10 +508,12 @@ function tick(now) {
   }
   // Live traffic is extra: a problem with it must not stop the globe.
   try {
+    updateFollow();
     traffic.frame(now, globe.pointOfView());
   } catch (err) {
     console.error(err);
   }
+  syncFollowButton();
   // Live positions change all the time; refresh the open aircraft or satellite every second.
   if (state.detail?.traffic && now - lastTrafficRender > 1000) {
     lastTrafficRender = now;
@@ -695,6 +702,8 @@ function openSidePanel({ keepTraffic = false } = {}) {
 
 // A tapped aircraft or satellite: live details, refreshed every second, with a ring around it.
 function showTraffic(item, title) {
+  // Tapping the aircraft that is followed keeps following it.
+  if (state.follow && !(item.kind === 'aircraft' && item.id === state.follow.id)) stopFollowing();
   openSidePanel({ keepTraffic: true });
   windCheck.close();
   syncWindCheckButton();
@@ -724,7 +733,7 @@ const pickedTraffic = () => performance.now() - pickedAt < 500;
   els.globe.addEventListener(
     'pointerup',
     (event) => {
-      if (!down || event.button !== 0 || Math.hypot(event.clientX - down.x, event.clientY - down.y) > 6) return;
+      if (!down || event.button !== 0 || dragged(down, { x: event.clientX, y: event.clientY })) return;
       const hit = traffic.pick(event.clientX, event.clientY);
       if (!hit) return;
       pickedAt = performance.now();
@@ -732,6 +741,106 @@ const pickedTraffic = () => performance.now() - pickedAt < 500;
     },
     { capture: true, passive: true },
   );
+}
+
+// Following an aircraft: the camera keeps it in the middle of the view, north up, from straight
+// above, as it flies (see follow.js). The visitor keeps the zoom; dragging the map, Escape, closing
+// the panel, picking anything else or switching the flights off ends it.
+function startFollowing() {
+  const report = traffic.selectedAircraft();
+  if (!report) return;
+  state.autoRotate = false;
+  controls.autoRotate = false;
+  // Momentum left in the camera controls would carry the view off the aircraft.
+  stopCameraDrift();
+  state.follow = startFollow(report, globe.pointOfView(), Date.now(), { reduced: reducedMotion });
+  announce(`Following ${els.detailsTitle.textContent}.`);
+}
+
+function stopFollowing(message) {
+  if (!state.follow) return;
+  state.follow = null;
+  if (message) announce(message);
+}
+
+// How far above the middle of the screen to hold the aircraft: on phones the panel covers the
+// lower part, and the aircraft belongs in the part of the map left above it. Measured twice a
+// second at most.
+let followShift = 0;
+let followShiftAt = 0;
+function followShiftNow(now) {
+  if (!phoneLayout.matches) return 0;
+  if (now - followShiftAt > 500) {
+    followShiftAt = now;
+    const top = els.controls.offsetTop + els.controls.offsetHeight;
+    followShift = visibleShift({ top, bottom: els.details.offsetTop, height: window.innerHeight, minFree: 20 });
+  }
+  return followShift;
+}
+
+function updateFollow() {
+  const follow = state.follow;
+  if (!follow) return;
+  const now = Date.now();
+  const report = traffic.selectedAircraft();
+  const reason = stopReason({ id: follow.id, selected: traffic.selected, report });
+  if (reason) {
+    stopFollowing(reason === 'lost' ? `${els.detailsTitle.textContent} is no longer received. Stopped following.` : undefined);
+    return;
+  }
+  const pose = followStep(follow, { report, pov: globe.pointOfView(), now, shift: followShiftNow(now) });
+  if (pose) globe.pointOfView(pose);
+}
+
+// The Follow button is in the panel's header, which is not rebuilt every second like its body. It
+// shows for an aircraft, and is off while the aircraft is not being received.
+let followButtonState = '';
+function syncFollowButton() {
+  const aircraft = state.detail?.traffic?.kind === 'aircraft';
+  const following = !!state.follow;
+  const received = !!traffic.selectedAircraft();
+  const key = `${aircraft}:${following}:${received}`;
+  if (key === followButtonState) return;
+  followButtonState = key;
+  els.detailsFollow.hidden = !aircraft;
+  els.detailsFollow.textContent = following ? 'Stop following' : 'Follow';
+  els.detailsFollow.setAttribute('aria-pressed', String(following));
+  els.detailsFollow.disabled = !following && !received;
+}
+els.detailsFollow.addEventListener('click', () => (state.follow ? stopFollowing('Stopped following.') : startFollowing()));
+
+// Dragging the map ends following. Zooming does not: the wheel is no drag, and neither is a
+// gesture with more than one finger down.
+{
+  const down = new Map();
+  let several = false;
+  els.globe.addEventListener(
+    'pointerdown',
+    (event) => {
+      if (event.isPrimary) {
+        down.clear();
+        several = false;
+      }
+      if (event.button !== 0) return;
+      down.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (down.size > 1) several = true;
+    },
+    { capture: true, passive: true },
+  );
+  els.globe.addEventListener(
+    'pointermove',
+    (event) => {
+      const start = down.get(event.pointerId);
+      if (start && !several && state.follow && dragged(start, { x: event.clientX, y: event.clientY })) stopFollowing();
+    },
+    { capture: true, passive: true },
+  );
+  const lift = (event) => {
+    down.delete(event.pointerId);
+    if (!down.size) several = false;
+  };
+  els.globe.addEventListener('pointerup', lift, { capture: true, passive: true });
+  els.globe.addEventListener('pointercancel', lift, { capture: true, passive: true });
 }
 
 // `name` titles the panel, e.g. a searched place (tapped spots show coordinates); `pinLabel`
@@ -896,9 +1005,6 @@ function backToWindCheck() {
 }
 
 
-// Degrees of latitude the view spans per globe radius of camera altitude (see detail.js).
-const LAT_SPAN_PER_ALTITUDE = 53;
-
 // Glide to an airport and open its conditions, from a height at which its runways show.
 // `stayClose` (a label on the map) never backs out from a closer view: it only centres on the
 // airport, and leaves the panel alone if that airport is already open (unless the panel is showing
@@ -912,9 +1018,8 @@ function goToAirport(airport, { stayClose = false, ...options } = {}) {
     // The controls fold when the panel opens: measure them folded.
     setControlsOpen(false);
     const top = els.controls.offsetTop + els.controls.offsetHeight;
-    const bottom = Math.max(top + 80, window.innerHeight * 0.45);
-    const shift = (window.innerHeight / 2 - (top + bottom) / 2) / window.innerHeight;
-    lat = Math.max(-85, Math.min(85, lat - shift * LAT_SPAN_PER_ALTITUDE * altitude));
+    const shift = visibleShift({ top, bottom: window.innerHeight * 0.45, height: window.innerHeight });
+    lat = shiftedLat(lat, shift, altitude);
   }
   // Stop turning first: the camera controls keep the turn's momentum, which would otherwise carry
   // the view on past the airport after the flight.
@@ -1045,7 +1150,8 @@ els.windCheckClose.addEventListener('click', () => {
 });
 window.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
-  if (state.detail?.fromList) backToWindCheck();
+  if (state.follow) stopFollowing('Stopped following.');
+  else if (state.detail?.fromList) backToWindCheck();
   else if (state.detail) closeDetails();
   else if (!els.windCheck.panel.classList.contains('hidden')) {
     closeWindCheck();

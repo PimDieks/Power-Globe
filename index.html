@@ -23,7 +23,7 @@
         An interactive globe showing the weather forecast. Drag to turn it, pinch or scroll to zoom, and tap a spot to
         see its forecast. Search for an airport to see its ground conditions and the wind on each runway, or open the
         wind check for a list of airports where wind and gusts are near or over the limits. Pick a time on the timeline.
-        Live flights, military flights and satellites can be switched on under Live traffic; tap one for its details.
+        Live flights, military flights and satellites can be switched on under Live traffic; tap one for its details, and follow a flight to keep it in the middle of the view.
         Zoomed in, runways are coloured by whether they can be used in the wind.
       </p>
       <div class="panel" id="controls">
@@ -95,6 +95,7 @@
       </button>
       <div class="details-head">
         <h2 id="details-title"></h2>
+        <button id="details-follow" class="follow-button" type="button" aria-pressed="false" hidden>Follow</button>
         <button id="details-close" class="icon-button" type="button">
           <span aria-hidden="true">✕</span><span class="visually-hidden">Close details</span>
         </button>

@@ -368,7 +368,8 @@ input:focus-visible {
   outline-offset: 2px;
 }
 
-button[aria-checked='true'] {
+button[aria-checked='true'],
+button[aria-pressed='true'] {
   background: rgba(155, 209, 255, 0.24);
   border-color: var(--accent);
   color: #fff;
@@ -556,6 +557,18 @@ input:disabled {
   justify-content: space-between;
   gap: 8px;
   margin: -4px -6px 6px 0;
+}
+
+.details-head h2 {
+  flex: 1;
+  min-width: 0;
+}
+
+.follow-button {
+  margin-top: 4px;
+  padding: 4px 14px;
+  font-size: 0.8rem;
+  white-space: nowrap;
 }
 
 .side-panel h2 {

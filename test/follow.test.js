@@ -134,6 +134,10 @@ describe('phone shift', () => {
     expect(visibleShift({ top: 100, bottom: 120, height: 800 })).toBeCloseTo((400 - 140) / 800, 8);
   });
 
+  it('can be asked to keep less free', () => {
+    expect(visibleShift({ top: 100, bottom: 120, height: 800, minFree: 20 })).toBeCloseTo((400 - 110) / 800, 8);
+  });
+
   it('is nothing when the free part is centred', () => {
     expect(visibleShift({ top: 0, bottom: 800, height: 800 })).toBeCloseTo(0, 8);
   });
