@@ -256,7 +256,7 @@ describe('the part', () => {
   const context = (src, airport = () => EHAM, observation = null) => () => ({ airport: airport(), now: Date.now(), formatTick, trafficSource: src, observation });
 
   it('is in the Ops parts, after the runway, visibility and lightning parts', () => {
-    expect(OPS_PARTS.map((p) => p.id)).toEqual(['runway', 'visibility', 'lightning', 'traffic']);
+    expect(OPS_PARTS.map((p) => p.id).slice(0, 4)).toEqual(['runway', 'visibility', 'lightning', 'traffic']);
   });
 
   it('shows its fact and section in the panel, and waits for data first', () => {

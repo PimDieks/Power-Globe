@@ -25,7 +25,7 @@ export function behindGlobe(cam, x, y, z, radius) {
 }
 
 // The same test in the vertex shader, for a globe of radius sqrt(uHideRadiusSq).
-const BEHIND_GLOBE = /* glsl */ `
+export const BEHIND_GLOBE = /* glsl */ `
   uniform float uHideRadiusSq;
   bool behindGlobe(vec3 p) {
     vec3 d = p - cameraPosition;
@@ -37,7 +37,7 @@ const BEHIND_GLOBE = /* glsl */ `
     return disc > 0.0 && t > 0.0 && t < 1.0;
   }
 `;
-const hideUniform = (globe) => ({ value: (globe.getGlobeRadius() * HIDE_RADIUS) ** 2 });
+export const hideUniform = (globe) => ({ value: (globe.getGlobeRadius() * HIDE_RADIUS) ** 2 });
 
 // Plane silhouettes, nose up, white with a dark outline so they read over any map or weather.
 function planeTexture() {

@@ -31,6 +31,8 @@ import { formatClock, formatClockShort, formatTick, zoneName } from './opsclock.
 import { afterDeselect, backAction, escapeAction, opsKeepsWatching, opsReturnFor } from './opsreturn.js';
 import { releaseLightning, setLightningOverlay } from './opslightningview.js';
 import { setupLightningOverlay } from './lightningmap.js';
+import { releaseAccess, setAccessOverlay } from './opsaccessview.js';
+import { setupAccessOverlay } from './accessmap.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
@@ -337,6 +339,8 @@ const airportMap = setupAirportMap({
 
 // The Ops tab's lightning part draws its rings and image on the map through this.
 setLightningOverlay(setupLightningOverlay(globe));
+// The Ops tab's access part draws the road traffic through this: dots at the measurement sites, lines for jams and closures.
+setAccessOverlay(setupAccessOverlay(globe));
 
 // What the Ops tab's traffic part reads from the page and asks of it (see opstrafficview.js).
 const opsTraffic = {
@@ -1234,6 +1238,7 @@ async function showAirport(airport, { fromList = false } = {}) {
   const detail = { airport, hourly: null, fromList, observation: undefined, taf: undefined, error: null };
   // The lightning of the airport that was open stops now, not when the new one has its forecast.
   releaseLightning();
+  releaseAccess();
   state.opsReturn = null;
   setBackLabel('Wind check');
   state.detail = detail;

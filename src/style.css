@@ -2385,3 +2385,102 @@ body:not(.idle) #caption {
     0 0 0 1.5px rgba(0, 0, 0, 0.7),
     0 0 0 3.5px var(--accent);
 }
+
+/* The Ops access part: jams and incidents, slow stretches, and the key to the dots on the map. */
+.ops-access h4 {
+  margin: 14px 0 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.access-list {
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.access-list li {
+  display: grid;
+  grid-template-columns: 5.4rem 1fr;
+  align-items: baseline;
+  gap: 2px 8px;
+  padding: 4px 0;
+  border-top: 1px solid var(--panel-border);
+}
+
+.access-list .ops-note {
+  grid-column: 2;
+}
+
+.access-stretches li {
+  display: block;
+}
+
+.access-list li:first-child {
+  border-top: 0;
+}
+
+.access-badge {
+  justify-self: start;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.access-jam .access-badge {
+  color: #ff8a80;
+}
+
+.access-accident .access-badge {
+  color: #e6a0ff;
+}
+
+.access-closure .access-badge {
+  color: var(--muted);
+}
+
+.access-dot {
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  margin-right: 2px;
+  border: 1px solid #2a3140;
+  border-radius: 50%;
+  vertical-align: baseline;
+}
+
+.access-green {
+  background: #7ee2a8;
+}
+
+.access-amber {
+  background: #ffc857;
+}
+
+.access-red {
+  background: #ff5a4f;
+}
+
+.access-grey {
+  background: #9aa3b2;
+}
+
+.side-panel p.access-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin: 8px 0 6px;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.side-panel p.access-old {
+  margin: 0 0 6px;
+  color: var(--caution);
+  font-size: 0.8rem;
+}
