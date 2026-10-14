@@ -1,16 +1,24 @@
-// Lightning on the map while an airport's Ops tab is open: rings at 5, 10, 20 and 30 km around the
-// airport, and the newest lightning image in its place on the globe, in warm colours that are clear
-// where there is lightning and see-through where there is none. One mesh, one canvas and one
-// texture, drawn into again when the image changes, so nothing is allocated while the map is drawn.
-// All of it is made when first shown and let go of on hide.
+// Lightning on the map while an airport's Weather tab is open: rings at 5, 10, 20 and 30 km around
+// the airport, and the newest lightning image in its place on the globe, in warm colours that are
+// clear where there is lightning and see-through where there is none. The image is one mesh with one
+// canvas and one texture, drawn into again when the image changes, so nothing is allocated while the
+// map is drawn. The rings are real geometry, ribbons a few screen pixels wide like the flight lines,
+// so they stay sharp at any zoom (a texture over the whole window is soft at airport zoom). All of
+// it is made when first shown and let go of on hide.
 import * as THREE from 'three';
 import { MAX_COUNT, RING_KM, countsFromImage } from './lightning.js';
+import { destination } from './runwaymap.js';
+import { flightLine } from './trafficlayer.js';
 
 const RAD = Math.PI / 180;
 const KM_PER_DEG = 111.195;
 export const OVERLAY_RINGS_KM = RING_KM;
 // The picture is drawn on a canvas this many pixels square, covering the window of the images.
 export const CANVAS_PX = 1024;
+// A ring is drawn as this many straight segments, which is smooth at any zoom the airport map has.
+export const RING_SEGMENTS = 128;
+// The width of a ring on the screen, in pixels: a white core with a dark edge.
+export const RING_PX = 4;
 // The window is laid on the globe as a grid of this many squares each way, to follow its curve.
 const GRID = 12;
 // The ring labels are this many screen pixels tall, which makes their text about the size of the map's own labels (12 px).
@@ -51,7 +59,8 @@ export function setupLightningOverlay(globe) {
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, sizeAttenuation: false, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6, toneMapped: false }));
-    sprite.renderOrder = 4;
+    // Over the rings, which a label sits on.
+    sprite.renderOrder = 4.6;
     sprite.raycast = () => {};
     sprite.userData.km = km;
     return sprite;
@@ -93,7 +102,9 @@ export function setupLightningOverlay(globe) {
     scene.add(mesh);
     const labels = OVERLAY_RINGS_KM.map(label);
     for (const sprite of labels) scene.add(sprite);
-    return { canvas, ctx, stage, stageCtx: stage.getContext('2d'), texture, positions, geometry, mesh, labels, drawn: { geometry: null, image: null } };
+    // Over the lightning image, under the runways and aircraft.
+    const rings = OVERLAY_RINGS_KM.map(() => flightLine(globe, { color: [1, 1, 1], width: RING_PX, alpha: 0.95, renderOrder: 4.5 }));
+    return { canvas, ctx, stage, stageCtx: stage.getContext('2d'), texture, positions, geometry, mesh, labels, rings, drawn: { geometry: null, image: null } };
   }
 
   function teardown() {
@@ -102,6 +113,12 @@ export function setupLightningOverlay(globe) {
     live.geometry.dispose();
     live.mesh.material.dispose();
     live.texture.dispose();
+    for (const ring of live.rings) {
+      scene.remove(ring.mesh);
+      ring.mesh.geometry.dispose();
+      ring.mesh.material.dispose();
+    }
+    globalThis.window?.removeEventListener?.('resize', fitRings);
     for (const sprite of live.labels) {
       scene.remove(sprite);
       sprite.material.map.dispose();
@@ -126,6 +143,27 @@ export function setupLightningOverlay(globe) {
       }
     }
     live.geometry.attributes.position.needsUpdate = true;
+  }
+
+  // The rings' width is in screen pixels, so they need the size of the screen.
+  function fitRings() {
+    const w = globalThis.window;
+    for (const ring of live?.rings ?? []) ring.setViewport(w?.innerWidth || 1, w?.innerHeight || 1);
+  }
+
+  // Each ring is a circle of its radius around the airport, on the globe.
+  function placeRings(g) {
+    const r = R * 1.0002;
+    live.rings.forEach((ring, k) => {
+      const flat = [];
+      for (let i = 0; i <= RING_SEGMENTS; i++) {
+        const p = destination({ lat: g.lat, lng: g.lon }, (360 * i) / RING_SEGMENTS, OVERLAY_RINGS_KM[k] * 1000);
+        const lat = p.lat * RAD;
+        const lng = p.lng * RAD;
+        flat.push(r * Math.cos(lat) * Math.sin(lng), r * Math.sin(lat), r * Math.cos(lat) * Math.cos(lng));
+      }
+      ring.set(flat);
+    });
   }
 
   // Each label sits on its ring, at the north. They are the same size on the screen whatever the
@@ -160,18 +198,6 @@ export function setupLightningOverlay(globe) {
       ctx.drawImage(stage, 0, 0, CANVAS_PX, CANVAS_PX);
       ctx.restore();
     }
-    // The window is 2 * halfKm across and the rings are circles around its middle.
-    const mid = CANVAS_PX / 2;
-    for (const km of OVERLAY_RINGS_KM) {
-      ctx.beginPath();
-      ctx.arc(mid, mid, (km / (2 * g.halfKm)) * CANVAS_PX, 0, 2 * Math.PI);
-      ctx.lineWidth = 3.2;
-      ctx.strokeStyle = 'rgba(5, 8, 15, 0.7)';
-      ctx.stroke();
-      ctx.lineWidth = 1.3;
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
-      ctx.stroke();
-    }
     live.texture.needsUpdate = true;
   }
 
@@ -179,16 +205,22 @@ export function setupLightningOverlay(globe) {
     // `geometry` is the airport's window (see makeGeometry in lightning.js), `image` the newest
     // decoded lightning image ({ width, height, data }) or null.
     show({ geometry: g, image }) {
-      live ??= build();
+      if (!live) {
+        live = build();
+        globalThis.window?.addEventListener?.('resize', fitRings);
+      }
+      fitRings();
       if (live.drawn.geometry !== g) {
         place(g.bbox);
+        placeRings(g);
         placeLabels(g);
       }
+      for (const ring of live.rings) ring.mesh.visible = true;
       if (live.drawn.geometry !== g || live.drawn.image !== image) paint(g, image);
       live.drawn = { geometry: g, image };
       live.mesh.visible = true;
     },
-    // Takes the mesh, the canvases and the texture away; they are made again at the next show.
+    // Takes the mesh, the rings, the canvases and the texture away; they are made again at the next show.
     hide: teardown,
     dispose: teardown,
   };

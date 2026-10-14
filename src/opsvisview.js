@@ -3,6 +3,7 @@
 // the handling of the hours (hover, keys, dragging across them, the clock). It is a part for ops.js,
 // and shares nothing with the runway part but the helper that finds the hour under the pointer.
 import { escapeHtml } from './airportview.js';
+import { FORECAST_STALE_MS, oldestStamp } from './opsfact.js';
 import { CLOCK_CHECK_MS, hourIndexAt } from './opsrunwayview.js';
 import {
   DEFAULT_LVP_LIMITS,
@@ -270,12 +271,16 @@ export function unbind() {
 
 export const visibilityPart = {
   id: 'visibility',
+  tab: 'weather',
   title: 'Low visibility outlook',
   factLabel: 'Visibility',
   // What the part reads from the context.
   needs: ['hourly', 'observation', 'taf', 'time', 'now', 'formatClock', 'formatClockShort', 'formatTick', 'zone'],
   analyse: (ctx) => visibilityOutlook({ hourly: ctx.hourly, observation: ctx.observation, taf: ctx.taf, now: ctx.now, limits: readLimits() }),
-  fact: (outlook, ctx) => visibilityFact(outlook, ctx.formatClock),
+  // Worked out from the forecast and the METAR, each fetched once when the airport is opened (the TAF
+  // is read for the section and the outlook, and is not stamped).
+  staleAfterMs: FORECAST_STALE_MS,
+  fact: (outlook, ctx) => ({ ...visibilityFact(outlook, ctx.formatClock), asOf: oldestStamp(ctx.hourlyAsOf, ctx.observation ? ctx.observationAsOf : undefined) }),
   html: visibilitySectionHtml,
   bind,
   unbind,

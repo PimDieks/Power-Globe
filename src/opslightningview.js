@@ -3,7 +3,6 @@
 // tab is open (the lightning monitor, and the rings and image on the map). It is a part for ops.js.
 import { escapeHtml } from './airportview.js';
 import { LightningMonitor, RING_KM, isCovered, loadFrameImage, makeGeometry } from './lightning.js';
-import { factItemHtml } from './opsfact.js';
 import { LEVEL_STATUS, analyseLightning, lightningFact, motionLine, trendText } from './opslightning.js';
 
 // The compass is drawn 200 units wide, the airport in the middle and the outer ring (30 km) at
@@ -127,7 +126,15 @@ export function releaseLightning() {
   halt();
 }
 
+// The session: { api, root, watching, paused, key, airport, startTimer, result, geometry, overlay, covers,
+// images, monitor }. It runs while the part is bound (its tab is shown, with `root` and the map's
+// rings and image) or watching (summary mode: the same images and monitor, nothing drawn on the map
+// or in a section). It is paused while the page is hidden.
 let bound = null;
+
+// In summary mode the monitor starts this long after an airport is opened, so that flicking through
+// airports asks for nothing. With the tab shown it starts at once.
+export const START_DELAY_MS = 1500;
 
 // The monitor, with the newest image of each airport it has looked at, is made once and kept
 // between binds: opening the tab again at an airport only asks for what is new. Both are bounded
@@ -167,9 +174,52 @@ function makeHolder(deps) {
   return { images, monitor: deps.createMonitor ? deps.createMonitor(options) : new LightningMonitor(options) };
 }
 
+// Whether the rings and image are drawn: the tab is shown and its map profile turns them on.
+function mapOn(state) {
+  if (!state.root) return false;
+  const profile = state.api.mapProfile?.();
+  return profile ? profile.lightning : true;
+}
+
+function showOverlay(state) {
+  if (mapOn(state)) state.overlay?.show({ geometry: state.geometry, image: state.images.get(state.key)?.image ?? null });
+}
+
+// Starts the monitor for the airport being followed: at once with the tab shown, after a short wait
+// in summary mode; not at all while the page is hidden (it starts when the page is shown again).
+function startLooking() {
+  const state = bound;
+  if (!state || state.key === null || state.paused) return;
+  state.clearTimer(state.startTimer);
+  state.startTimer = null;
+  const go = () => {
+    state.startTimer = null;
+    if (bound === state && state.key !== null && !state.paused) state.monitor.start(state.airport);
+  };
+  if (state.root || !state.delayMs) go();
+  else state.startTimer = state.setTimer(go, state.delayMs);
+}
+
+// The page is hidden: nothing is fetched meanwhile. Shown again: it goes on.
+function onVisibility() {
+  const state = bound;
+  if (!state) return;
+  if (globalThis.document?.hidden) {
+    state.paused = true;
+    state.clearTimer(state.startTimer);
+    state.startTimer = null;
+    if (state.key !== null) state.monitor.stop();
+  } else if (state.paused) {
+    state.paused = false;
+    startLooking();
+  }
+}
+
 // Stops looking and takes the map's part away, if an airport is being looked at.
 function halt() {
   if (!bound || bound.key === null) return;
+  bound.clearTimer(bound.startTimer);
+  bound.startTimer = null;
   bound.monitor.stop();
   bound.key = null;
   bound.result = null;
@@ -186,13 +236,14 @@ function follow(airport) {
   halt();
   if (!bound.covers(airport.lat, airport.lng)) return null;
   bound.key = key;
+  bound.airport = { lat: airport.lat, lon: airport.lng };
   bound.geometry = makeGeometry(airport.lat, airport.lng);
-  bound.overlay?.show({ geometry: bound.geometry, image: bound.images.get(key)?.image ?? null });
-  bound.monitor.start({ lat: airport.lat, lon: airport.lng });
+  showOverlay(bound);
+  startLooking();
   return null;
 }
 
-// A result came in: draws the section and its fact in the strip again, and the map.
+// A result came in: draws the section if the tab is shown, and the summary line, and the map.
 function update(result) {
   const state = bound;
   if (!state || state.key === null) return;
@@ -203,30 +254,84 @@ function update(result) {
     return;
   }
   state.result = result;
-  const data = analyseLightning({ airport: ctx.airport, hourly: ctx.hourly, now: ctx.now, result });
-  const inner = state.root.querySelector('[data-part="lightning"] .ops-lightning');
-  if (inner) inner.innerHTML = lightningInnerHtml(data, ctx);
-  const item = state.root.querySelector('.ops-strip li[data-part="lightning"]');
-  if (item) item.outerHTML = factItemHtml(lightningPart, lightningFact(data));
-  state.overlay?.show({ geometry: state.geometry, image: state.images.get(state.key)?.image ?? null });
+  if (state.root) {
+    const data = analyseLightning({ airport: ctx.airport, hourly: ctx.hourly, now: ctx.now, result });
+    const inner = state.root.querySelector('[data-part="lightning"] .ops-lightning');
+    if (inner) inner.innerHTML = lightningInnerHtml(data, ctx);
+    showOverlay(state);
+  }
+  state.api.refreshSummary?.();
 }
 
-// Called when the Ops tab is shown. `deps` are for tests.
-export function bind(root, api, deps = {}) {
-  unbind();
+function open(api, deps) {
   const holder = deps.createMonitor ? makeHolder(deps) : (shared ??= makeHolder(deps));
-  bound = { root, api, key: null, result: null, geometry: null, overlay: deps.overlay ?? overlay, covers: deps.covers ?? isCovered, ...holder };
+  bound = {
+    root: null,
+    api,
+    watching: false,
+    paused: globalThis.document?.hidden === true,
+    key: null,
+    airport: null,
+    startTimer: null,
+    delayMs: deps.delayMs ?? START_DELAY_MS,
+    setTimer: deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms)),
+    clearTimer: deps.clearTimer ?? ((timer) => clearTimeout(timer)),
+    result: null,
+    geometry: null,
+    overlay: deps.overlay ?? overlay,
+    covers: deps.covers ?? isCovered,
+    ...holder,
+  };
+  globalThis.document?.addEventListener?.('visibilitychange', onVisibility);
 }
 
-// Called when the tab goes, or the panel closes: nothing is fetched or drawn after.
+// Called when the panel is open on another tab: the lightning is looked at for the summary line,
+// with nothing drawn. `deps` are for tests.
+export function watch(api, deps = {}) {
+  if (!bound) open(api, deps);
+  bound.watching = true;
+}
+
+export function unwatch() {
+  if (!bound) return;
+  bound.watching = false;
+  if (!bound.root) end();
+}
+
+// Called when the Weather tab is shown: the section and the map are kept up to date. `deps` are
+// for tests.
+export function bind(root, api, deps = {}) {
+  if (!bound?.watching) unbind();
+  if (!bound) open(api, deps);
+  bound.root = root;
+  bound.api = api;
+  // An airport already looked at for the summary line gets its rings and image now, and no more waiting.
+  if (bound.key !== null) {
+    showOverlay(bound);
+    if (bound.startTimer) startLooking();
+  }
+}
+
+// Called when the tab goes: the map is cleared, and the lightning is looked at no longer unless the
+// summary line still watches it.
 export function unbind() {
   if (!bound) return;
+  if (bound.root) bound.overlay?.hide();
+  bound.root = null;
+  if (!bound.watching) end();
+}
+
+// Nothing is fetched or drawn after.
+function end() {
   halt();
+  globalThis.document?.removeEventListener?.('visibilitychange', onVisibility);
   bound = null;
 }
 
 export const lightningPart = {
   id: 'lightning',
+  tab: 'weather',
+  overlay: 'lightning',
   title: 'Storms and lightning',
   factLabel: 'Lightning',
   needs: ['airport', 'hourly', 'now', 'zone'],
@@ -235,4 +340,7 @@ export const lightningPart = {
   html: lightningSectionHtml,
   bind,
   unbind,
+  watch,
+  unwatch,
+  release: releaseLightning,
 };

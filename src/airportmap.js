@@ -4,6 +4,7 @@ import { airportWeather, conditionsAt, loadAirports } from './airports.js';
 import { STATUS, assessAirport, formatWind } from './runways.js';
 import { viewBounds } from './detail.js';
 import { CITIES, labelTier } from './cities.js';
+import { airportView, runwayEndText } from './mapprofile.js';
 import { destination, localFrame, placeLabels, runwayEnds, runwayStatus, setupRunways } from './runwaymap.js';
 
 // Altitude to fly to an airport at: low enough to make out its runways.
@@ -107,6 +108,8 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
   const retryAt = new Map();
   let selected = null;
   let runwayUse = null;
+  // What the open airport's tab says to show (see mapprofile.js), or null.
+  let profile = null;
   // Ident of the selected airport's label while it is shown on its own (see showAlone), if it is.
   let alone = null;
 
@@ -156,20 +159,20 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     if (ident === alone && !again) return;
     alone = ident;
     const flag = getProblems().find((p) => p.airport.ident === ident)?.status;
-    const label = selected && { ...airportLabel(selected, flag), lat: selected.lat, lng: selected.lng };
+    const label = selected && { ...airportLabel(selected, flag, profile && !profile.runwayStatus), lat: selected.lat, lng: selected.lng };
     mapFeatures.setRunwayLabels(label ? [label] : [], onSelect);
   }
 
   // The label that says where an airfield is: its code and closer in its name, coloured by its wind
   // status (`flag`: the wind check's status for it, which also badges the label).
-  function airportLabel(airport, flag) {
+  function airportLabel(airport, flag, plain = false) {
     const code = airport.iata || airport.ident;
     const named = (pov?.altitude ?? 1) < 0.15;
     return {
       key: `${airport.ident}:airport`,
       kind: 'airport',
       airport,
-      status: flag ?? statusOf(airport, getTime(), getLimits()).status,
+      status: plain ? 'unknown' : (flag ?? statusOf(airport, getTime(), getLimits()).status),
       flag: Boolean(flag),
       text: named ? `${code} ${shortName(airport)}` : code,
       title: flag ? `${airport.name}: ${STATUS[flag].label} in the wind check; open the runway check` : `${airport.name}: open the runway check`,
@@ -249,9 +252,10 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     const withWind = new Set();
     for (const airport of shown) {
       const { conditions, endStatus } = statusOf(airport, time, limits);
+      const view = airportView(airport, selected, profile);
       for (const runway of airport.runways) {
         const ends = runwayEnds(airport, runway);
-        strips.push({ ends, widthFt: runway.widthFt, status: runwayStatus(runway, endStatus) });
+        strips.push({ ends, widthFt: runway.widthFt, status: view.runwayStatus ? runwayStatus(runway, endStatus) : 'unknown' });
         const [a, b] = ends.map(frame.toXY);
         // As drawn: at least 5 px wide, plus its outline.
         segments.push({ a, b, r: Math.max(runway.widthFt * 0.3048, 5 * mpp) / 2 + 1.5 * mpp });
@@ -261,18 +265,18 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
         // Each end's label goes beyond its threshold, on the extended centreline if that is free.
         [runway.le, runway.he].forEach((ident, k) => {
           if (!ident) return;
-          const status = endStatus.get(ident) ?? 'unknown';
-          // Seen in use by the Ops tab's traffic (see setRunwayUse): ARR, DEP or both.
-          const use = runwayUse?.ident === airport.ident ? runwayUse.ends[ident] : null;
-          const text = `${ident} ${STATUS[status].icon}${use ? ` ${use.tag}` : ''}`;
+          const status = view.runwayStatus ? (endStatus.get(ident) ?? 'unknown') : 'unknown';
+          // Seen in use by the traffic (see setRunwayUse), while the Traffic tab shows it: ARR, DEP or both.
+          const use = view.runwayUse && runwayUse?.ident === airport.ident ? runwayUse.ends[ident] : null;
+          const text = runwayEndText(ident, STATUS[status].icon, use, view);
           wanted.push({
             label: {
-              key: `${airport.ident}:${ident}:${status}:${use?.tag ?? ''}`,
+              key: `${airport.ident}:${ident}:${status}:${use?.tag ?? ''}:${text}`,
               kind: 'runway',
               status,
               use: Boolean(use),
               text,
-              title: `Runway ${ident}: ${STATUS[status].label}${use ? `. ${use.title}` : ''}`,
+              title: view.runwayStatus ? `Runway ${ident}: ${STATUS[status].label}${use ? `. ${use.title}` : ''}` : `Runway ${ident}${use ? `. ${use.title}` : ''}`,
             },
             anchor: k ? b : a,
             direction: k ? along : { x: -along.x, y: -along.y },
@@ -282,7 +286,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
           });
         });
       }
-      if (showEnds && conditions) {
+      if (showEnds && conditions && view.windLabels) {
         withWind.add(airport.ident);
         const text = `${airport.iata || airport.ident} · ${formatWind(conditions)}`;
         wanted.push({
@@ -316,8 +320,10 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     );
     for (const airport of candidates) {
       if (withWind.has(airport.ident)) continue;
-      const flag = flagged.get(airport.ident);
-      const label = airportLabel(airport, flag);
+      // The open airport's label has no wind colours while its tab leaves them off.
+      const plain = !airportView(airport, selected, profile).runwayStatus;
+      const flag = plain ? undefined : flagged.get(airport.ident);
+      const label = airportLabel(airport, flag, plain);
       // Room for the plane, and for a flagged airport its status badge.
       const extra = (flag ? 50 : 30) + (label.selected ? 6 : 0);
       const always = flag || label.selected;
@@ -364,6 +370,13 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     refresh();
   }
 
+  // The map profile of the open airport's tab (see mapprofile.js); null when the panel is closed.
+  function setProfile(next) {
+    if (next === profile) return;
+    profile = next;
+    refresh();
+  }
+
   // Whether the camera follows an aircraft, which is why it keeps moving (see MOVING_UPDATE_MS).
   function setFollowing(on) {
     following = on;
@@ -372,7 +385,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     moving = null;
   }
 
-  return { view, refresh, select, setFollowing, setRunwayUse };
+  return { view, refresh, select, setFollowing, setRunwayUse, setProfile };
 }
 
 // The distinctive part of an airport's name: "Amsterdam Airport Schiphol" → "Schiphol".
