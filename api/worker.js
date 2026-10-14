@@ -14,6 +14,10 @@
 //   GET /forecast?<Open-Meteo query>  Open-Meteo forecasts (up to 100 places), cached 30 min
 //   GET /tiles/openaip/<z>/<x>/<y>.png  aeronautical chart tiles (openAIP: airspaces, airports,
 //                                 navaids), cached 1 day; needs OPENAIP_API_KEY
+//   GET /access/roads?airport=EHAM  road traffic around a Dutch airport (NDW open data, read by the
+//                                 flight relay, which is too much for a Worker), cached 1 min; a
+//                                 backup up to 10 min old is marked stale; says so when the
+//                                 relay is off or its road job (NDW=1) is not switched on
 //
 // The flight feeds limit or refuse Cloudflare's servers, whose addresses many sites share. With
 // a flight relay (relay/api-relay.mjs) running on a machine of one's own, such as a Raspberry Pi at
@@ -55,6 +59,9 @@ export const TRACKS_PER_HOUR_ANONYMOUS = 1;
 export const TRACK_RATE_LIMIT = 10;
 // Answers kept to serve when a service fails or limits us.
 const BACKUP_SECONDS = 6 * 3600;
+// Road traffic is only worth showing while it is recent.
+export const ACCESS_BACKUP_SECONDS = 600;
+const ACCESS_SECONDS = 60;
 // Give up on a service after this long, and remember a failure for a while so that neither the
 // service nor visitors are kept waiting on it again straight away.
 const UPSTREAM_TIMEOUT_MS = 10_000;
@@ -276,6 +283,58 @@ async function takeTrackTurn(cache, origin, env) {
   }
 }
 
+const unavailable = (airport, reason) =>
+  new Response(JSON.stringify({ available: false, airport, reason }), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${ACCESS_SECONDS}`, 'X-Power-Globe-Unavailable': '1' },
+  });
+
+// Road traffic near a Dutch airport, from the road job of the flight relay (NDW data: speeds at
+// measurement sites and the jams, accidents and closures, within 25 km). Its answer is passed on
+// unread, with "available" added: reading and rewriting it would take longer than the free plan's
+// 10 ms of processing time. That the relay is off, or has no road job, is an answer, not a failure.
+async function accessRoads(url, fetchFn, env) {
+  const airport = (url.searchParams.get('airport') ?? '').toUpperCase();
+  if (!/^[A-Z]{4}$/.test(airport)) throw new HttpError(400, 'airport: a 4-letter ICAO code');
+  if (!relayOn(env)) return unavailable(airport, 'The API has no flight relay, which the road data comes through');
+  let res;
+  let text;
+  try {
+    res = await fetchFn(`${env.FLIGHT_RELAY_URL.replace(/\/+$/, '')}/ndw/${airport}`, {
+      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json', 'X-Relay-Key': env.FLIGHT_RELAY_KEY },
+      signal: AbortSignal.timeout(RELAY_TIMEOUT_MS),
+    });
+    text = await res.text();
+  } catch (err) {
+    throw new HttpError(502, `The relay is unreachable (${err.message})`);
+  }
+  if (res.ok) {
+    if (!text.startsWith('{') || text.length < 3) throw new HttpError(502, 'The relay answered without road data');
+    return new Response(`{"available":true,${text.slice(1)}`, { headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${ACCESS_SECONDS}` } });
+  }
+  let body = {};
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // Not JSON: not an answer of the road job.
+  }
+  if (res.status === 503 && body.ndw === 'off') return unavailable(airport, "The relay's road job is switched off (NDW=1 in its settings)");
+  if (res.status === 404 && body.ndw === 'on') return unavailable(airport, `No road data for ${airport}`);
+  if (res.status === 404 && !body.ndw) return unavailable(airport, 'The relay does not have the road job yet; update it');
+  throw new HttpError(502, `The relay answered ${res.status}${body.error ? ` (${body.error})` : ''}`);
+}
+
+// A backup of the road answer as a stale answer with its age, or undefined once it is older than
+// the road data is worth. Done on the text: parsing it would cost more than the free plan allows.
+async function staleAccess(backup, now = Date.now()) {
+  if (!backup) return undefined;
+  const text = await backup.text();
+  const age = now - Number(/"fetched":(\d+)/.exec(text)?.[1]);
+  if (!(age >= 0) || age > ACCESS_BACKUP_SECONDS * 1000 || !text.startsWith('{')) return undefined;
+  return new Response(`{"stale":true,"ageSeconds":${Math.round(age / 1000)},${text.slice(1)}`, {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=30', 'X-Power-Globe-Backup': '1' },
+  });
+}
+
 // Where an answer is kept in the edge cache. A track is kept per aircraft, whatever else the
 // request carries (the case of the address, other parameters), so that none of those can ask
 // OpenSky again for the same aircraft.
@@ -289,6 +348,7 @@ function cacheUrl(url) {
   if (path === '/metar' || path === '/taf') {
     return `${url.origin}${path}?ids=${(url.searchParams.get('ids') ?? '').toUpperCase()}`;
   }
+  if (path === '/access/roads') return `${url.origin}${path}?airport=${(url.searchParams.get('airport') ?? '').toUpperCase()}`;
   return url.toString();
 }
 
@@ -309,7 +369,7 @@ export async function route(url, env = {}, fetchFn = fetch, cache) {
     return json(
       {
         name: 'Power Globe API',
-        routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/track?icao24=', '/metar?ids=', '/taf?ids=', '/satellites/<group>', '/forecast?', '/tiles/openaip/<z>/<x>/<y>.png'],
+        routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/track?icao24=', '/metar?ids=', '/taf?ids=', '/access/roads?airport=', '/satellites/<group>', '/forecast?', '/tiles/openaip/<z>/<x>/<y>.png'],
         opensky: openskyAccount(env) ? 'account' : 'anonymous',
         chart: env.OPENAIP_API_KEY ? 'openAIP' : 'no key',
         relay: relayOn(env) ? 'on' : 'off',
@@ -317,6 +377,7 @@ export async function route(url, env = {}, fetchFn = fetch, cache) {
       300,
     );
   }
+  if (path === '/access/roads') return accessRoads(url, fetchFn, env);
   if (path === '/flights/global') {
     const res = await upstream(fetchFn, 'https://opensky-network.org/api/states/all?extended=1', { headers: await openskyHeaders(fetchFn, env) }, env);
     // Passed on unread: reading and rewriting the worldwide answer (over 1 MB) takes longer than
@@ -418,7 +479,8 @@ export default {
     const url = new URL(request.url);
     const cache = globalThis.caches?.default;
     const key = new Request(cacheUrl(url), { method: 'GET' });
-    const backupKey = new Request(`${url.origin}/__backup${url.pathname}${url.search}`, { method: 'GET' });
+    const isAccess = url.pathname.replace(/\/+$/, '') === '/access/roads';
+    const backupKey = new Request(isAccess ? `${new URL(cacheUrl(url)).origin}/__backup/access/roads${new URL(cacheUrl(url)).search}` : `${url.origin}/__backup${url.pathname}${url.search}`, { method: 'GET' });
     const isTrack = url.pathname.replace(/\/+$/, '') === '/track';
     // An old track would draw a flight that is long over, and an old METAR or TAF would pass for the
     // current one (a TAF that has been replaced most of all), so these have no backup copy.
@@ -438,19 +500,23 @@ export default {
         res = await route(url, env, fetch, cache);
         if (cache && !backedUp) {
           ctx?.waitUntil(cache.put(key, res.clone()));
+        } else if (cache && res.headers.has('X-Power-Globe-Unavailable')) {
+          // Nothing to fall back on later: there was no road data.
+          ctx?.waitUntil(cache.put(key, res.clone()));
         } else if (cache) {
           const backup = new Response(res.clone().body, res);
-          backup.headers.set('Cache-Control', `public, max-age=${BACKUP_SECONDS}`);
+          backup.headers.set('Cache-Control', `public, max-age=${isAccess ? ACCESS_BACKUP_SECONDS : BACKUP_SECONDS}`);
           ctx?.waitUntil(Promise.all([cache.put(key, res.clone()), cache.put(backupKey, backup)]));
         }
       } catch (err) {
         // Serve the last good answer rather than asking a failing or limiting service again.
-        res = backedUp ? await cache?.match(backupKey) : undefined;
-        if (res) {
+        // Road traffic is marked stale with its age, and not served at all once it is too old.
+        res = isAccess ? await staleAccess(await cache?.match(backupKey)) : backedUp ? await cache?.match(backupKey) : undefined;
+        if (res && !isAccess) {
           res = new Response(res.body, res);
           res.headers.set('X-Power-Globe-Backup', '1');
           res.headers.set('Cache-Control', 'public, max-age=60');
-        } else {
+        } else if (!res) {
           res = new Response(JSON.stringify({ error: err.message }), {
             status: err.status ?? 502,
             headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${Math.max(1, Math.min(FAILURE_SECONDS, err.cacheSeconds ?? FAILURE_SECONDS))}` },
@@ -461,6 +527,7 @@ export default {
       }
     }
     const out = new Response(res.body, res);
+    out.headers.delete('X-Power-Globe-Unavailable');
     for (const [k, v] of Object.entries(cors)) out.headers.set(k, v);
     return out;
   },
