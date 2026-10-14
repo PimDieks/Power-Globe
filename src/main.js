@@ -29,6 +29,7 @@ import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
 import { DragTracker, dragged, followStep, startFollow, stopReason, shiftedLat, visibleShift } from './follow.js';
+import { setupPilotView, trafficPov } from './pilotview.js';
 import { CARD_REFRESH_MS, cardText, focusTarget, followLayout, freeArea, spokenDue, spokenText } from './followcard.js';
 import { latestObservation } from './metar.js';
 import { explain } from './api.js';
@@ -101,12 +102,14 @@ const els = {
   searchStatus: document.getElementById('search-status'),
   detailsBack: document.getElementById('details-back'),
   detailsFollow: document.getElementById('details-follow'),
+  detailsPilot: document.getElementById('details-pilot'),
   detailsMinimise: document.getElementById('details-minimise'),
   followCard: document.getElementById('follow-card'),
   followCardOpen: document.getElementById('follow-card-open'),
   followCardName: document.getElementById('follow-card-name'),
   followCardLine: document.getElementById('follow-card-line'),
   followCardStop: document.getElementById('follow-card-stop'),
+  followCardPilot: document.getElementById('follow-card-pilot'),
   followCardLive: document.getElementById('follow-card-live'),
   creditsToggle: document.getElementById('credits-toggle'),
   traffic: {
@@ -228,6 +231,40 @@ const traffic = setupTraffic({
     els.details.classList.add('hidden');
   },
   onFlightEnds: (ends) => mapFeatures.setFlightEnds(ends),
+  announce: (message) => announce(message),
+});
+
+// The outside view from the selected aircraft. The globe stops drawing while it is open; the
+// traffic keeps being updated, so the aircraft's reports keep coming (see pilotview.js).
+const pilot = setupPilotView({
+  els: {
+    root: document.getElementById('pilot'),
+    map: document.getElementById('pilot-map'),
+    title: document.getElementById('pilot-title'),
+    status: document.getElementById('pilot-status'),
+    terrain: document.getElementById('pilot-terrain'),
+    terrainCredit: document.getElementById('pilot-terrain-credit'),
+    close: document.getElementById('pilot-close'),
+    button: els.detailsPilot,
+    cardButton: els.followCardPilot,
+    detailsClose: els.detailsClose,
+    hud: {
+      alt: document.getElementById('pilot-alt'),
+      altUnit: document.getElementById('pilot-alt-unit'),
+      gs: document.getElementById('pilot-gs'),
+      trk: document.getElementById('pilot-trk'),
+    },
+  },
+  traffic,
+  background: () => [...document.body.children].filter((el) => !['pilot', 'announcer'].includes(el.id) && el.tagName !== 'SCRIPT'),
+  onOpen: () => globe.pauseAnimation(),
+  onClose: () => globe.resumeAnimation(),
+  // Where focus goes when the view closes and the button it was opened from is not on screen.
+  afterClose: () => {
+    if (!traffic.selectedAircraft()) return els.globe;
+    if (followLayoutNow === 'card') return els.followCardPilot;
+    return els.details.classList.contains('hidden') ? els.globe : null;
+  },
   announce: (message) => announce(message),
 });
 const windCheck = setupWindCheck({
@@ -523,7 +560,8 @@ let lastTrafficRender = 0;
 function tick(now) {
   const dt = Math.min(0.1, (now - lastFrame) / 1000);
   lastFrame = now;
-  if (state.forecast) {
+  // The weather is not drawn while the pilot view covers the globe.
+  if (state.forecast && !pilot.isOpen) {
     const last = state.forecast.times.length - 1;
     if (state.playing) {
       state.t += (dt * PLAY_HOURS_PER_SECOND) / state.stepHours;
@@ -549,11 +587,12 @@ function tick(now) {
   // Live traffic is extra: a problem with it must not stop the globe.
   try {
     updateFollow();
-    traffic.frame(now, globe.pointOfView());
+    traffic.frame(now, trafficPov(globe.pointOfView(), pilot.position()));
   } catch (err) {
     console.error(err);
   }
   syncFollowButton();
+  pilot.sync();
   syncFollowUi();
   // Live positions change all the time; refresh the open aircraft or satellite every second.
   if (state.detail?.traffic && now - lastTrafficRender > 1000) {
@@ -1290,6 +1329,10 @@ els.windCheckClose.addEventListener('click', () => {
 });
 window.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
+  if (pilot.isOpen) {
+    pilot.close();
+    return;
+  }
   // Open credits close first.
   if (document.body.classList.contains('credits-open')) {
     setCreditsOpen(false);

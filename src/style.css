@@ -84,6 +84,11 @@ body {
   z-index: 0;
 }
 
+/* Focus can be sent here (when a view closes and nothing else is on screen), not seen. */
+#globe:focus {
+  outline: none;
+}
+
 /* Zoomed-in wind particles, drawn over the globe at screen resolution. */
 .flow-overlay {
   position: fixed;
@@ -552,15 +557,25 @@ input:disabled {
 
 .details-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
   margin: -4px -6px 6px 0;
 }
 
+/* The title takes a row of its own when the buttons would leave it too little room to read. */
 .details-head h2 {
-  flex: 1;
+  flex: 1 1 9rem;
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.details-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .follow-button {
@@ -1320,6 +1335,154 @@ body:not(.idle) #caption {
   font-weight: 600;
 }
 
+/* The pilot view: the outside view from an aircraft, over everything (see pilotview.js). */
+
+.pilot {
+  position: fixed;
+  inset: 0;
+  /* Over everything, the phone's credits button included. */
+  z-index: 30;
+  background: #0b1220;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.pilot .pilot-map,
+.pilot .pilot-map-host {
+  position: absolute;
+  inset: 0;
+}
+
+/* Aerial haze over the ground, drawn by pilotmap.js. */
+.pilot-haze {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: none;
+  pointer-events: none;
+}
+
+.pilot-top {
+  position: absolute;
+  top: max(12px, env(safe-area-inset-top, 0px));
+  left: max(12px, env(safe-area-inset-left, 0px));
+  right: max(12px, env(safe-area-inset-right, 0px));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pilot-top h2 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.9),
+    0 0 10px rgba(0, 0, 0, 0.6);
+}
+
+.pilot-button {
+  background: rgba(8, 14, 26, 0.6);
+  border-color: rgba(255, 255, 255, 0.3);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.pilot-button[aria-pressed='true'] {
+  background: rgba(155, 209, 255, 0.28);
+  border-color: var(--accent);
+}
+
+.pilot-close {
+  width: var(--touch);
+  min-width: var(--touch);
+  padding: 0;
+  font-size: 1.1rem;
+}
+
+.pilot-status {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  margin: 0;
+  transform: translate(-50%, -50%);
+  font-size: 0.9rem;
+  letter-spacing: 0.1em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+}
+
+.pilot-bottom {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px calc(env(safe-area-inset-bottom, 0px) + 6px);
+  pointer-events: none;
+}
+
+.pilot-hud {
+  display: flex;
+  gap: 8px 28px;
+  margin: 0;
+  padding: 10px 22px;
+  border-radius: 999px;
+  background: rgba(8, 14, 26, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.pilot-hud div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.pilot-hud dt {
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+.pilot-hud dd {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 600;
+}
+
+.pilot-hud dd.unit {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.pilot-credits {
+  max-width: 100%;
+  margin: 0;
+  padding: 3px 10px;
+  border-radius: 8px;
+  background: rgba(8, 14, 26, 0.55);
+  font-size: 0.7rem;
+  line-height: 1.4;
+  text-align: center;
+  color: var(--muted);
+  pointer-events: auto;
+}
+
+.pilot-credits a {
+  color: inherit;
+}
+
 /* Phones: one column. The timeline sits at the bottom above the credits; the controls and the
    details panel use the space above it, one at a time, and scroll if they need more. */
 @media (max-width: 640px) {
@@ -1362,6 +1525,15 @@ body:not(.idle) #caption {
   #time-slider {
     order: 3;
     flex-basis: 100%;
+  }
+
+  .pilot-hud {
+    gap: 6px 16px;
+    padding: 8px 16px;
+  }
+
+  .pilot-hud dd {
+    font-size: 1.15rem;
   }
 
   .attribution {
@@ -1435,6 +1607,16 @@ body:not(.idle) #caption {
   font-size: 0.85rem;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* Two short lines, so that the card still leaves room for the name on a narrow phone. */
+.follow-card-pilot {
+  flex: none;
+  max-width: 4.5rem;
+  min-height: 48px;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  line-height: 1.15;
 }
 
 .follow-card-stop {
@@ -1529,7 +1711,8 @@ body:not(.idle) #caption {
 @media (prefers-reduced-motion: reduce) {
   .panel,
   #caption,
-  .attribution {
+  .attribution,
+  .pilot-button {
     transition: none;
   }
 }
