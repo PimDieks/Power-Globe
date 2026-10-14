@@ -21,11 +21,13 @@ import { ScreenFlow } from './screenflow.js';
 import { HAZARDS, hazardRings, reuseRings } from './patterns.js';
 import { DETAIL_ALTITUDE, needsNewRegion, regionFor, viewBounds } from './detail.js';
 import { BASEMAPS, setupBasemap, setupMapFeatures } from './map.js';
-import { buildTimeline, forecastPosition, samePlace } from './timeline.js';
+import { buildTimeline, forecastPosition, samePlace, stepNearest } from './timeline.js';
 import { setupSearch } from './search.js';
 import { airportPanelWeather, conditionsAt, loadAirports, searchAirports } from './airports.js';
 import { airportDetailsHtml, airportPlace, panelStays, verdictText } from './airportview.js';
 import { setupWindCheck } from './windcheck.js';
+import { DETAIL_TABS, OPS_PARTS, createOpsHost, readTab, saveTab, tabAfterKey } from './ops.js';
+import { formatClock, formatClockShort, formatTick, zoneName } from './opsclock.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
@@ -83,6 +85,7 @@ const els = {
   refresh: document.getElementById('refresh'),
   details: document.getElementById('details'),
   detailsTitle: document.getElementById('details-title'),
+  detailsTabs: document.getElementById('details-tabs'),
   detailsBody: document.getElementById('details-body'),
   detailsClose: document.getElementById('details-close'),
   playIcon: document.getElementById('play-icon'),
@@ -170,6 +173,8 @@ const state = {
   fieldFade: 0,
   // Open details: a spot { lat, lng, data } or an airport { airport, hourly, fromList }.
   detail: null,
+  // The airport panel's tab, 'details' or 'ops' (see ops.js); remembered per browser.
+  detailTab: readTab(),
   // Whether the wind check is in use: its panel is open, or one of its airports is.
   windCheck: false,
   // Zoomed-in area with finer data: { shape, bounds, data, winds, times, fade }, or null.
@@ -890,6 +895,7 @@ function showTraffic(item, title) {
   windCheck.close();
   syncWindCheckButton();
   state.detail = { traffic: item };
+  syncDetailTabs();
   mapFeatures.setMarker(null);
   airportMap.select(null);
   els.details.classList.remove('hidden');
@@ -1126,6 +1132,7 @@ async function showDetails(lat, lng, name, pinLabel = name) {
   syncWindCheckButton();
   const detail = { lat, lng, data: null };
   state.detail = detail;
+  syncDetailTabs();
   const title = name ?? coords(lat, lng);
   mapFeatures.setMarker({ lat, lng, name: pinLabel });
   airportMap.select(null);
@@ -1187,6 +1194,7 @@ async function showAirport(airport, { fromList = false } = {}) {
   // no forecast, once it is known.
   const detail = { airport, hourly: null, fromList, observation: undefined, error: null };
   state.detail = detail;
+  syncDetailTabs();
   // The airport's own label on the map shows it is open (see airportmap.js): no pin of its own.
   mapFeatures.setMarker(null);
   airportMap.select(airport);
@@ -1234,6 +1242,7 @@ async function showAirport(airport, { fromList = false } = {}) {
 function closeDetails() {
   const tracked = state.detail?.traffic;
   state.detail = null;
+  syncDetailTabs();
   if (tracked) traffic.deselect();
   els.details.classList.add('hidden');
   els.details.classList.remove('keep-awake');
@@ -1353,26 +1362,108 @@ function detailIndex(data) {
   return Math.max(0, data.time.indexOf(time));
 }
 
+// The airport panel's tabs: shown for an airport only, with the body as the selected tab's panel.
+function syncDetailTabs() {
+  const show = !!state.detail?.airport;
+  els.detailsTabs.hidden = !show;
+  for (const tab of els.detailsTabs.children) {
+    const on = tab.dataset.tab === state.detailTab;
+    tab.setAttribute('aria-selected', String(on));
+    tab.tabIndex = on ? 0 : -1;
+  }
+  if (show) {
+    els.detailsBody.setAttribute('role', 'tabpanel');
+    els.detailsBody.setAttribute('aria-labelledby', `details-tab-${state.detailTab}`);
+  } else {
+    els.detailsBody.removeAttribute('role');
+    els.detailsBody.removeAttribute('aria-labelledby');
+  }
+  if (show && state.detailTab === 'ops') ops.mount();
+  else ops.unmount();
+}
+
+function selectDetailTab(id) {
+  if (id === state.detailTab) return;
+  state.detailTab = id;
+  saveTab(id);
+  renderDetails();
+}
+
+els.detailsTabs.replaceChildren(
+  ...DETAIL_TABS.map(({ id, label }) => {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.id = `details-tab-${id}`;
+    tab.className = 'detail-tab';
+    tab.setAttribute('role', 'tab');
+    tab.dataset.tab = id;
+    tab.textContent = label;
+    return tab;
+  }),
+);
+els.detailsTabs.addEventListener('click', (event) => {
+  const id = event.target.closest('[data-tab]')?.dataset.tab;
+  if (id) selectDetailTab(id);
+});
+// Arrow keys, Home and End move between the tabs and select the one reached.
+els.detailsTabs.addEventListener('keydown', (event) => {
+  const tabs = [...els.detailsTabs.children];
+  const next = tabAfterKey(event.key, tabs.indexOf(document.activeElement), tabs.length);
+  if (next === null) return;
+  event.preventDefault();
+  selectDetailTab(tabs[next].dataset.tab);
+  tabs[next].focus();
+});
+
+// The Ops tab (see ops.js): what its parts read, and what they may ask of the page.
+const ops = createOpsHost({
+  root: els.detailsBody,
+  getContext: airportContext,
+  requestRender: () => renderDetails(),
+  // An hour in the Ops tab sets the timeline to it, so the map and the panel agree.
+  setTime(time, { quiet = false } = {}) {
+    const step = state.timeline ? stepNearest(state.timeline.times, time) : -1;
+    if (step < 0) return;
+    stopCloudsLoop();
+    setPlaying(false);
+    seek(step);
+    if (!quiet) announce(`Timeline set to ${formatTime(time)}.`);
+  },
+});
+
+// What is known of the open airport, for the airport panel's tabs.
+function airportContext() {
+  const detail = state.detail;
+  return {
+    airport: detail.airport,
+    hourly: detail.hourly,
+    time: currentTime(),
+    now: Date.now(),
+    limits: windCheck.limits(),
+    limitsLabel: windCheck.label(),
+    formatTime,
+    formatHour,
+    formatClock,
+    formatClockShort,
+    formatTick,
+    zone: zoneName(),
+    observation: detail.observation,
+    error: detail.error,
+  };
+}
+
 // Updates only the panel's body, so the heading and close button keep their focus.
 function renderDetails() {
   const detail = state.detail;
+  syncDetailTabs();
   if (detail?.traffic) {
     els.detailsBody.innerHTML = traffic.detailsHtml() ?? '<p>No longer in view.</p>';
     return;
   }
   if (detail?.airport) {
     if (!detail.hourly && !detail.error) return;
-    els.detailsBody.innerHTML = airportDetailsHtml({
-      airport: detail.airport,
-      hourly: detail.hourly,
-      time: currentTime(),
-      limits: windCheck.limits(),
-      limitsLabel: windCheck.label(),
-      formatTime,
-      formatHour,
-      observation: detail.observation,
-      error: detail.error,
-    });
+    if (state.detailTab === 'ops') ops.render(airportContext());
+    else els.detailsBody.innerHTML = airportDetailsHtml(airportContext());
     return;
   }
   if (!detail?.data || !state.forecast) return;

@@ -64,15 +64,21 @@ export function assessRunwayEnd(heading, wind, limits) {
   };
 }
 
-// Every runway end of an airport in the given wind, best first, and the airport's overall status:
-// as good as its best runway end, since one usable runway is enough to operate.
-export function assessAirport(airport, wind, limits) {
-  const ends = airport.runways
+// The ends of an airport's runways: { runway, ident, heading }. Ends without a usable heading are
+// left out, as no wind component can be worked out for them.
+export function runwayEnds(airport) {
+  return (airport.runways ?? [])
     .flatMap((r) => [
       { runway: r, ident: r.le, heading: r.leHeading },
       r.he ? { runway: r, ident: r.he, heading: r.heHeading } : null,
     ])
-    .filter(Boolean)
+    .filter((end) => end && end.ident && Number.isFinite(end.heading));
+}
+
+// Every runway end of an airport in the given wind, best first, and the airport's overall status:
+// as good as its best runway end, since one usable runway is enough to operate.
+export function assessAirport(airport, wind, limits) {
+  const ends = runwayEnds(airport)
     .map((end) => ({ ...end, ...assessRunwayEnd(end.heading, wind, limits) }))
     // Of equally good ends, the one most into the wind.
     .sort((a, b) => STATUS[a.status].rank - STATUS[b.status].rank || a.load - b.load || b.headwind - a.headwind);
