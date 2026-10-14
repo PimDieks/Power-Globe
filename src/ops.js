@@ -14,11 +14,12 @@
 // tab again, and setting the timeline. To add a part, write one module that exports such an object
 // and add it to OPS_PARTS below; nothing else changes.
 import { escapeHtml } from './airportview.js';
-import { STATUS } from './runways.js';
 import { runwayPart } from './opsrunwayview.js';
+import { lightningPart } from './opslightningview.js';
+import { factItemHtml } from './opsfact.js';
 
 // The Ops parts, in the order their sections are shown and their facts are listed.
-export const OPS_PARTS = [runwayPart];
+export const OPS_PARTS = [runwayPart, lightningPart];
 
 export const DETAIL_TABS = [
   { id: 'details', label: 'Details' },
@@ -71,14 +72,7 @@ function attempt(part, step, fn) {
 export function stripHtml(entries) {
   const facts = entries.filter((e) => e.fact?.text);
   if (!facts.length) return '';
-  const items = facts
-    .map(({ part, fact }) => {
-      const status = STATUS[fact.status] ? fact.status : 'unknown';
-      return `<li class="status-${status}"><span class="status-icon" aria-hidden="true">${STATUS[status].icon}</span>` +
-        `<span class="ops-fact-label">${escapeHtml(part.factLabel ?? part.title)}</span> <span class="ops-fact">${escapeHtml(fact.text)}</span>` +
-        `<span class="visually-hidden"> (${STATUS[status].label})</span></li>`;
-    })
-    .join('');
+  const items = facts.map(({ part, fact }) => factItemHtml(part, fact)).join('');
   return `<ul class="ops-strip" aria-label="Key facts">${items}</ul>`;
 }
 
@@ -103,7 +97,7 @@ export function opsPanelHtml(parts, ctx) {
   const sections = entries
     .map(({ part, html }) => {
       const id = `ops-${escapeHtml(part.id)}-title`;
-      return `<section class="ops-section" aria-labelledby="${id}"><h3 id="${id}">${escapeHtml(part.title)}</h3>${html}</section>`;
+      return `<section class="ops-section" data-part="${escapeHtml(part.id)}" aria-labelledby="${id}"><h3 id="${id}">${escapeHtml(part.title)}</h3>${html}</section>`;
     })
     .join('');
   return `${stripHtml(entries)}${sections}`;
