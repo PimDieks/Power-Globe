@@ -1348,6 +1348,130 @@ body:not(.idle) #caption {
   }
 }
 
+/* Following an aircraft on a phone (see followcard.js): the controls, timeline and credits make
+   way for a small card at the bottom, or for the full aircraft panel alone. main.js sets the
+   classes; nothing but display changes, so everything returns as it was when following ends. */
+.follow-card {
+  position: fixed;
+  z-index: 10;
+  left: var(--gap);
+  right: var(--gap);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + var(--gap));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+}
+
+.follow-card-open {
+  flex: 1;
+  min-width: 0;
+  min-height: 48px;
+  padding: 4px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 10px;
+}
+
+.follow-card-name,
+.follow-card-line {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.follow-card-name {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.follow-card-line {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.follow-card-stop {
+  flex: none;
+  min-width: 76px;
+  min-height: 48px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* The credits sit behind a small button while the card is shown. */
+.credits-toggle {
+  position: fixed;
+  z-index: 21;
+  top: calc(env(safe-area-inset-top, 0px) + 4px);
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+
+.credits-toggle:hover {
+  background: none;
+}
+
+.credits-toggle span {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  font: italic 600 0.85rem/24px Georgia, serif;
+  text-align: center;
+}
+
+@media (max-width: 640px) {
+  body.follow-compact #controls,
+  body.follow-compact #windcheck,
+  body.follow-compact #timeline,
+  body.follow-compact #caption,
+  body.follow-compact .attribution,
+  body.follow-with-card #details {
+    display: none;
+  }
+
+  /* The full panel alone: low enough that the aircraft, held above it, stays in view. */
+  body.follow-with-panel #details {
+    bottom: calc(env(safe-area-inset-bottom, 0px) + var(--gap));
+    max-height: 60vh;
+    max-height: 60dvh;
+  }
+
+  body.follow-compact.credits-open .attribution {
+    display: block;
+    top: calc(env(safe-area-inset-top, 0px) + 48px);
+    bottom: auto;
+    left: var(--gap);
+    right: var(--gap);
+    z-index: 20;
+    padding: 8px 12px;
+    border-radius: 10px;
+    text-align: left;
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 @media (max-width: 640px) and (prefers-contrast: more) {
   body.idle #timeline {
     transform: none;
