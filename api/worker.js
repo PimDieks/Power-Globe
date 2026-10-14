@@ -62,6 +62,9 @@ const BACKUP_SECONDS = 6 * 3600;
 // Road traffic is only worth showing while it is recent.
 export const ACCESS_BACKUP_SECONDS = 600;
 const ACCESS_SECONDS = 60;
+// The airports the relay reads road traffic for (the Dutch ones with scheduled flights, as in
+// public/data/ndw-sites.json); asking for any other is refused here, not passed on.
+export const ACCESS_AIRPORTS = ['EHAM', 'EHEH', 'EHRD', 'EHBK', 'EHGG'];
 // Give up on a service after this long, and remember a failure for a while so that neither the
 // service nor visitors are kept waiting on it again straight away.
 const UPSTREAM_TIMEOUT_MS = 10_000;
@@ -295,6 +298,7 @@ const unavailable = (airport, reason) =>
 async function accessRoads(url, fetchFn, env) {
   const airport = (url.searchParams.get('airport') ?? '').toUpperCase();
   if (!/^[A-Z]{4}$/.test(airport)) throw new HttpError(400, 'airport: a 4-letter ICAO code');
+  if (!ACCESS_AIRPORTS.includes(airport)) throw new HttpError(404, `No road data for ${airport}`);
   if (!relayOn(env)) return unavailable(airport, 'The API has no flight relay, which the road data comes through');
   let res;
   let text;
@@ -516,10 +520,14 @@ export default {
           res = new Response(res.body, res);
           res.headers.set('X-Power-Globe-Backup', '1');
           res.headers.set('Cache-Control', 'public, max-age=60');
-        } else if (!res) {
+        } else if (res) {
+          // The stale road answer is kept for the half minute it says, so that a relay that is down is
+          // not asked again by every visitor.
+          if (cache) ctx?.waitUntil(cache.put(key, res.clone()));
+        } else {
           res = new Response(JSON.stringify({ error: err.message }), {
             status: err.status ?? 502,
-            headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${Math.max(1, Math.min(FAILURE_SECONDS, err.cacheSeconds ?? FAILURE_SECONDS))}` },
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${Math.max(1, Math.min(isAccess ? ACCESS_SECONDS : FAILURE_SECONDS, err.cacheSeconds ?? FAILURE_SECONDS))}` },
           });
           // Bad requests are the visitor's; failures upstream are remembered briefly.
           if (cache && (err.status ?? 502) >= 429) ctx?.waitUntil(cache.put(key, res.clone()));
