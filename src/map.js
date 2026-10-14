@@ -10,7 +10,6 @@ import {
   FADE_FROM_DEG,
   MAP_LEVEL_LIMIT,
   TileStore,
-  coversTile,
   framesFor,
   parseTimes,
   passedFrames,
@@ -51,15 +50,15 @@ export const BASEMAPS = {
     light: 1.1,
     credit: 'Map <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, HERE, Garmin, FAO, NOAA, USGS, OpenStreetMap contributors and the GIS User Community',
   },
-  // Clouds as seen from space. Over Europe and Africa they move with the timeline: EUMETSAT's
-  // Meteosat images, every 10 minutes (see meteosat.js). Elsewhere they are yesterday's: one day
-  // of NASA's VIIRS true colour imagery (NOAA-20, public domain, via NASA GIBS), the most recent
-  // complete day. Closer in than either has detail for, the view continues as the satellite
-  // imagery.
+  // Clouds as seen from space: one day of NASA's VIIRS true colour imagery (NOAA-20, public
+  // domain, via NASA GIBS), the most recent complete day. Its pixels are about 300 m across, so
+  // closer in the view continues as the satellite imagery. Over Europe and Africa the clouds move
+  // with the timeline, in a layer of their own above it (EUMETSAT's Meteosat images, see
+  // setupMovingClouds), until zoomed in past their detail of 1 to 2 km.
   clouds: {
     label: 'Clouds',
     url: (x, y, level) =>
-      level <= CLOUDS_MAX_LEVEL && !(level > MAP_LEVEL_LIMIT && coversTile(x, y, level))
+      level <= CLOUDS_MAX_LEVEL
         ? `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_NOAA20_CorrectedReflectance_TrueColor/default/${cloudsDay()}/GoogleMapsCompatible_Level9/${level}/${y}/${x}.jpg`
         : esri('World_Imagery')(x, y, level),
     maxLevel: 17,
@@ -69,7 +68,7 @@ export const BASEMAPS = {
     noDataBlack: true,
     moving: true,
     get credit() {
-      return `Clouds over Europe and Africa: contains modified <a href="https://www.eumetsat.int/" target="_blank" rel="noopener">EUMETSAT</a> Meteosat data ${new Date().getUTCFullYear()}; elsewhere on ${cloudsDay()} (UTC): <a href="https://www.earthdata.nasa.gov/data/instruments/viirs" target="_blank" rel="noopener">NASA VIIRS</a> via GIBS; close up imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics and the GIS User Community`;
+      return `Clouds on ${cloudsDay()} (UTC): <a href="https://www.earthdata.nasa.gov/data/instruments/viirs" target="_blank" rel="noopener">NASA VIIRS</a> via GIBS; close up imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics and the GIS User Community`;
     },
   },
   // An aeronautical chart: openAIP's airspaces, airports, navaids and reporting points (through
@@ -91,7 +90,8 @@ const MAP_ALTITUDE = 1.3;
 // The image shows wherever tiles are missing: the poles (beyond Web Mercator), while tiles
 // load, or if the tile server cannot be reached.
 // Returns { setAltitude(altitude), setStyle(key), setFollowing(on), setTime(time, ahead),
-// cloudsAsOf() }. `onClouds()` is called when the moving clouds show another image.
+// cloudsAsOf(), cloudsShown() }. `onClouds()` is called when the moving clouds show another
+// image, and `onCredit(html)` whenever the credit changes.
 export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCredit, onClouds } = {}) {
   let style = BASEMAPS[initial] ?? BASEMAPS.satellite;
   globe.globeTileEngineUrl(style.url).globeTileEngineMaxLevel(style.maxLevel);
@@ -115,7 +115,17 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     return baseEngine;
   };
   // Moving clouds over Europe and Africa, just above the map, for the Clouds view.
-  const moving = setupMovingClouds(globe, findBaseEngine, onClouds);
+  const moving = setupMovingClouds(globe, findBaseEngine, () => {
+    onCredit?.(credit());
+    onClouds?.();
+  });
+  // The view's credit, and EUMETSAT's while its images are on screen.
+  function credit() {
+    const shown = moving.shown();
+    if (shown === null) return style.credit;
+    const year = new Date(shown).getUTCFullYear();
+    return `Contains modified <a href="https://www.eumetsat.int/" target="_blank" rel="noopener">EUMETSAT</a> Meteosat data ${year}. ${style.credit}`;
+  }
 
   const texture = new THREE.TextureLoader().load(backdropUrl);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -156,12 +166,12 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     chart.set(style.chart);
     moving.setActive(Boolean(style.moving));
     setAltitude(altitude);
-    onCredit?.(style.credit);
+    onCredit?.(credit());
   }
 
   chart.set(style.chart);
   moving.setActive(Boolean(style.moving));
-  onCredit?.(style.credit);
+  onCredit?.(credit());
   return {
     setAltitude,
     setStyle,
@@ -171,6 +181,7 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     },
     setTime: moving.setTime,
     cloudsAsOf: moving.asOf,
+    cloudsShown: moving.shown,
   };
 }
 
@@ -326,6 +337,10 @@ const DEG = Math.PI / 180;
 // a failure to read them.
 const TIMES_REFRESH_MS = 600_000;
 const TIMES_RETRY_MS = 60_000;
+// Zoomed in past the images' detail, they stay this long while the map's finer tiles load, then
+// fade out over FADE_OUT_MS.
+const HOLD_MS = 400;
+const FADE_OUT_MS = 500;
 
 // The point at `lat`, `lng` on a sphere of `radius`, as three-globe places it.
 const pointAt = (lat, lng, radius) => new THREE.Vector3().setFromSphericalCoords(radius, (90 - lat) * DEG, lng * DEG);
@@ -379,7 +394,7 @@ ${shader.fragmentShader.replace(
 // tiles for a new view) takes the place of the one on show only once all its tiles in view have
 // loaded, so the clouds never flash blank or half drawn; while the timeline plays, the next
 // images load ahead. `baseEngine()` is the map's own tile engine, whose tile level this follows.
-// Returns { setActive(on), update(), setFollowing(on), setTime(time, ahead), asOf() }.
+// Returns { setActive(on), update(), setFollowing(on), setTime(time, ahead), asOf(), shown() }.
 function setupMovingClouds(globe, baseEngine, onChange) {
   // 0.0002 globe radii is about 1.3 km above the ground.
   const radius = globe.getGlobeRadius() * 1.0002;
@@ -415,6 +430,9 @@ function setupMovingClouds(globe, baseEngine, onChange) {
             const texture = new THREE.Texture(image);
             texture.colorSpace = THREE.SRGBColorSpace;
             texture.needsUpdate = true;
+            // Sent to the graphics card as it arrives, rather than a dozen at once when the
+            // image it belongs to goes on show.
+            globe.renderer?.()?.initTexture(texture);
             resolve(texture);
           },
           undefined,
@@ -437,9 +455,47 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     meshes.delete(tile);
   }
 
+  function setOpacity(opacity) {
+    for (const mesh of meshes.values()) mesh.material.opacity = opacity;
+  }
+
+  // Zoomed in past the images' detail: they stay a moment while the map's finer tiles load, then
+  // fade out, so the map's own clouds take over without a flash.
+  let fading = null;
+  function fadeOut() {
+    if (fading) return;
+    if (!meshes.size || !globalThis.requestAnimationFrame) {
+      clear();
+      return;
+    }
+    const start = performance.now() + HOLD_MS;
+    const step = () => {
+      const t = (performance.now() - start) / FADE_OUT_MS;
+      if (t >= 1) {
+        fading = null;
+        clear();
+        return;
+      }
+      setOpacity(1 - Math.max(0, t));
+      fading = requestAnimationFrame(step);
+    };
+    fading = requestAnimationFrame(step);
+  }
+
+  function stopFading() {
+    if (!fading) return;
+    cancelAnimationFrame(fading);
+    fading = null;
+    setOpacity(1);
+  }
+
   function clear() {
+    stopFading();
     for (const tile of [...meshes.keys()]) removeMesh(tile);
     group.visible = false;
+    // Images passed on the way to another time belong to that time only.
+    lastFrames = [];
+    passed = [];
     if (shownFrame !== null) {
       shownFrame = null;
       onChange?.();
@@ -504,11 +560,17 @@ function setupMovingClouds(globe, baseEngine, onChange) {
   }
 
   function refresh() {
-    if (!active || !times || !view) {
-      store.want([]);
-      if (!active || !view) clear();
+    if (!active) {
+      store.clear();
+      clear();
       return;
     }
+    if (!times || !view) {
+      store.want([]);
+      if (!view) fadeOut();
+      return;
+    }
+    stopFading();
     const frames = framesFor(time, ahead, times);
     passed = passedFrames([...passed, ...lastFrames], frames[0], shownFrame);
     lastFrames = frames;
@@ -611,10 +673,13 @@ function setupMovingClouds(globe, baseEngine, onChange) {
       ahead = nextAhead;
       if (active) refresh();
     },
-    // The time of the image on show when the timeline is past the newest image, else null.
+    // The time of the image on show when the timeline is later than it (the newest image, or
+    // while the next one loads), else null.
     asOf() {
-      return active && times && shownFrame === times.end && time > times.end ? shownFrame : null;
+      return active && shownFrame !== null && time > shownFrame ? shownFrame : null;
     },
+    // The time of the image on show, or null when none is.
+    shown: () => shownFrame,
   };
 }
 
