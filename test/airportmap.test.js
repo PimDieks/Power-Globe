@@ -86,7 +86,7 @@ describe('weather for the airports in view', () => {
     expect(airportWeather).toHaveBeenCalledTimes(1);
   });
 
-  it('colours a runway by its better end and marks the downwind end as neutral, as the panel does', async () => {
+  it('colours a runway by its better end and marks a downwind end over the limit red, as the panel does', async () => {
     // 15 kt from 270: a headwind on 27, a tailwind over the limit of 10 on 09.
     const hourly = { time: ['2026-10-13T12:00'], wind_direction_10m: [270], wind_speed_10m: [15], wind_gusts_10m: [15] };
     airportWeather.mockImplementation(async (list, { onData }) => {
@@ -100,13 +100,29 @@ describe('weather for the airports in view', () => {
     const ends = () => Object.fromEntries(setRunwayLabels.mock.lastCall[0].filter((l) => l.kind === 'runway').map((l) => [l.text.split(' ')[0], l]));
     expect(drawStrips.mock.lastCall[0].map((r) => r.status)).toEqual(['ok']);
     expect(ends()['27']).toMatchObject({ status: 'ok', text: '27 ✓' });
-    expect(ends()['09']).toMatchObject({ status: 'neutral', text: '09 tailwind' });
+    expect(ends()['09']).toMatchObject({ status: 'nogo', text: '09 tailwind ✕' });
     // The Traffic tab draws the runways plain.
     map.select(FIELD);
     map.setProfile(MAP_PROFILES.traffic);
     expect(drawStrips.mock.lastCall[0].map((r) => r.status)).toEqual(['unknown']);
     expect(ends()['09'].text).toBe('09');
     expect(ends()['27']).toMatchObject({ status: 'unknown', text: '27' });
+  });
+
+  it('labels the downwind end by its own tailwind: grey when small, amber when marginal', async () => {
+    const labelsFor = async (speed) => {
+      const hourly = { time: ['2026-10-13T12:00'], wind_direction_10m: [270], wind_speed_10m: [speed], wind_gusts_10m: [speed] };
+      airportWeather.mockImplementation(async (list, { onData }) => {
+        const answer = new Map(list.map((a) => [a.ident, hourly]));
+        onData(answer);
+        return answer;
+      });
+      const { settle, setRunwayLabels } = await setup([FIELD]);
+      await settle({ ...view, altitude: 0.005 });
+      return setRunwayLabels.mock.lastCall[0].filter((l) => l.kind === 'runway').map((l) => l.text).sort();
+    };
+    expect(await labelsFor(5)).toEqual(['09 tailwind', '27 ✓']);
+    expect(await labelsFor(9)).toEqual(['09 tailwind !', '27 ✓']);
   });
 
   it('waits for the camera to settle however long a drag or zoom lasts', async () => {

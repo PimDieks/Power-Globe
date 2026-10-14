@@ -276,7 +276,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
           const neutral = status === 'neutral';
           const name = end.hint ? `${ident} ${end.hint}` : ident;
           const text = runwayEndText(name, neutral ? null : STATUS[status].icon, use, view);
-          const verdict = neutral ? `${end.hint ? `${end.hint}, ` : ''}the runway is ${STATUS[call.status].label.toLowerCase()} from ${call.best}` : STATUS[status].label;
+          const verdict = neutral ? `${end.hint ? `${end.hint}, ` : ''}the runway is ${STATUS[call.status].label.toLowerCase()} from ${call.best}` : `${STATUS[status].label}${end.hint ? `, ${end.hint}` : ''}`;
           wanted.push({
             label: {
               key: `${airport.ident}:${ident}:${status}:${use?.tag ?? ''}:${text}`,

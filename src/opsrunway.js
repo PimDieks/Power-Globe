@@ -129,10 +129,12 @@ export function hourAt(airport, hourly, time, limits) {
 }
 
 // What the map says about one runway in an hour of the outlook, the same as its strip does: the
-// runway takes the status of its better end; that end keeps its own status and the other end is
-// 'neutral' (with a hint when it has a tailwind), unless the whole runway is over limits or the
-// wind is calm, when every end shows its own status. { status, best, ends: { ident: { status,
-// hint } } }; 'unknown' without a judgement of this runway.
+// runway takes the status of its better end, and that end keeps its own status. The other end
+// keeps its own status too when it is marginal or over a limit, so a tailwind that is too strong
+// shows; otherwise it is 'neutral'. A hint ('tailwind') goes with any tailwind on that end. When
+// the whole runway is over limits or the wind is calm, every end shows its own status without a
+// hint. { status, best, ends: { ident: { status, hint } } }; 'unknown' without a judgement of
+// this runway.
 export function runwayCall(runway, hour) {
   const idents = [runway.le, runway.he].filter(Boolean);
   const unknown = { status: 'unknown', best: null, ends: Object.fromEntries(idents.map((ident) => [ident, { status: 'unknown', hint: null }])) };
@@ -144,7 +146,8 @@ export function runwayCall(runway, hour) {
       const end = hour.ends.find((e) => e.ident === ident);
       if (!end) return [ident, { status: 'unknown', hint: null }];
       if (shared || ident === row.best) return [ident, { status: end.status, hint: null }];
-      return [ident, { status: 'neutral', hint: end.tailwind >= TIE_KT ? 'tailwind' : null }];
+      const hint = end.tailwind >= TIE_KT || end.reasons?.includes('tailwind') ? 'tailwind' : null;
+      return [ident, { status: end.status === 'ok' ? 'neutral' : end.status, hint }];
     }),
   );
   return { status: row.status, best: row.best, ends };
