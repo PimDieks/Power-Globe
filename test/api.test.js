@@ -180,8 +180,25 @@ describe('the site\'s own airport weather', () => {
     const series = snapshot.get('EHAM');
     expect(conditionsAt(series, '2026-10-13T15:00').speed).toBe(22);
     expect(conditionsAt(series, '2026-10-13T16:00').speed).toBe(22);
-    expect(conditionsAt(series, '2026-10-13T19:00')).toBeNull();
     expect(conditionsAt(series, '2026-10-13T11:00')).toBeNull();
+  });
+
+  it('holds the last step for the hours of its own step', () => {
+    const series = snapshot.get('EHAM');
+    expect(conditionsAt(series, '2026-10-13T18:00').speed).toBe(15);
+    expect(conditionsAt(series, '2026-10-13T20:00').speed).toBe(15);
+    expect(conditionsAt(series, '2026-10-13T21:00')).toBeNull();
+  });
+
+  it('holds the last hour of an hourly series for that hour only', () => {
+    const hourly = snapshotSeries({
+      built: '2026-10-13T12:00:00Z',
+      times: ['2026-10-13T12:00', '2026-10-13T13:00'],
+      airports: { EHAM: [[12, 13], [9, 9], [18, 22], [250, 260], [30, 35]] },
+    }).get('EHAM');
+    expect(conditionsAt(hourly, '2026-10-13T13:00').speed).toBe(22);
+    expect(conditionsAt(hourly, '2026-10-13T13:30').speed).toBe(22);
+    expect(conditionsAt(hourly, '2026-10-13T14:00')).toBeNull();
   });
 });
 
