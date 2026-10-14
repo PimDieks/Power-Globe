@@ -209,29 +209,44 @@ function findTileEngine(globe, exclude) {
 
 // The tile engines keep every tile they load for as long as the view stays at its level or
 // closer: the coarse tiles passed on the way in, and every tile flown over while following an
-// aircraft, so their memory grew for as long as the page was open. Beyond this many tiles, those
-// out of view are let go, farthest from the middle of the view first. The engine loads a tile
-// again when it comes back into view: it is told the tile has gone through the record each tile
-// carries (see scripts/patch-tile-engine.mjs). Returns the number of tiles let go.
+// aircraft, so their memory grew for as long as the page was open. Beyond MAX_TILES, or one and a
+// half times the tiles in view if that is more, the tiles out of view are let go, farthest from the
+// middle of the view first. The engine loads a tile again when it comes back into view (see
+// evictTile in src/vendor/three-slippy-map-globe.mjs). Returns the number of tiles let go.
 export const MAX_TILES = 300;
 const sphere = new THREE.Sphere();
-// The zoom level of one of the tile engine's tiles, from its width.
+let warnedNoEvict = false;
+// A tile's zoom level follows from its width.
 const tileLevel = (tile) => Math.round(Math.log2((2 * Math.PI) / tile.geometry.parameters.phiLength));
 export function boundTiles(engine, camera, max = MAX_TILES) {
   if (!camera?.isCamera || !(engine?.children?.length > max)) return 0;
-  camera.updateMatrixWorld();
+  if (typeof engine.evictTile !== 'function') {
+    if (!warnedNoEvict) {
+      warnedNoEvict = true;
+      console.warn(
+        `The map has ${engine.children.length} tiles and cannot let any go: its tile engine has no evictTile (see vite.config.js).`,
+      );
+    }
+    return 0;
+  }
+  // The camera always looks at the middle of the globe, but its direction can be a frame behind
+  // its position when the view changes, so the view is worked out from a copy turned that way.
+  const eye = camera.clone();
+  eye.lookAt(0, 0, 0);
+  eye.updateMatrixWorld();
   const frustum = new THREE.Frustum().setFromProjectionMatrix(
-    new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse),
+    new THREE.Matrix4().multiplyMatrices(eye.projectionMatrix, eye.matrixWorldInverse),
   );
-  const eye = camera.position.clone();
   // How far around a globe of `radius` the camera sees, as an angle from the point beneath it.
-  const horizon = (radius) => Math.acos(Math.min(1, radius / eye.length()));
+  const horizon = (radius) => Math.acos(Math.min(1, radius / eye.position.length()));
   const away = [];
+  let loaded = 0;
   for (const tile of engine.children) {
-    if (!tile.userData.tile || !tile.geometry) continue;
+    if (!tile.material?.map || !tile.geometry?.parameters?.phiLength) continue;
+    loaded++;
     if (!tile.geometry.boundingSphere) tile.geometry.computeBoundingSphere();
     sphere.copy(tile.geometry.boundingSphere).applyMatrix4(tile.matrixWorld);
-    const angle = eye.angleTo(sphere.center);
+    const angle = eye.position.angleTo(sphere.center);
     // Coarser tiles than the view's are only seen where they are on the near side of the globe.
     // Tiles of the view's own level are kept while they are anywhere in the camera's view, near
     // side or far, as that is where the engine asks for them again.
@@ -240,20 +255,16 @@ export function boundTiles(engine, camera, max = MAX_TILES) {
       away.push({ tile, angle });
       continue;
     }
-    // A margin, so that a tile at the edge of the view is not let go and asked for again.
+    // The tile is given a margin, so that one at the edge of the view is not let go and asked for
+    // again.
     sphere.radius *= 1.5;
     if (!frustum.intersectsSphere(sphere)) away.push({ tile, angle });
   }
+  const cap = Math.max(max, Math.ceil(1.5 * (loaded - away.length)));
   away.sort((a, b) => b.angle - a.angle);
-  const forget = away.slice(0, engine.children.length - max);
-  for (const { tile } of forget) {
-    engine.remove(tile);
-    tile.geometry.dispose();
-    tile.material.map?.dispose();
-    tile.material.dispose();
-    delete tile.userData.tile.obj;
-  }
-  return forget.length;
+  let forgotten = 0;
+  for (const { tile } of away.slice(0, Math.max(0, loaded - cap))) if (engine.evictTile(tile)) forgotten++;
+  return forgotten;
 }
 
 // Tiles also arrive after the camera has stopped, so the limit is checked again shortly after.
@@ -270,8 +281,8 @@ function boundAfterAdding(engine, globe) {
   };
 }
 
-// The tile level the engine picks for a camera (see updatePov in three-slippy-map-globe): the
-// first of its thresholds, in globe radii above the ground, that the camera is above.
+// Returns the tile level the engine picks for a camera (see updatePov in three-slippy-map-globe):
+// the first of its thresholds, in globe radii above the ground, that the camera is above.
 export function tileLevelFor(engine, camera, radius) {
   const height = (camera.position.length() - radius) / radius;
   const i = engine.thresholds.findIndex((t) => t && t <= height);

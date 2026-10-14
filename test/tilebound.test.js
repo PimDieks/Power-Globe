@@ -3,10 +3,10 @@ import * as THREE from 'three';
 import SlippyMap from 'three-slippy-map-globe';
 import { boundTiles, settleLevels, tileLevelFor } from '../src/map.js';
 
-// The real tile engine, as installed (with scripts/patch-tile-engine.mjs applied), with images
-// that load at once: a stand-in for the page's <img>.
+// The tile engine is the site's copy (vite.config.js points the import at it), with images that
+// load at once standing in for the page's <img>.
 const R = 100;
-// A small limit, so that a short flight goes past it.
+// A small limit lets a short flight go past it.
 const MAX = 20;
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -25,7 +25,8 @@ function fakeImage() {
   };
 }
 
-// A camera `altitude` globe radii above the equator at `lng`, looking at the middle of the globe.
+// Returns a camera `altitude` globe radii above the equator at `lng`, looking at the middle of the
+// globe.
 function cameraAt(lng, altitude) {
   const camera = new THREE.PerspectiveCamera(50, 1.6, 0.01, 10000);
   const r = R * (1 + altitude);
@@ -35,14 +36,16 @@ function cameraAt(lng, altitude) {
   return camera;
 }
 
-// Tiles that have been drawn, by "level/x/y".
+const level = (t) => Math.round(Math.log2((2 * Math.PI) / t.geometry.parameters.phiLength));
+const loaded = (engine) => engine.children.filter((t) => t.material.map && t.geometry.parameters.phiLength);
+// Returns the tiles that have been drawn, by level and position.
 const keys = (engine) =>
-  new Set(engine.children.filter((t) => t.userData.tile && t.material.map).map((t) => `${Math.round(Math.log2((2 * Math.PI) / t.geometry.parameters.phiLength))}/${t.userData.tile.x}/${t.userData.tile.y}`));
+  new Set(loaded(engine).map((t) => `${level(t)}/${t.geometry.parameters.phiStart.toFixed(5)}/${t.geometry.parameters.thetaStart.toFixed(5)}`));
 
 // Flies the camera along the equator from `from` to `to` degrees east, a step at a time, letting
 // the tiles load at each step, and calls `after(engine, camera)` after each.
 async function fly(engine, from, to, altitude, after = () => {}) {
-  const steps = Math.round(Math.abs(to - from) / 0.15);
+  const steps = Math.max(1, Math.round(Math.abs(to - from) / 0.15));
   for (let i = 0; i <= steps; i++) {
     const camera = cameraAt(from + ((to - from) * i) / steps, altitude);
     engine.updatePov(camera);
@@ -60,6 +63,7 @@ describe('letting go of map tiles out of view', () => {
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   const makeEngine = () => {
@@ -68,12 +72,14 @@ describe('letting go of map tiles out of view', () => {
     return engine;
   };
 
-  it('gives each tile its record, so it can be let go (scripts/patch-tile-engine.mjs)', async () => {
+  it('uses the copy of the engine that can let go of a tile', async () => {
     const engine = makeEngine();
     await fly(engine, 0, 0.2, 0.004);
-    const tiles = engine.children.filter((t) => t.material.map);
+    const tiles = loaded(engine);
     expect(tiles.length).toBeGreaterThan(0);
-    for (const tile of tiles) expect(tile.userData.tile?.obj).toBe(tile);
+    expect(engine.evictTile(tiles[0])).toBe(true);
+    expect(engine.evictTile(tiles[0])).toBe(false);
+    expect(engine.children).not.toContain(tiles[0]);
   });
 
   it('without it, the engine keeps every tile flown over', async () => {
@@ -89,31 +95,32 @@ describe('letting go of map tiles out of view', () => {
       boundTiles(e, camera, MAX);
       most = Math.max(most, e.children.length);
     });
-    // The share, plus the back layer and one step's new tiles.
+    // The share is the limit, plus the back layer and one step's new tiles.
     expect(most).toBeLessThan(MAX + 20);
   });
 
   it('never lets go of a tile in view, and loads tiles let go again when they come back', async () => {
     const engine = makeEngine();
-    await fly(engine, 0, 0, 0.004);
+    await fly(engine, -0.15, 0, 0.004);
     const start = keys(engine);
+    expect(start.size).toBeGreaterThan(0);
     await fly(engine, 0, 8, 0.004, (e, camera) => {
-      const before = e.children.filter((t) => t.material.map).length;
+      const before = loaded(e).length;
       const inView = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
-      const shown = e.children.filter((t) => t.userData.tile && inView.intersectsObject(t));
+      const shown = loaded(e).filter((t) => inView.intersectsObject(t));
       boundTiles(e, camera, MAX);
       for (const tile of shown) expect(e.children).toContain(tile);
-      expect(e.children.filter((t) => t.material.map).length).toBeLessThanOrEqual(before);
+      expect(loaded(e).length).toBeLessThanOrEqual(before);
     });
     for (const key of start) expect(keys(engine).has(key)).toBe(false);
-    await fly(engine, 8, 0, 0.004, (e, camera) => boundTiles(e, camera, MAX));
+    await fly(engine, 8, -0.15, 0.004, (e, camera) => boundTiles(e, camera, MAX));
     const back = keys(engine);
     for (const key of start) expect(back.has(key)).toBe(true);
   });
 
   it('lets go of the coarser tiles passed on the way in, but not those beneath the view', async () => {
     const engine = makeEngine();
-    // Zoom in from the whole globe to close up, a level at a time.
+    // The camera zooms in from the whole globe to close up, a level at a time.
     for (let altitude = 2.4; altitude > 0.004; altitude /= 1.6) {
       engine.updatePov(cameraAt(0, altitude));
       await tick();
@@ -124,38 +131,55 @@ describe('letting go of map tiles out of view', () => {
     await tick();
     await tick();
     engine.updateMatrixWorld();
-    const level = (t) => Math.round(Math.log2((2 * Math.PI) / t.geometry.parameters.phiLength));
-    const coarser = () => engine.children.filter((t) => t.userData.tile && level(t) < engine.level);
-    const own = engine.children.filter((t) => t.userData.tile && level(t) === engine.level);
-    expect(coarser().length).toBeGreaterThan(3 * MAX);
+    const coarser = () => loaded(engine).filter((t) => level(t) < engine.level);
+    const own = loaded(engine).filter((t) => level(t) === engine.level);
+    const before = coarser().length;
+    expect(before).toBeGreaterThan(3 * MAX);
     boundTiles(engine, camera, MAX);
-    // Only the coarse tiles around the point beneath the camera are left: here four a level, as it
-    // is above a corner shared by four tiles.
-    expect(coarser().length).toBeLessThanOrEqual(4 * engine.level);
-    expect(coarser().some((t) => level(t) === 5)).toBe(true);
+    // The farthest go first: of the coarsest levels only the tiles around the point beneath the
+    // camera are left, four a level, as it is above a corner shared by four tiles.
+    expect(coarser().length).toBeLessThan(before / 3);
+    for (const l of [2, 3, 4, 5]) expect(coarser().filter((t) => level(t) === l).length).toBe(4);
     for (const tile of own) expect(engine.children).toContain(tile);
+  });
+
+  it('keeps one and a half times the tiles in view when that is more than the limit', async () => {
+    const engine = makeEngine();
+    await fly(engine, 0, 4, 0.004);
+    const camera = cameraAt(4, 0.004);
+    const inView = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+    const shown = loaded(engine).filter((t) => inView.intersectsObject(t)).length;
+    boundTiles(engine, camera, 1);
+    expect(loaded(engine).length).toBeGreaterThanOrEqual(Math.ceil(1.5 * shown) - 1);
+    expect(loaded(engine).length).toBeLessThan(3 * shown);
   });
 
   it('frees what it lets go', async () => {
     const engine = makeEngine();
     await fly(engine, 0, 3, 0.004);
-    const tile = engine.children.find((t) => t.userData.tile && t.material.map);
-    const record = tile.userData.tile;
+    const tile = loaded(engine)[0];
     const freed = { geometry: vi.spyOn(tile.geometry, 'dispose'), material: vi.spyOn(tile.material, 'dispose'), map: vi.spyOn(tile.material.map, 'dispose') };
     const camera = cameraAt(3, 0.004);
     expect(boundTiles(engine, camera, 10)).toBeGreaterThan(0);
     expect(engine.children).not.toContain(tile);
-    expect(record.obj).toBeUndefined();
-    for (const spy of Object.values(freed)) expect(spy).toHaveBeenCalled();
+    for (const spy of Object.values(freed)) expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  it('leaves the tiles alone below the limit, and engines it cannot read', () => {
+  it('leaves the tiles alone below the limit', () => {
     const camera = cameraAt(0, 0.004);
-    const engine = { children: [{ userData: {} }], remove: vi.fn() };
+    const engine = { children: [{}], evictTile: vi.fn() };
     expect(boundTiles(engine, camera)).toBe(0);
-    expect(boundTiles({ remove: vi.fn() }, camera)).toBe(0);
+    expect(boundTiles({ evictTile: vi.fn() }, camera)).toBe(0);
     expect(boundTiles(null, camera)).toBe(0);
     expect(boundTiles(engine, {})).toBe(0);
+  });
+
+  it('says so once when the engine cannot let go of tiles', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const engine = { children: Array(5).fill({}) };
+    expect(boundTiles(engine, cameraAt(0, 0.004), 2)).toBe(0);
+    expect(boundTiles(engine, cameraAt(0, 0.004), 2)).toBe(0);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });
 
