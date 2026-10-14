@@ -5,7 +5,13 @@ import {
   DEFAULT_LVP_LIMITS,
   classify,
   cleanLimits,
+  effectiveLimits,
   fogRuns,
+  foggy,
+  formatAge,
+  judgedSpans,
+  limitsKept,
+  METAR_STALE_MS,
   formatCeiling,
   formatVisibility,
   hourSummary,
@@ -97,8 +103,17 @@ describe('the limits kept in the browser', () => {
     });
   });
 
-  it('keep marginal from being stricter than LVP', () => {
-    expect(cleanLimits({ lvpVisibility: 4000, lvpCeiling: 700 })).toMatchObject({ lvpVisibility: 4000, marginalVisibility: 4000, lvpCeiling: 700, marginalCeiling: 700 });
+  it('keep what was typed, and are judged with marginal no stricter than LVP', () => {
+    expect(cleanLimits({ lvpVisibility: 4000, lvpCeiling: 700 })).toEqual({ lvpVisibility: 4000, lvpCeiling: 700, marginalVisibility: 3000, marginalCeiling: 500 });
+    expect(effectiveLimits({ lvpVisibility: 4000, lvpCeiling: 700 })).toEqual({ lvpVisibility: 4000, lvpCeiling: 700, marginalVisibility: 4000, marginalCeiling: 700 });
+    expect(effectiveLimits({ lvpVisibility: 1000, marginalVisibility: 2000 })).toMatchObject({ lvpVisibility: 1000, marginalVisibility: 2000 });
+    const t = taf(group('BASE', '2026-10-14T15:00', '2026-10-15T18:00', 4500, null));
+    const o = outlook({ taf: t, limits: { lvpVisibility: 4000, lvpCeiling: 300, marginalVisibility: 3000, marginalCeiling: 500 } });
+    // The panel shows the 3000 that was typed, and judges by 4000: 4500 m is clear of both.
+    expect(o.limits.marginalVisibility).toBe(3000);
+    expect(o.clamped).toBe(true);
+    expect(hourAt(o, '20:00').taf.prevailing.status).toBe('ok');
+    expect(outlook({ taf: t }).clamped).toBe(false);
   });
 
   it('are saved and read back, and a browser that cannot store them still works', () => {
@@ -109,6 +124,17 @@ describe('the limits kept in the browser', () => {
     const broken = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };
     expect(readLimits(broken)).toEqual(DEFAULT_LVP_LIMITS);
     expect(() => saveLimits(DEFAULT_LVP_LIMITS, broken)).not.toThrow();
+  });
+
+  it('say when they could not be kept, and still apply until the page is closed', () => {
+    const broken = { getItem: () => null, setItem: () => { throw new Error('quota'); } };
+    expect(saveLimits({ lvpVisibility: 900 }, broken)).toBe(false);
+    expect(limitsKept()).toBe(false);
+    expect(readLimits(broken).lvpVisibility).toBe(900);
+    const s = store();
+    expect(saveLimits({ lvpVisibility: 1100 }, s)).toBe(true);
+    expect(limitsKept()).toBe(true);
+    expect(readLimits(s).lvpVisibility).toBe(1100);
   });
 });
 
@@ -351,7 +377,6 @@ describe('what is missing', () => {
     expect(noOutlookText(o)).toBe('No METAR from this airport in the last 3 hours. No TAF for this airport.');
     expect(visibilityFact(o, fmt)).toEqual({ text: 'No data', status: 'unknown' });
     expect(noOutlookText(outlook({}))).toContain('Loading the METAR');
-    expect(noOutlookText({ metar: { state: 'ok' }, taf: { state: 'ok' } })).toBe('No METAR, TAF or model visibility for this airport.');
   });
 
   it('says what failed, and that it is loading', () => {
@@ -490,5 +515,146 @@ describe('runs and wording', () => {
     expect(hourSummary(hourAt(o, '03:00'))).toBe('LVP possible');
     expect(hourSummary(hourAt(o, '12:00'))).toBe('above limits');
     expect(hourSummary({ level: 'unknown' })).toBe('no data');
+  });
+});
+
+describe('how far the hours are judged', () => {
+  const clear = obs({ rawOb: 'METAR XXXX 141550Z 23009KT 9999 FEW030', visib: '6+' });
+
+  it('says "for the next N hours" only as far as the TAF covers, and when it ends', () => {
+    const short = taf(group('BASE', '2026-10-14T15:00', '2026-10-15T03:00', 10_000, null));
+    const o = outlook({ taf: { ...short, to: at('2026-10-15T03:00') }, observation: clear });
+    expect(outlookLines(o, fmt)).toEqual(['Visibility and ceiling above limits for the next 11 hours (TAF).', 'TAF ends at 03:00.']);
+    expect(o.hours.filter((h) => h.level !== 'unknown')).toHaveLength(11);
+    expect(visibilityFact(o, fmt)).toEqual({ text: 'VIS 10 km or more, no LVP for 11 h', status: 'unknown' });
+  });
+
+  it('says when a TAF is only valid from a later time, and judges only what is covered', () => {
+    const later = { ...taf(group('BASE', '2026-10-15T00:00', '2026-10-15T18:00', 10_000, null)), from: at('2026-10-15T00:00') };
+    const o = outlook({ taf: later, observation: clear });
+    expect(outlookLines(o, fmt)).toEqual([
+      'Visibility and ceiling above limits now (METAR).',
+      'Visibility and ceiling above limits from 00:00 onwards (TAF).',
+      'TAF starts at 00:00.',
+    ]);
+    expect(visibilityFact(o, fmt)).toEqual({ text: 'VIS 10 km or more', status: 'ok' });
+    // No METAR either: the first hours are nobody's.
+    const none = outlook({ taf: later });
+    expect(visibilityFact(none, fmt)).toEqual({ text: 'No LVP expected from 00:00', status: 'unknown' });
+  });
+
+  it('judges every hour of a model that covers the day, so the TAF ending does not shorten it', () => {
+    const short = { ...taf(group('BASE', '2026-10-14T15:00', '2026-10-15T03:00', 10_000, null)), to: at('2026-10-15T03:00') };
+    const o = outlook({ taf: short, hourly: clearModel(), observation: clear });
+    expect(outlookLines(o, fmt)).toEqual(['Visibility and ceiling above limits for the next 24 hours (TAF, model).', 'TAF ends at 03:00.']);
+  });
+
+  it('lists the spans that are judged when there is a gap', () => {
+    const o = outlook({ hourly: model([10_000, 10_000, 10_000]), taf: taf(group('BASE', '2026-10-15T00:00', '2026-10-15T18:00', 10_000, null)) });
+    expect(judgedSpans(o).map((s) => [s.start, s.end, s.sources])).toEqual([[0, 3, ['model']], [8, 24, ['TAF']]]);
+  });
+
+  it('is not green for a TAF that has run out of hours, but says what it has', () => {
+    const o = outlook({ taf: { ...taf(group('BASE', '2026-10-14T15:00', '2026-10-14T19:00', 10_000, null)), to: at('2026-10-14T19:00') } });
+    expect(visibilityFact(o, fmt)).toEqual({ text: 'No LVP expected for 3 h', status: 'unknown' });
+  });
+});
+
+describe('an old METAR', () => {
+  const report = (minutesAgo) => toObservation({ rawOb: 'METAR EFRO 141550Z 17004KT 0700 FG VV002 02/02', obsTime: NOW / 1000 - minutesAgo * 60, temp: 2, dewp: 2, visib: 0.43, clouds: [{ cover: 'OVX', base: 200 }] });
+
+  it('counts as now up to 90 minutes', () => {
+    expect(METAR_STALE_MS).toBe(90 * 60_000);
+    const o = outlook({ observation: report(89), taf: taf(BASE) });
+    expect(o.metar.state).toBe('ok');
+    expect(o.metar.now).not.toBeNull();
+    expect(o.hours[0].metar).not.toBeNull();
+    expect(visibilityFact(o, fmt).status).toBe('nogo');
+  });
+
+  it('is shown with its age after that, but is not now, does not set the fact or the first hour', () => {
+    const o = outlook({ observation: report(131), taf: taf(BASE) });
+    expect(o.metar.state).toBe('stale');
+    expect(o.metar.now).toBeNull();
+    expect(o.metar.latest).toMatchObject({ visibility: 700, status: 'nogo' });
+    expect(o.hours[0].metar).toBeNull();
+    expect(o.hours[0].level).toBe('ok');
+    expect(visibilityFact(o, fmt)).toEqual({ text: 'No LVP expected in 24 h', status: 'ok' });
+    expect(outlookLines(o, fmt)).toContain('The latest METAR is 2 h 11 min old (14:09), so it is not taken for now.');
+    expect(outlookLines(o, fmt).some((l) => l.includes('LVP now'))).toBe(false);
+    expect(o.hasData).toBe(true);
+  });
+
+  it('leaves nothing to show when it is all there is', () => {
+    const o = outlook({ observation: report(200) });
+    expect(o.hasData).toBe(false);
+    expect(noOutlookText(o, fmt)).toContain('METAR is 3 h 20 min old');
+    expect(visibilityFact(o, fmt)).toEqual({ text: 'No data', status: 'unknown' });
+  });
+
+  it('writes an age in minutes, or hours and minutes', () => {
+    expect(formatAge(35 * 60_000)).toBe('35 min');
+    expect(formatAge(60 * 60_000)).toBe('1 h 00 min');
+    expect(formatAge(125 * 60_000)).toBe('2 h 05 min');
+  });
+});
+
+describe('the tiles of the METAR', () => {
+  it('judges the visibility by the visibility alone and the RVR by the RVR', () => {
+    const o = outlook({ observation: obs({ rawOb: 'METAR LTFM 141550Z 01035KT 2400 R34L/0700N R36/0750N SHRA BKN006', visib: 1.49, clouds: [{ cover: 'BKN', base: 600 }] }) });
+    expect(o.metar.now).toMatchObject({ visibilityStatus: 'caution', rvrStatus: 'nogo', ceilingStatus: 'ok', status: 'nogo' });
+    const clearRvr = outlook({ observation: obs({ rawOb: 'METAR XXXX 141550Z 01005KT 0800 R34L/P1500U FG', visib: 0.5 }) });
+    expect(clearRvr.metar.now).toMatchObject({ visibilityStatus: 'nogo', rvrStatus: 'unknown' });
+  });
+});
+
+describe('the fog hint without model visibility', () => {
+  const air = (extra) => ({
+    time: Array.from({ length: 30 }, (_, i) => new Date(at('2026-10-14T16:00') + i * 3_600_000).toISOString().slice(0, 16)),
+    temperature_2m: Array.from({ length: 30 }, () => 5),
+    dew_point_2m: Array.from({ length: 30 }, () => 4.5),
+    wind_speed_10m: Array.from({ length: 30 }, () => 3),
+    ...extra,
+  });
+
+  it('reads the hourly temperature, dew point and wind whether or not there is visibility', () => {
+    const o = outlook({ hourly: air(), taf: taf(BASE) });
+    expect(o.model.state).toBe('none');
+    expect(o.hours.every((h) => h.fog)).toBe(true);
+    expect(fogRuns(o)).toHaveLength(1);
+  });
+
+  it('uses the humidity the forecast has, else works it out', () => {
+    const humidity = (v) => outlook({ hourly: air({ relative_humidity_2m: Array.from({ length: 30 }, () => v) }) }).hours[0].fog;
+    expect(humidity(90)).toBe(true);
+    expect(humidity(89.9)).toBe(false);
+    // Its own figure beats the one worked out from temperature and dew point (which is above 90 here).
+    expect(humidity(50)).toBe(false);
+  });
+
+  it('has its limits at the boundary values: a spread of 2, wind of 8 kt', () => {
+    const humid = { humidity: 95 };
+    expect(foggy({ spread: 2, speed: 8, ...humid }, null)).toBe(true);
+    expect(foggy({ spread: 2.1, speed: 8, ...humid }, null)).toBe(false);
+    expect(foggy({ spread: 2, speed: 8.1, ...humid }, null)).toBe(false);
+    expect(foggy({ spread: 0, speed: 0, humidity: 90 }, null)).toBe(true);
+    expect(foggy({ spread: 0, speed: 0, humidity: 89.99 }, null)).toBe(false);
+    expect(foggy({ spread: 0, speed: 0, humidity: null }, null)).toBe(false);
+    expect(foggy({ spread: null, speed: 0, humidity: 99 }, null)).toBe(false);
+    expect(foggy({ spread: 0, speed: null, humidity: 99 }, null)).toBe(false);
+    expect(foggy(null, null)).toBe(false);
+    // The METAR's spread and wind stand in for the forecast's in its hour.
+    expect(foggy({ spread: 0, speed: 0, humidity: 99 }, { spread: 2.1, speed: 3 })).toBe(false);
+    expect(foggy({ spread: 5, speed: 20, humidity: 99 }, { spread: 2, speed: 8 })).toBe(true);
+  });
+});
+
+describe('a BECMG that improves', () => {
+  it('holds the worse conditions from before until the change is complete', () => {
+    const t = taf(group('BASE', '2026-10-14T15:00', '2026-10-15T18:00', 600, undefined), group('BECMG', '2026-10-15T06:00', '2026-10-15T18:00', 10_000, null, { becoming: at('2026-10-15T09:00') }));
+    const o = outlook({ taf: t });
+    expect(hourAt(o, '05:00').taf.prevailing).toMatchObject({ status: 'nogo', visibility: 600 });
+    for (const clock of ['06:00', '07:00', '08:00']) expect(hourAt(o, clock).taf.prevailing).toMatchObject({ status: 'nogo', visibility: 600 });
+    expect(hourAt(o, '09:00').taf.prevailing).toMatchObject({ status: 'ok', visibility: 10_000 });
   });
 });

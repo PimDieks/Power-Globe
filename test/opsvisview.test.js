@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { opsPanelHtml, OPS_PARTS } from '../src/ops.js';
 import { formatClock, formatClockShort, formatTick } from '../src/opsclock.js';
 import { CLOCK_CHECK_MS } from '../src/opsrunwayview.js';
-import { DEFAULT_LVP_LIMITS, readLimits } from '../src/opsvis.js';
+import { DEFAULT_LVP_LIMITS, readLimits, saveLimits } from '../src/opsvis.js';
 import { bind, hourLabel, hourReadout, unbind, visibilityPart } from '../src/opsvisview.js';
 import { toObservation } from '../src/metar.js';
 import { parseTaf } from '../src/taf.js';
@@ -102,7 +102,7 @@ describe('the section', () => {
     const out = html({ observation: fog, taf: parseTaf(sample('LFPG')), hourly: { time: ['2026-10-14T16:00'], temperature_2m: [10] } });
     expect(out).not.toContain('<span>TEMPO</span>');
     expect(out).not.toContain('<span>Model</span>');
-    expect(out).toContain('has no visibility, so there is no model row and no fog hint');
+    expect(out).toContain('has no visibility, so there is no model row');
     expect(out).toContain('<span>TAF</span>');
   });
 
@@ -125,7 +125,7 @@ describe('the section', () => {
 
   it('says what is missing, with the limits and the disclaimer, when there is nothing to draw', () => {
     const out = html();
-    expect(out).toContain('No METAR from this airport in the last 3 hours. No TAF for this airport.');
+    expect(out).toContain('<li>No METAR from this airport in the last 3 hours.</li><li>No TAF for this airport.</li>');
     expect(out).not.toContain('vis-chart');
     expect(out).toContain('data-limit="lvpVisibility"');
     expect(out).toContain('An aid to planning');
@@ -140,6 +140,84 @@ describe('the section', () => {
     const failed = html({ observation: { error: 'blocked <b>' }, taf: { error: 'down' } });
     expect(failed).toContain('The METAR could not be loaded (blocked &lt;b&gt;).');
     expect(failed).not.toContain('<b>)');
+  });
+});
+
+describe('the section, in the details of what is shown', () => {
+  const report = (extra = {}) => toObservation({ rawOb: 'METAR LTFM 141550Z 01035KT 2400 R34L/0700N SHRA BKN006', obsTime: NOW / 1000 - 600, temp: 15, dewp: 14, visib: 1.49, clouds: [{ cover: 'BKN', base: 600 }], ...extra });
+  const tile = (out, label) => out.match(new RegExp(`<div class="vis-fact([^"]*)"><span>${label}</span><b>([^<]*)</b>`));
+
+  it('colours the visibility tile by the visibility and the RVR tile by the RVR', () => {
+    const out = html({ observation: report() });
+    expect(tile(out, 'Visibility').slice(1)).toEqual([' status-caution', '2,400 m']);
+    expect(tile(out, 'RVR').slice(1)).toEqual([' status-nogo', '34L 700 m']);
+    expect(tile(out, 'Ceiling').slice(1)).toEqual([' status-ok', '600 ft']);
+  });
+
+  it('shows an old METAR dimmed, with its age, and does not call it now', () => {
+    const out = html({ observation: report({ obsTime: NOW / 1000 - 3 * 3600 }), taf: parseTaf(sample('LFPG')) });
+    expect(out).toContain('class="vis-now vis-stale"');
+    expect(out).toContain('too old to be now</span><b>13:20, 3 h 00 min old</b>');
+    expect(out).toContain('The latest METAR is 3 h 00 min old (13:20), so it is not taken for now.');
+    expect(out).not.toContain('<span>METAR</span><span>TAF</span>');
+    expect(out).not.toContain('LVP now');
+    expect(out).toContain('Visibility');
+  });
+
+  it('draws fog in its own row, whatever the forecast says of visibility', () => {
+    const damp = hourly(Array.from({ length: 30 }, () => 10_000));
+    damp.temperature_2m = damp.time.map(() => 5);
+    damp.dew_point_2m = damp.time.map(() => 4.5);
+    damp.wind_speed_10m = damp.time.map(() => 3);
+    const withVis = html({ hourly: damp });
+    expect(withVis).toContain('<span>Fog</span>');
+    expect(count(withVis, /vis-fogrisk/g)).toBe(24);
+    const { visibility, ...noVis } = damp;
+    const out = html({ hourly: noVis, taf: parseTaf(sample('LFPG')) });
+    expect(out).toContain('<span>Fog</span>');
+    expect(out).not.toContain('<span>Model</span>');
+    expect(html({ hourly: hourly(Array.from({ length: 30 }, () => 10_000)) })).not.toContain('<span>Fog</span>');
+  });
+
+  it('puts the explanation behind a closed disclosure, and keeps the limits and the disclaimer in view', () => {
+    const out = html({ observation: fog, taf: parseTaf(sample('EFRO')) });
+    expect(out).toMatch(/<details class="vis-help"><summary>How to read this<\/summary>/);
+    expect(out).not.toContain('<details class="vis-help" open');
+    // What the strips mean is inside it; the limits and the disclaimer are after it.
+    const [inside, after] = out.split('</details>');
+    expect(inside).toContain('green above the limits');
+    expect(after).toContain('data-limit="lvpVisibility"');
+    expect(after).toContain('An aid to planning');
+    expect(after).not.toContain('green above the limits');
+  });
+
+  it('keeps the disclosure open across drawing again once it has been opened', () => {
+    const { root, fire } = (() => {
+      const handlers = new Map();
+      return { root: { addEventListener: (t, f) => handlers.set(t, f), removeEventListener: () => {}, querySelector: () => null, querySelectorAll: () => [] }, fire: (t, e) => handlers.get(t)?.(e) };
+    })();
+    bind(root, { setTime: vi.fn(), rerender: vi.fn() }, { setTimer: () => 1, clearTimer: () => {} });
+    fire('toggle', { target: { classList: { contains: () => true }, open: true } });
+    expect(html({ observation: fog, taf: parseTaf(sample('EFRO')) })).toContain('<details class="vis-help" open>');
+    fire('toggle', { target: { classList: { contains: () => false }, open: false } });
+    expect(html({ observation: fog, taf: parseTaf(sample('EFRO')) })).toContain('<details class="vis-help" open>');
+    fire('toggle', { target: { classList: { contains: () => true }, open: false } });
+    expect(html({ observation: fog, taf: parseTaf(sample('EFRO')) })).not.toContain('<details class="vis-help" open>');
+    unbind();
+  });
+
+  it('marks the limit fields so the section is not drawn again while one is typed in, and says when limits are not kept', () => {
+    const out = html({ observation: fog });
+    expect(count(out, /data-editing/g)).toBe(4);
+    expect(out).not.toContain('could not be kept');
+    const broken = { getItem: () => null, setItem: () => { throw new Error('full'); } };
+    saveLimits({ lvpVisibility: 2000, marginalVisibility: 1000 }, broken);
+    const warned = html({ observation: fog });
+    expect(warned).toContain('These limits could not be kept in this browser. They apply until the page is closed.');
+    // What was typed is shown as typed; judged with marginal no stricter than LVP, and it says so.
+    expect(warned).toMatch(/data-limit="marginalVisibility"[^>]*value="1000"/);
+    expect(warned).toContain('Marginal limits below the LVP ones are judged as the LVP ones.');
+    saveLimits(DEFAULT_LVP_LIMITS, { getItem: () => null, setItem: () => {} });
   });
 });
 

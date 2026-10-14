@@ -15,21 +15,32 @@ export const DEFAULT_LVP_LIMITS = { lvpVisibility: 1500, lvpCeiling: 300, margin
 
 const LIMIT_KEY = 'power-globe:ops-visibility-limits';
 
-// The limits as numbers: anything missing or not a number is the default, and marginal is never
-// stricter than LVP.
+// The limits as numbers, as they were given: anything missing or not a number is the default.
 export function cleanLimits(raw) {
   const out = {};
   for (const [name, fallback] of Object.entries(DEFAULT_LVP_LIMITS)) {
     const value = Number(raw?.[name]);
     out[name] = raw?.[name] != null && raw[name] !== '' && Number.isFinite(value) && value >= 0 ? Math.round(value) : fallback;
   }
-  out.marginalVisibility = Math.max(out.marginalVisibility, out.lvpVisibility);
-  out.marginalCeiling = Math.max(out.marginalCeiling, out.lvpCeiling);
   return out;
 }
 
-// The limits remembered for this browser, or the defaults.
+// The limits as they are judged by: marginal is never stricter than LVP. What the reader typed is
+// kept as it was, and only read like this.
+export function effectiveLimits(limits) {
+  const set = cleanLimits(limits);
+  return { ...set, marginalVisibility: Math.max(set.marginalVisibility, set.lvpVisibility), marginalCeiling: Math.max(set.marginalCeiling, set.lvpCeiling) };
+}
+
+// Limits that could not be kept in the browser, held for as long as the page is open.
+let unsaved = null;
+
+// Whether the limits in use are kept in this browser (false when saving them failed).
+export const limitsKept = () => unsaved === null;
+
+// The limits set, or the defaults.
 export function readLimits(storage) {
+  if (unsaved) return { ...unsaved };
   try {
     return cleanLimits(JSON.parse((storage ?? globalThis.localStorage).getItem(LIMIT_KEY)));
   } catch {
@@ -37,11 +48,17 @@ export function readLimits(storage) {
   }
 }
 
+// Keeps the limits for this browser and says whether that worked; if not they still apply until
+// the page is closed.
 export function saveLimits(limits, storage) {
+  const set = cleanLimits(limits);
   try {
-    (storage ?? globalThis.localStorage).setItem(LIMIT_KEY, JSON.stringify(cleanLimits(limits)));
+    (storage ?? globalThis.localStorage).setItem(LIMIT_KEY, JSON.stringify(set));
+    unsaved = null;
+    return true;
   } catch {
-    // Remembering the limits is only a convenience.
+    unsaved = set;
+    return false;
   }
 }
 
@@ -189,23 +206,27 @@ export function relativeHumidity(temperature, dewPoint) {
 }
 
 // Fog is likely to form or last when the air is within FOG_SPREAD °C of its dew point, the wind is
-// light (at most FOG_WIND_KT) and the model has the air humid.
+// light (at most FOG_WIND_KT) and the forecast has the air humid.
 export const FOG_SPREAD = 2;
 export const FOG_WIND_KT = 8;
 export const FOG_HUMIDITY = 90;
 
-// The model's hour: its visibility judged, and the numbers the fog hint reads.
+// The model's hour: its visibility judged.
 function modelHour(hourly, i, limits) {
+  const visibility = isNumber(hourly.visibility?.[i]) ? hourly.visibility[i] : null;
+  return { visibility, ...(visibility == null ? { status: 'unknown', reasons: [] } : classify({ visibility }, limits)) };
+}
+
+// The air in an hour of the forecast, which the fog hint reads whether or not the forecast has
+// visibility: spread, wind and humidity (the forecast's own where it has it).
+function airHour(hourly, i) {
   const at = (name) => (isNumber(hourly[name]?.[i]) ? hourly[name][i] : null);
-  const visibility = at('visibility');
   const temperature = at('temperature_2m');
   const dewPoint = at('dew_point_2m');
   return {
-    visibility,
-    ...(visibility == null ? { status: 'unknown', reasons: [] } : classify({ visibility }, limits)),
     spread: temperature != null && dewPoint != null ? temperature - dewPoint : null,
     speed: at('wind_speed_10m'),
-    humidity: relativeHumidity(temperature, dewPoint),
+    humidity: at('relative_humidity_2m') ?? relativeHumidity(temperature, dewPoint),
   };
 }
 
@@ -234,13 +255,12 @@ function combine(hour) {
 const hourIndex = (hourly, time) => hourly?.time?.indexOf(time) ?? -1;
 
 // The fog hint's verdict for an hour. The spread and the wind come from the METAR in the hour it
-// belongs to, else from the model; the humidity is the model's.
-function foggy(hour, metar) {
-  const model = hour.model;
-  if (!model || model.humidity == null) return false;
-  const spread = metar?.spread ?? model.spread;
-  const speed = metar?.speed ?? model.speed;
-  return spread != null && spread <= FOG_SPREAD && speed != null && speed <= FOG_WIND_KT && model.humidity >= FOG_HUMIDITY;
+// belongs to, else from the forecast; the humidity is the forecast's.
+export function foggy(air, metar) {
+  if (!air || air.humidity == null) return false;
+  const spread = metar?.spread ?? air.spread;
+  const speed = metar?.speed ?? air.speed;
+  return spread != null && spread <= FOG_SPREAD && speed != null && speed <= FOG_WIND_KT && air.humidity >= FOG_HUMIDITY;
 }
 
 // The state of a source that is loaded by the page: 'loading' (undefined), 'none' (null), 'error'
@@ -251,38 +271,64 @@ function sourceState(value) {
   return value.error ? 'error' : 'ok';
 }
 
+// A METAR older than this is not what is happening now.
+export const METAR_STALE_MS = 90 * 60_000;
+
 // The next hours: `hours` has an entry per hour with the verdict of each source (`metar` in the
 // first hour only, `taf` with the prevailing conditions and the worst TEMPO or PROB group, `model`),
 // the worst `level` and `strength` of it, and whether the fog hint applies. `metar`, `taf` and
-// `model` say what each source gave: a `state` of 'ok', 'loading', 'none' or 'error'.
+// `model` say what each source gave: a `state` of 'ok', 'loading', 'none' or 'error' (a METAR that
+// is too old is 'stale': it is shown, as `metar.latest`, but is not `metar.now`). `limits` are the
+// limits as set; the hours are judged by `effectiveLimits(limits)`.
 export function visibilityOutlook({ hourly, observation, taf, now = Date.now(), limits = DEFAULT_LVP_LIMITS, hours = VISIBILITY_OUTLOOK_HOURS }) {
+  const set = cleanLimits(limits);
+  const judging = effectiveLimits(limits);
   const times = outlookTimes(now, hours);
   const first = Date.parse(`${times[0]}Z`);
-  const current = sourceState(observation) === 'ok' ? observedConditions(observation) : null;
-  const metar = { state: sourceState(observation), error: observation?.error ?? null, now: current ? { ...current, ...classify({ visibility: current.controlling, ceiling: current.ceiling }, limits) } : null };
+  const observed = sourceState(observation) === 'ok' ? observedConditions(observation) : null;
+  const latest = observed && {
+    ...observed,
+    ...classify({ visibility: observed.controlling, ceiling: observed.ceiling }, judging),
+    // The tiles are judged each by what they show.
+    visibilityStatus: classify({ visibility: observed.visibility }, judging).status,
+    rvrStatus: classify({ visibility: observed.rvrMin }, judging).status,
+    ceilingStatus: classify({ ceiling: observed.ceiling }, judging).status,
+  };
+  const age = latest?.time != null ? now - latest.time : null;
+  const stale = age != null && age > METAR_STALE_MS;
+  const metar = {
+    state: latest && stale ? 'stale' : sourceState(observation),
+    error: observation?.error ?? null,
+    age,
+    latest,
+    now: latest && !stale ? latest : null,
+  };
   const stretches = taf && !taf.error ? prevailingStretches(taf) : [];
   const tafState = taf && !taf.error && taf.to <= first ? 'expired' : sourceState(taf);
   const modelOk = Array.isArray(hourly?.visibility) && times.some((t) => isNumber(hourly.visibility[hourIndex(hourly, t)]));
 
   const list = times.map((time, k) => {
     const start = Date.parse(`${time}Z`);
+    const at = hourIndex(hourly, time);
     const hour = {
       time,
       metar: k === 0 && metar.now ? metar.now : null,
-      taf: tafState === 'ok' ? tafHour(taf, stretches, start, start + HOUR_MS, limits) : null,
-      model: modelOk && hourIndex(hourly, time) >= 0 ? modelHour(hourly, hourIndex(hourly, time), limits) : null,
+      taf: tafState === 'ok' ? tafHour(taf, stretches, start, start + HOUR_MS, judging) : null,
+      model: modelOk && at >= 0 ? modelHour(hourly, at, judging) : null,
     };
-    return { ...hour, ...combine(hour), fog: foggy(hour, hour.metar) };
+    return { ...hour, ...combine(hour), fog: foggy(at >= 0 ? airHour(hourly, at) : null, hour.metar) };
   });
-  const tafChanges = list.some((h) => h.taf?.change);
   return {
-    limits,
+    limits: set,
+    // Marginal limits set stricter than the LVP ones are judged as the LVP ones.
+    clamped: judging.marginalVisibility !== set.marginalVisibility || judging.marginalCeiling !== set.marginalCeiling,
     times,
+    window: { start: first, end: first + hours * HOUR_MS },
     metar,
-    taf: { state: tafState, error: taf?.error ?? null, value: tafState === 'ok' ? taf : null, changes: tafChanges },
+    taf: { state: tafState, error: taf?.error ?? null, value: tafState === 'ok' ? taf : null, changes: list.some((h) => h.taf?.change) },
     model: { state: modelOk ? 'ok' : 'none' },
     hours: list,
-    hasData: metar.state === 'ok' || tafState === 'ok' || modelOk,
+    hasData: Boolean(metar.now) || tafState === 'ok' || modelOk,
   };
 }
 
@@ -351,35 +397,74 @@ export function fogRuns(outlook) {
   return runs;
 }
 
-// What the lines say about a source that is not there.
-function missingNotes(outlook) {
+// Runs of consecutive hours that some source judges: { start, end, from, to, sources }, the sources
+// as in problemRuns (a TAF's changes counted as the TAF).
+export function judgedSpans(outlook) {
+  const spans = [];
+  outlook.hours.forEach((hour, i) => {
+    if (hour.level === 'unknown') return;
+    const labels = hour.sources.map((s) => (s.label.startsWith('TAF') ? 'TAF' : s.label));
+    const last = spans.at(-1);
+    if (last && last.end === i) {
+      last.end = i + 1;
+      last.to = outlook.hours[i + 1]?.time ?? null;
+      for (const label of labels) if (!last.sources.includes(label)) last.sources.push(label);
+    } else {
+      spans.push({ start: i, end: i + 1, from: hour.time, to: outlook.hours[i + 1]?.time ?? null, sources: [...new Set(labels)] });
+    }
+  });
+  return spans;
+}
+
+const clockOf = (ms) => new Date(ms).toISOString().slice(0, 16);
+
+// "2 h 10 min", "35 min".
+export function formatAge(ms) {
+  const minutes = Math.max(0, Math.round(ms / 60_000));
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min`;
+}
+
+// What the lines say about a source that is not there or does not cover the hours: `fmt` writes a
+// GMT time as the reader's local time.
+function sourceNotes(outlook, fmt) {
   const notes = [];
-  const { metar, taf } = outlook;
+  const { metar, taf, window } = outlook;
   if (metar.state === 'loading') notes.push('Loading the METAR…');
   else if (metar.state === 'none') notes.push('No METAR from this airport in the last 3 hours.');
   else if (metar.state === 'error') notes.push(`The METAR could not be loaded (${metar.error}).`);
+  else if (metar.state === 'stale') notes.push(`The latest METAR is ${formatAge(metar.age)} old (${fmt(clockOf(metar.latest.time))}), so it is not taken for now.`);
   if (taf.state === 'loading') notes.push('Loading the TAF…');
   else if (taf.state === 'none') notes.push('No TAF for this airport.');
   else if (taf.state === 'expired') notes.push('The latest TAF is no longer valid.');
   else if (taf.state === 'error') notes.push(`The TAF could not be loaded (${taf.error}).`);
+  else if (taf.state === 'ok') {
+    if (taf.value.from > window.start) notes.push(`TAF starts at ${fmt(clockOf(taf.value.from))}.`);
+    if (taf.value.to < window.end) notes.push(`TAF ends at ${fmt(clockOf(taf.value.to))}.`);
+  }
   return notes;
 }
 
 // The lines under the heading, as plain sentences in order of importance: LVP spells, marginal
-// spells, fog risk, and what is missing. `fmt` writes a GMT time as the reader's local time.
+// spells, the hours found clear (only as far as some source judges them), fog risk, and what is
+// missing or does not cover the hours. `fmt` writes a GMT time as the reader's local time.
 export function outlookLines(outlook, fmt) {
   const total = outlook.hours.length;
   const lines = [];
-  const forecasts = [outlook.taf.state === 'ok' && 'TAF', outlook.model.state === 'ok' && 'model'].filter(Boolean);
+  const forecasts = outlook.taf.state === 'ok' || outlook.model.state === 'ok';
   const runs = problemRuns(outlook);
   const spells = [...runs.filter((r) => r.level === 'nogo'), ...runs.filter((r) => r.level === 'caution')].map((r) => runLine(r, total, fmt));
   lines.push(...spells.slice(0, MAX_LINES));
   if (spells.length > MAX_LINES) lines.push(`${spells.length - MAX_LINES} more ${spells.length - MAX_LINES === 1 ? 'spell' : 'spells'} in the strips below.`);
-  if (!runs.length && forecasts.length) {
-    // Only the TAF gives ceilings; the model gives visibility alone.
-    const what = outlook.taf.state === 'ok' ? 'Visibility and ceiling' : 'Visibility';
-    lines.push(`${what} above limits for the next ${total} hours (${forecasts.join(', ')}).`);
-  } else if (!forecasts.length && outlook.metar.state === 'ok') {
+  if (!runs.length && forecasts) {
+    for (const span of judgedSpans(outlook).slice(0, 2)) {
+      const named = span.sources.filter((l) => l !== 'METAR');
+      const sources = named.length ? named : span.sources;
+      // Only the TAF and the METAR give ceilings; the model gives visibility alone.
+      const what = sources.length === 1 && sources[0] === 'model' ? 'Visibility' : 'Visibility and ceiling';
+      const when = span.start === 0 ? (span.end === 1 ? 'now' : `for the next ${span.end} hours`) : spanText(span, total, fmt);
+      lines.push(`${what} above limits ${when} (${sourcesText(sources)}).`);
+    }
+  } else if (!forecasts && outlook.metar.now) {
     lines.push('There is no forecast of visibility here, so the next hours cannot be judged.');
   }
   fogRuns(outlook).slice(0, 2).forEach((run, i) => {
@@ -387,7 +472,7 @@ export function outlookLines(outlook, fmt) {
     const why = i === 0 ? `: spread ${FOG_SPREAD} °C or less, wind ${FOG_WIND_KT} kt or less, humidity ${FOG_HUMIDITY}% or more` : '';
     lines.push(`Fog risk ${spanText(run, total, fmt)}${why}.`);
   });
-  lines.push(...missingNotes(outlook));
+  lines.push(...sourceNotes(outlook, fmt));
   if (!outlook.hasData && !lines.length) lines.push('No METAR, TAF or model visibility for this airport.');
   return lines;
 }
@@ -404,7 +489,8 @@ function measure(now) {
 }
 
 // The Ops status strip's visibility fact: { text, status } ("VIS 800 m, LVP", "LVP expected 03:00",
-// "VIS 10 km or more, no LVP in 24 h"), or null when there is nothing to say.
+// "VIS 10 km or more, no LVP in 24 h"). It is only green for hours that some source judges: where
+// they stop short of the outlook it says how far ("no LVP for 9 h") and is not green.
 export function visibilityFact(outlook, fmt) {
   if (!outlook.hasData) return { text: 'No data', status: 'unknown' };
   const { metar, hours } = outlook;
@@ -419,15 +505,19 @@ export function visibilityFact(outlook, fmt) {
   if (next) {
     return { text: `${next.level === 'nogo' ? 'LVP' : 'Marginal'} ${next.strength} ${fmt(next.time)}`, status: 'caution' };
   }
-  const judged = level === 'ok' || hours.some((h) => h.level === 'ok');
-  if (!judged) return { text: 'No data', status: 'unknown' };
-  const forecast = outlook.taf.state === 'ok' || outlook.model.state === 'ok';
-  return { text: now ? `${measure(now)}${forecast ? `, no LVP in ${total} h` : ''}` : `No LVP expected in ${total} h`, status: 'ok' };
+  const [span] = judgedSpans(outlook);
+  if (!span) return { text: 'No data', status: 'unknown' };
+  if (span.start > 0) return { text: `No LVP expected from ${fmt(span.from)}`, status: 'unknown' };
+  const head = now ? measure(now) : null;
+  // Only the first hour is judged: the fact is about now.
+  if (span.end === 1) return { text: head ?? 'No LVP now', status: 'ok' };
+  if (span.end >= total) return { text: head ? `${head}, no LVP in ${total} h` : `No LVP expected in ${total} h`, status: 'ok' };
+  return { text: head ? `${head}, no LVP for ${span.end} h` : `No LVP expected for ${span.end} h`, status: 'unknown' };
 }
 
 // When there is nothing to show at all, in a sentence.
-export function noOutlookText(outlook) {
-  const notes = missingNotes(outlook);
+export function noOutlookText(outlook, fmt = clockOf) {
+  const notes = sourceNotes(outlook, fmt);
   return notes.length ? notes.join(' ') : 'No METAR, TAF or model visibility for this airport.';
 }
 

@@ -9,7 +9,8 @@
 // a part whose needs are not all there says so instead of failing. `bind` and `unbind` (both
 // optional) are called when the Ops tab is shown and when it goes: `root` is the element the HTML
 // is put in, which stays the same across renders, so a part listens to it for what happens in its
-// section (events are delegated), and starts and stops anything of its own, such as polling.
+// section (events are delegated), and starts and stops anything of its own, such as polling. A field
+// marked data-editing is not drawn over while it is being typed in.
 // `api` is { getContext(), rerender(), setTime(time, { quiet }) }: the context now, drawing the
 // tab again, and setting the timeline. To add a part, write one module that exports such an object
 // and add it to OPS_PARTS below; nothing else changes.
@@ -115,21 +116,48 @@ export function opsPanelHtml(parts, ctx) {
 // again, `setTime(time, { quiet })` sets the timeline to a GMT time.
 export function createOpsHost({ root, getContext, requestRender, setTime, parts = OPS_PARTS }) {
   let mounted = false;
+  // A field marked data-editing that has been typed in and not yet left: the tab is not drawn
+  // again meanwhile (which would take what was typed away), but once, when it is left.
+  let editing = false;
+  let skipped = false;
   const api = { getContext, rerender: requestRender, setTime };
+  const onInput = (event) => {
+    if (event.target.closest?.('[data-editing]')) editing = true;
+  };
+  const onDone = () => {
+    if (!editing) return;
+    editing = false;
+    if (skipped) {
+      skipped = false;
+      setTimeout(requestRender, 0);
+    }
+  };
   return {
     // Idempotent: called whenever the panel's state changes.
     mount() {
       if (mounted) return;
       mounted = true;
+      root.addEventListener('input', onInput);
+      root.addEventListener('change', onDone);
+      root.addEventListener('focusout', onDone);
       for (const part of parts) attempt(part, 'bind', () => part.bind?.(root, api));
     },
     unmount() {
       if (!mounted) return;
       mounted = false;
+      editing = false;
+      skipped = false;
+      root.removeEventListener('input', onInput);
+      root.removeEventListener('change', onDone);
+      root.removeEventListener('focusout', onDone);
       for (const part of parts) attempt(part, 'unbind', () => part.unbind?.(root));
     },
     // Draws the tab for `ctx`; focus stays on the same element (marked data-focus-key) across it.
     render(ctx) {
+      if (editing && root.contains(document.activeElement)) {
+        skipped = true;
+        return;
+      }
       const active = root.contains(document.activeElement) ? document.activeElement.closest?.('[data-focus-key]') : null;
       const key = active?.dataset.focusKey;
       root.innerHTML = opsPanelHtml(parts, ctx);

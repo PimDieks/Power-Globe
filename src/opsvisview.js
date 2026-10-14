@@ -9,10 +9,11 @@ import {
   FOG_HUMIDITY,
   FOG_SPREAD,
   FOG_WIND_KT,
+  formatAge,
   formatCeiling,
   formatVisibility,
   hourSummary,
-  noOutlookText,
+  limitsKept,
   outlookLines,
   readLimits,
   saveLimits,
@@ -53,10 +54,12 @@ export const hourLabel = (hour, fmt) => `${fmt(hour.time)}, ${hourSummary(hour)}
 // The rows of the strip, in order: what the row is called, which sources have it, and the status
 // of an hour in it ('none' is a blank cell: the row has nothing to say in that hour).
 const ROWS = [
-  { id: 'metar', label: 'METAR', has: (o) => o.metar.state === 'ok' && o.metar.now, status: (h, i) => h.metar?.status ?? (i === 0 ? 'unknown' : 'none') },
+  { id: 'metar', label: 'METAR', has: (o) => Boolean(o.metar.now), status: (h, i) => h.metar?.status ?? (i === 0 ? 'unknown' : 'none') },
   { id: 'taf', label: 'TAF', has: (o) => o.taf.state === 'ok', status: (h) => h.taf?.prevailing?.status ?? 'unknown' },
   { id: 'change', label: 'TEMPO', has: (o) => o.taf.state === 'ok' && o.taf.changes, status: (h) => h.taf?.change?.status ?? 'none' },
   { id: 'model', label: 'Model', has: (o) => o.model.state === 'ok', status: (h) => h.model?.status ?? 'unknown' },
+  // Not a verdict against the limits: where the hint applies, whatever the visibility says.
+  { id: 'fog', label: 'Fog', has: (o) => o.hours.some((h) => h.fog), status: (h) => (h.fog ? 'fog' : 'none') },
 ];
 
 const rowsOf = (outlook) => ROWS.filter((row) => row.has(outlook));
@@ -67,7 +70,7 @@ function hoursHtml(outlook, rows, ctx) {
   const stop = Math.max(0, outlook.hours.findIndex((h) => h.time === ctx.time));
   return outlook.hours
     .map((hour, i) => {
-      const cells = rows.map((row) => `<i class="ops-cell status-${row.status(hour, i)}${hour.fog && row.id === 'model' ? ' vis-fog' : ''}"></i>`).join('');
+      const cells = rows.map((row) => `<i class="ops-cell ${row.id === 'fog' && hour.fog ? 'vis-fogrisk' : `status-${row.status(hour, i)}`}"></i>`).join('');
       return `<button type="button" class="vis-hour" tabindex="${i === stop ? 0 : -1}" data-focus-key="vis-hour-${hour.time}" data-time="${hour.time}" data-vis-readout="${escapeHtml(hourReadout(hour, fmt))}" aria-label="${escapeHtml(hourLabel(hour, fmt))}"${hour.time === ctx.time ? ' aria-current="time"' : ''}>${cells}</button>`;
     })
     .join('');
@@ -76,23 +79,25 @@ function hoursHtml(outlook, rows, ctx) {
 // Hour labels along the top, one in four so that they fit.
 const axisHtml = (outlook, formatTick) => outlook.hours.map((h, i) => `<span>${i % 4 === 0 ? escapeHtml(formatTick(h.time)) : ''}</span>`).join('');
 
-// The METAR now: visibility and ceiling (coloured by how they fare), flight category, RVR and the
-// temperature and dew point spread.
+// The latest METAR: visibility and ceiling (each coloured by how it fares by itself), flight
+// category, RVR (coloured by its own status) and the temperature and dew point spread. One that is
+// too old is shown dimmed with its age, and is not called now.
 function nowHtml(outlook, ctx) {
-  const now = outlook.metar.now;
-  if (!now) return '';
+  const latest = outlook.metar.latest;
+  if (!latest) return '';
+  const stale = outlook.metar.state === 'stale';
   const tile = (label, value, status) =>
-    `<div class="vis-fact${status ? ` status-${status}` : ''}"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b>${status && status !== 'unknown' ? `<span class="visually-hidden"> (${WORD[status]})</span>` : ''}</div>`;
-  const level = (reason) => (now.reasons.includes(reason) ? now.status : 'ok');
+    `<div class="vis-fact${status && status !== 'unknown' ? ` status-${status}` : ''}"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b>${status && status !== 'unknown' ? `<span class="visually-hidden"> (${WORD[status]})</span>` : ''}</div>`;
+  const observed = latest.time ? ctx.formatClockShort(new Date(latest.time).toISOString().slice(0, 16)) : null;
   const tiles = [
-    tile('Visibility', formatVisibility(now.visibility), now.visibility == null ? null : level('visibility')),
-    tile(now.verticalVisibility ? 'Vertical visibility' : 'Ceiling', now.ceiling == null ? 'None' : formatCeiling(now.ceiling), level('ceiling')),
-    now.category && tile('Category', now.category),
-    now.rvr.length && tile('RVR', now.rvr.map((g) => `${g.runway} ${g.above ? 'over ' : g.below ? 'under ' : ''}${formatVisibility(g.value)}`).join(', ')),
-    now.spread != null && tile('Spread', `${Math.round(now.spread)} °C (${Math.round(now.temperature)} / ${Math.round(now.dewPoint)})`),
-    now.time && tile('METAR', ctx.formatClockShort(new Date(now.time).toISOString().slice(0, 16))),
+    tile('Visibility', formatVisibility(latest.visibility), latest.visibility == null ? null : latest.visibilityStatus),
+    tile(latest.verticalVisibility ? 'Vertical visibility' : 'Ceiling', latest.ceiling == null ? 'None' : formatCeiling(latest.ceiling), latest.ceilingStatus),
+    latest.category && tile('Category', latest.category),
+    latest.rvr.length && tile('RVR', latest.rvr.map((g) => `${g.runway} ${g.above ? 'over ' : g.below ? 'under ' : ''}${formatVisibility(g.value)}`).join(', '), latest.rvrStatus),
+    latest.spread != null && tile('Spread', `${Math.round(latest.spread)} °C (${Math.round(latest.temperature)} / ${Math.round(latest.dewPoint)})`),
+    observed && tile(stale ? 'METAR, too old to be now' : 'METAR', stale ? `${observed}, ${formatAge(outlook.metar.age)} old` : observed),
   ].filter(Boolean);
-  return `<div class="vis-now" role="group" aria-label="Latest METAR">${tiles.join('')}</div>`;
+  return `<div class="vis-now${stale ? ' vis-stale' : ''}" role="group" aria-label="${stale ? 'Latest METAR, too old to be taken for now' : 'Latest METAR'}">${tiles.join('')}</div>`;
 }
 
 const LIMIT_FIELDS = [
@@ -102,30 +107,41 @@ const LIMIT_FIELDS = [
   ['marginalCeiling', 'Marginal, ceiling (ft)', 50],
 ];
 
-// The limits, as fields with their labels above them.
-function limitsHtml(limits) {
+// The limits, as fields with their labels above them. While one is being typed in, the section is
+// not drawn again (data-editing, see ops.js), so what is typed is not lost.
+function limitsHtml(outlook) {
+  const { limits } = outlook;
   const fields = LIMIT_FIELDS.map(
     ([name, label, step]) =>
-      `<label><span>${escapeHtml(label)}</span><input type="number" min="0" max="99999" step="${step}" inputmode="numeric" data-limit="${name}" data-focus-key="vis-limit-${name}" value="${limits[name]}" /></label>`,
+      `<label><span>${escapeHtml(label)}</span><input type="number" min="0" max="99999" step="${step}" inputmode="numeric" data-limit="${name}" data-editing data-focus-key="vis-limit-${name}" value="${limits[name]}" /></label>`,
   ).join('');
-  return `<fieldset class="limits vis-limits"><legend>Below these it is LVP or marginal (kept in this browser)</legend><div class="limit-inputs">${fields}</div>` +
+  const notes = [
+    outlook.clamped && '<p class="ops-note" role="status">Marginal limits below the LVP ones are judged as the LVP ones.</p>',
+    !limitsKept() && '<p class="ops-note vis-warn" role="status">These limits could not be kept in this browser. They apply until the page is closed.</p>',
+  ].filter(Boolean);
+  return `<fieldset class="limits vis-limits"><legend>Below these it is LVP or marginal (kept in this browser)</legend><div class="limit-inputs">${fields}</div>${notes.join('')}` +
     `<button type="button" class="vis-reset" data-vis-reset data-focus-key="vis-reset">Reset to defaults</button></fieldset>`;
 }
 
 const DISCLAIMER = 'An aid to planning, not an official assessment: check the official METAR and TAF, and the procedures of your airport and operator.';
+
+// Whether "How to read this" is open, kept across the section being drawn again.
+let helpOpen = false;
 
 export function visibilitySectionHtml(outlook, ctx) {
   const fmt = ctx.formatClockShort ?? ctx.formatClock;
   const lines = outlookLines(outlook, fmt);
   const rows = rowsOf(outlook);
   const disclaimer = `<p class="ops-note">${DISCLAIMER}</p>`;
-  const limits = limitsHtml(outlook.limits);
+  const limits = limitsHtml(outlook);
   const linesHtml = `<ul class="ops-lines">${lines.map((l) => `<li>${escapeHtml(l)}</li>`).join('')}</ul>`;
-  if (!rows.length) return `<p>${escapeHtml(noOutlookText(outlook))}</p>${limits}${disclaimer}`;
+  if (!rows.length) return `${nowHtml(outlook, ctx)}${linesHtml}${limits}${disclaimer}`;
   const shown = outlook.hours.find((h) => h.time === ctx.time) ?? outlook.hours[0];
   const readout = hourReadout(shown, fmt);
   const labels = rows.map((r) => `<span>${escapeHtml(r.label)}</span>`).join('');
   const models = outlook.model.state === 'ok';
+  const help = `<details class="vis-help"${helpOpen ? ' open' : ''}><summary>How to read this</summary>
+      <p>One row per source: green above the limits, amber (dotted) marginal, red (hatched) LVP, grey no data. METAR is the latest report and covers the first hour; a lower RVR counts as its visibility. TAF is what prevails, the worst where a change falls within the hour; TEMPO is the worst TEMPO or PROB group that gives a visibility or ceiling. ${models ? 'Model is the forecast visibility only, with no ceiling.' : 'The forecast for this airport has no visibility, so there is no model row.'} Fog is a hint, not a verdict: a spread of ${FOG_SPREAD} °C or less, wind of ${FOG_WIND_KT} kt or less and humidity of ${FOG_HUMIDITY}% or more in the forecast. Hover over an hour, or drag across the hours, for the numbers; the timeline follows.</p></details>`;
   return `<p class="ops-zone">Local time, ${escapeHtml(ctx.zone)}</p>
     ${nowHtml(outlook, ctx)}
     ${linesHtml}
@@ -134,7 +150,7 @@ export function visibilitySectionHtml(outlook, ctx) {
       <div class="ops-row"><div class="ops-rowlabels" aria-hidden="true">${labels}</div><div class="vis-track vis-hours" role="group" aria-label="Hours, move with the left and right arrow keys">${hoursHtml(outlook, rows, ctx)}</div></div>
     </div>
     <p class="vis-readout" data-default="${escapeHtml(readout)}">${escapeHtml(readout)}</p>
-    <p class="ops-note">One row per source: green above the limits, amber (dotted) marginal, red (hatched) LVP, grey no data. METAR is the latest report and covers the first hour; a lower RVR counts as its visibility. TAF is what prevails, the worst where a change falls within the hour; TEMPO is the worst TEMPO or PROB group that gives a visibility or ceiling. ${models ? `Model is visibility only, and a white bar marks fog risk (spread of ${FOG_SPREAD} °C or less, wind of ${FOG_WIND_KT} kt or less, humidity of ${FOG_HUMIDITY}% or more).` : 'The forecast for this airport has no visibility, so there is no model row and no fog hint.'} Hover over an hour, or drag across the hours, for the numbers; the timeline follows.</p>
+    ${help}
     ${limits}${disclaimer}`;
 }
 
@@ -229,7 +245,11 @@ export function bind(root, api, { setTimer = setInterval, clearTimer = clearInte
       list[Math.min(list.length - 1, Math.max(0, next))]?.focus();
     },
   };
-  for (const [type, handler] of Object.entries(on)) root.addEventListener(type, handler);
+  // `toggle` does not bubble, so it is listened to on the way down.
+  on.toggle = (event) => {
+    if (event.target.classList?.contains('vis-help')) helpOpen = Boolean(event.target.open);
+  };
+  for (const [type, handler] of Object.entries(on)) root.addEventListener(type, handler, type === 'toggle');
   root.addEventListener('pointercancel', on.pointerup);
 
   const timer = setTimer(() => {
@@ -244,7 +264,7 @@ export function unbind() {
   const { root, on, timer, clearTimer } = bound;
   bound = null;
   clearTimer(timer);
-  for (const [type, handler] of Object.entries(on)) root.removeEventListener(type, handler);
+  for (const [type, handler] of Object.entries(on)) root.removeEventListener(type, handler, type === 'toggle');
   root.removeEventListener('pointercancel', on.pointerup);
 }
 

@@ -1196,6 +1196,8 @@ async function showAirport(airport, { fromList = false } = {}) {
   const detail = { airport, hourly: null, fromList, observation: undefined, taf: undefined, error: null };
   state.detail = detail;
   syncDetailTabs();
+  // With the Ops tab showing, the TAF is asked for with the METAR, not once the forecast is there.
+  if (state.detailTab === 'ops') requestTaf(detail);
   // The airport's own label on the map shows it is open (see airportmap.js): no pin of its own.
   mapFeatures.setMarker(null);
   airportMap.select(airport);

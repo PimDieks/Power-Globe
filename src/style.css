@@ -1039,9 +1039,34 @@ input:disabled {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
 }
 
-/* Fog risk: a white bar along the foot of the model's cell. */
-.ops-cell.vis-fog {
-  box-shadow: inset 0 -3px 0 #fff;
+/* Fog risk: a light cell with a wavy edge, in its own row. */
+.ops-cell.vis-fogrisk {
+  background: repeating-linear-gradient(90deg, #dfe8f5 0 3px, #9fb4d3 3px 6px);
+}
+
+/* A METAR too old to be now: dimmed. */
+.vis-stale {
+  opacity: 0.6;
+}
+
+.vis-help {
+  margin: 0 0 8px;
+  font-size: 0.75rem;
+}
+
+.vis-help summary {
+  cursor: pointer;
+  color: var(--muted);
+  padding: 4px 0;
+}
+
+.side-panel .vis-help p {
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+}
+
+.side-panel p.vis-warn {
+  color: var(--caution);
 }
 
 .limits.vis-limits {
