@@ -8,7 +8,7 @@
 //
 //   node scripts/build-data.mjs
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { AIRPORT_SNAPSHOT_STEP, AIRPORT_VARIABLES, GRID_STEP, buildAirportUrl, buildGrid, buildUrl, chunk, forecastCopyOf } from '../src/weather.js';
+import { AIRPORT_SNAPSHOT_STEP, AIRPORT_VARIABLES, GRID_STEP, buildAirportUrl, buildGrid, buildUrl, chunk, forecastCopyOf, airportValue } from '../src/weather.js';
 import { majorAirports, toAirport } from '../src/airports.js';
 
 const OUT = new URL('../public/data/api/', import.meta.url);
@@ -60,8 +60,6 @@ async function paced(url, locations) {
   throw lastError;
 }
 
-const round = (v, digits) => (v == null ? null : Number(v.toFixed(digits)));
-
 async function forecast() {
   const points = buildGrid(GRID_STEP);
   const hourly = [];
@@ -91,12 +89,12 @@ async function airportWeather() {
       // Every step (an hour, see AIRPORT_SNAPSHOT_STEP) of the timeline.
       const keep = hourly.time.flatMap((t, k) => (Number(t.slice(11, 13)) % AIRPORT_SNAPSHOT_STEP === 0 ? [k] : []));
       times ??= keep.map((k) => hourly.time[k]);
-      out[part[i].ident] = AIRPORT_VARIABLES.map((v) => keep.map((k) => round(hourly[v]?.[k], v === 'temperature_2m' || v === 'dew_point_2m' ? 1 : 0)));
+      out[part[i].ident] = AIRPORT_VARIABLES.map((v) => keep.map((k) => airportValue(v, hourly[v]?.[k])));
     });
   }
   if (!times) throw new Error('no airport weather at all');
   if (failed) console.error(`${failed} of ${airports.length} airports left out`);
-  return { step: AIRPORT_SNAPSHOT_STEP, variables: AIRPORT_VARIABLES, units: { wind: 'kn', temperature: '°C' }, times, airports: out };
+  return { step: AIRPORT_SNAPSHOT_STEP, variables: AIRPORT_VARIABLES, units: { wind: 'kn', temperature: '°C', visibility: 'm' }, times, airports: out };
 }
 
 await mkdir(OUT, { recursive: true });
@@ -125,7 +123,7 @@ await writeFile(
       built,
       endpoints: {
         'api/forecast.json': 'Global forecast grid, 12° spacing, 5 days every hour (Open-Meteo, CC BY 4.0)',
-        'api/airport-weather.json': 'Temperature, dew point, wind and gusts (kt) at major airports, 5 days every hour (Open-Meteo, CC BY 4.0)',
+        'api/airport-weather.json': 'Temperature, dew point, wind and gusts (kt) and visibility at major airports, 5 days every hour (Open-Meteo, CC BY 4.0)',
         'airports.json': 'Airports and runways (OurAirports, public domain; route counts from OpenFlights, ODbL)',
         'satellites/<group>.tle': 'Satellite orbital elements (CelesTrak)',
       },

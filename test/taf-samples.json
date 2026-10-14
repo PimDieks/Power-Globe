@@ -1,0 +1,74 @@
+{
+  "EFRO": {
+    "meta": {"icaoId": "EFRO", "issueTime": "2026-10-14T14:29:00.000Z", "validTimeFrom": 1791990000, "validTimeTo": 1792076400, "rawTAF": "TAF EFRO 141429Z 1415/1515 17009KT 0300 FG VV001 TEMPO 1415/1418 1200 DZRA BR BKN002 TEMPO 1418/1507 0800 VV002 BECMG 1507/1509 1200 BR -DZ BKN002 TEMPO 1509/1512 0600 FG VV001 BECMG 1512/1514 9999 NSW BKN010"},
+    "fcsts": [
+      {"timeFrom":1791990000,"timeTo":1792047600,"visib":0.19,"vertVis":100,"wxString":"FG","clouds":[{"cover":"OVX","base":null}]},
+      {"timeFrom":1791990000,"timeTo":1792000800,"fcstChange":"TEMPO","visib":0.75,"wxString":"DZ RA BR","clouds":[{"cover":"BKN","base":200}]},
+      {"timeFrom":1792000800,"timeTo":1792047600,"fcstChange":"TEMPO","visib":0.5,"vertVis":200,"clouds":[{"cover":"OVX","base":null}]},
+      {"timeFrom":1792047600,"timeTo":1792065600,"timeBec":1792054800,"fcstChange":"BECMG","visib":0.75,"vertVis":100,"wxString":"BR -DZ","clouds":[{"cover":"BKN","base":200}]},
+      {"timeFrom":1792054800,"timeTo":1792065600,"fcstChange":"TEMPO","visib":0.37,"vertVis":100,"wxString":"FG","clouds":[{"cover":"OVX","base":null}]},
+      {"timeFrom":1792065600,"timeTo":1792076400,"timeBec":1792072800,"fcstChange":"BECMG","visib":"6+","vertVis":100,"wxString":"NSW","clouds":[{"cover":"BKN","base":1000}]}
+    ]
+  },
+  "KJFK": {
+    "meta": {"icaoId": "KJFK", "issueTime": "2026-10-14T14:44:00.000Z", "validTimeFrom": 1791990000, "validTimeTo": 1792087200, "rawTAF": "TAF KJFK 141444Z 1415/1518 25012KT P6SM SCT120 BKN250 FM141600 26012G18KT P6SM FEW040 SCT120 BKN250 PROB30 1416/1419 -SHRA FM142000 28012G18KT P6SM SCT050 BKN120 FM142200 31010KT P6SM BKN070 FM150100 33011KT P6SM BKN100 FM150400 35011KT P6SM SCT250 FM151400 04012G18KT P6SM FEW040 FEW250"},
+    "fcsts": [
+      {"timeFrom":1791990000,"timeTo":1791993600,"visib":"6+","clouds":[{"cover":"SCT","base":12000},{"cover":"BKN","base":25000}]},
+      {"timeFrom":1791993600,"timeTo":1792008000,"fcstChange":"FM","visib":"6+","clouds":[{"cover":"FEW","base":4000},{"cover":"SCT","base":12000},{"cover":"BKN","base":25000}]},
+      {"timeFrom":1791993600,"timeTo":1792004400,"fcstChange":"PROB","probability":30,"visib":"","wxString":"-SHRA"},
+      {"timeFrom":1792008000,"timeTo":1792015200,"fcstChange":"FM","visib":"6+","clouds":[{"cover":"SCT","base":5000},{"cover":"BKN","base":12000}]},
+      {"timeFrom":1792015200,"timeTo":1792026000,"fcstChange":"FM","visib":"6+","clouds":[{"cover":"BKN","base":7000}]},
+      {"timeFrom":1792026000,"timeTo":1792036800,"fcstChange":"FM","visib":"6+","clouds":[{"cover":"BKN","base":10000}]},
+      {"timeFrom":1792036800,"timeTo":1792072800,"fcstChange":"FM","visib":"6+","clouds":[{"cover":"SCT","base":25000}]},
+      {"timeFrom":1792072800,"timeTo":1792087200,"fcstChange":"FM","visib":"6+","clouds":[{"cover":"FEW","base":4000},{"cover":"FEW","base":25000}]}
+    ]
+  },
+  "LFPG": {
+    "meta": {"icaoId": "LFPG", "issueTime": "2026-10-14T11:00:00.000Z", "validTimeFrom": 1791979200, "validTimeTo": 1792087200, "rawTAF": "TAF LFPG 141100Z 1412/1518 20010KT CAVOK TX23/1514Z TN09/1505Z BECMG 1416/1417 14010KT TEMPO 1511/1516 20010KT"},
+    "fcsts": [
+      {"timeFrom":1791979200,"timeTo":1791993600,"visib":"6+","clouds":[{"cover":"NSC","base":null}]},
+      {"timeFrom":1791993600,"timeTo":1792087200,"timeBec":1791997200,"fcstChange":"BECMG","visib":"6+","clouds":[{"cover":"NSC","base":null}]},
+      {"timeFrom":1792062000,"timeTo":1792080000,"fcstChange":"TEMPO","visib":""}
+    ]
+  },
+  "EDDF": {
+    "meta": {"icaoId": "EDDF", "issueTime": "2026-10-14T11:00:00.000Z", "validTimeFrom": 1791979200, "validTimeTo": 1792087200, "rawTAF": "TAF EDDF 141100Z 1412/1518 24005KT CAVOK BECMG 1416/1418 VRB03KT TEMPO 1422/1504 2500 BCFG PROB40 TEMPO 1504/1509 0300 FG VV001 TEMPO 1508/1512 BKN005 PROB40 TEMPO 1510/1516 20005KT"},
+    "fcsts": [
+      {"timeFrom":1791979200,"timeTo":1791993600,"visib":"6+","wxString":"NSW","clouds":[{"cover":"NSC","base":null}]},
+      {"timeFrom":1791993600,"timeTo":1792087200,"timeBec":1792000800,"fcstChange":"BECMG","visib":"6+","wxString":"NSW","clouds":[{"cover":"NSC","base":null}]},
+      {"timeFrom":1792015200,"timeTo":1792036800,"fcstChange":"TEMPO","visib":1.55,"wxString":"BCFG"},
+      {"timeFrom":1792036800,"timeTo":1792054800,"fcstChange":"TEMPO","probability":40,"visib":0.19,"vertVis":100,"wxString":"FG","clouds":[{"cover":"OVX","base":null}]},
+      {"timeFrom":1792051200,"timeTo":1792065600,"fcstChange":"TEMPO","visib":"","clouds":[{"cover":"BKN","base":500}]},
+      {"timeFrom":1792058400,"timeTo":1792080000,"fcstChange":"TEMPO","probability":40,"visib":""}
+    ]
+  },
+  "YSSY": {
+    "meta": {"icaoId": "YSSY", "issueTime": "2026-10-14T14:06:00.000Z", "validTimeFrom": 1791990000, "validTimeTo": 1792087200, "rawTAF": "TAF YSSY 141406Z 1415/1518 30007KT 9999 -SHRA SCT040 FM142200 18012KT 9999 -SHRA BKN030 FM150000 14016KT 9999 -SHRA BKN035 FM150900 11010KT 9999 -SHRA BKN030 INTER 1420/1518 5000 SHRA BKN013"},
+    "fcsts": [
+      {"timeFrom":1791990000,"timeTo":1792015200,"visib":"6+","wxString":"-SHRA","clouds":[{"cover":"SCT","base":4000}]},
+      {"timeFrom":1792015200,"timeTo":1792022400,"fcstChange":"FM","visib":"6+","wxString":"-SHRA","clouds":[{"cover":"BKN","base":3000}]},
+      {"timeFrom":1792022400,"timeTo":1792054800,"fcstChange":"FM","visib":"6+","wxString":"-SHRA","clouds":[{"cover":"BKN","base":3500}]},
+      {"timeFrom":1792054800,"timeTo":1792087200,"fcstChange":"FM","visib":"6+","wxString":"-SHRA","clouds":[{"cover":"BKN","base":3000}]},
+      {"timeFrom":1792008000,"timeTo":1792087200,"fcstChange":"TEMPO","visib":3.11,"wxString":"SHRA","clouds":[{"cover":"BKN","base":1300}]}
+    ]
+  },
+  "EGLL": {
+    "meta": {"icaoId": "EGLL", "issueTime": "2026-10-14T10:53:00.000Z", "validTimeFrom": 1791979200, "validTimeTo": 1792087200, "rawTAF": "TAF EGLL 141053Z 1412/1518 21012KT 9999 SCT035 TEMPO 1503/1512 BKN012 PROB30 TEMPO 1503/1506 8000 -RA PROB40 TEMPO 1506/1512 6000 -RADZ BKN009 PROB30 TEMPO 1512/1516 22015G25KT"},
+    "fcsts": [
+      {"timeFrom":1791979200,"timeTo":1792087200,"visib":"6+","clouds":[{"cover":"SCT","base":3500}]},
+      {"timeFrom":1792033200,"timeTo":1792065600,"fcstChange":"TEMPO","visib":"","clouds":[{"cover":"BKN","base":1200}]},
+      {"timeFrom":1792033200,"timeTo":1792044000,"fcstChange":"TEMPO","probability":30,"visib":4.97,"wxString":"-RA"},
+      {"timeFrom":1792044000,"timeTo":1792065600,"fcstChange":"TEMPO","probability":40,"visib":3.73,"wxString":"-RA -DZ","clouds":[{"cover":"BKN","base":900}]},
+      {"timeFrom":1792065600,"timeTo":1792080000,"fcstChange":"TEMPO","probability":30,"visib":""}
+    ]
+  },
+  "KBTR": {
+    "meta": {"icaoId": "KBTR", "issueTime": "2026-10-14T11:20:00.000Z", "validTimeFrom": 1791979200, "validTimeTo": 1792065600, "rawTAF": "TAF KBTR 141120Z 1412/1512 07004KT 0SM FG VV001 FM141400 00000KT 3SM BR SCT005 FM141700 14005KT P6SM SKC FM151100 00000KT 1 1/2SM BR BKN002"},
+    "fcsts": [
+      {"timeFrom":1791979200,"timeTo":1791986400,"visib":"","vertVis":100,"wxString":"FG","clouds":[{"cover":"OVX","base":null}]},
+      {"timeFrom":1791986400,"timeTo":1791997200,"fcstChange":"FM","visib":3,"wxString":"BR","clouds":[{"cover":"SCT","base":500}]},
+      {"timeFrom":1791997200,"timeTo":1792062000,"fcstChange":"FM","visib":"6+","clouds":[{"cover":"SKC","base":null}]},
+      {"timeFrom":1792062000,"timeTo":1792065600,"fcstChange":"FM","visib":1.5,"wxString":"BR","clouds":[{"cover":"BKN","base":200}]}
+    ]
+  }
+}

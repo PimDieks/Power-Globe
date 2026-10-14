@@ -9,6 +9,7 @@
 //   GET /track?icao24=<hex>       where an aircraft has been on its current flight (OpenSky Network),
 //                                 cached 1 min per aircraft, at most 13 an hour asked of OpenSky
 //   GET /metar?ids=EHAM,KJFK      latest METARs (NOAA Aviation Weather Center), cached 2 min
+//   GET /taf?ids=EHAM,KJFK        latest TAFs (the same source), cached 2 min
 //   GET /satellites/<group>       orbital elements as TLE (CelesTrak), cached 2 h
 //   GET /forecast?<Open-Meteo query>  Open-Meteo forecasts (up to 100 places), cached 30 min
 //   GET /tiles/openaip/<z>/<x>/<y>.png  aeronautical chart tiles (openAIP: airspaces, airports,
@@ -20,7 +21,8 @@
 //
 // Nothing upstream is ever asked more than its cache allows: every answer is cached at the edge
 // and shared by all visitors, a backup of it is kept for 6 hours and served if the service
-// fails or limits us (rather than asking again), and each visitor may make at most
+// fails or limits us (rather than asking again; not for tracks, METARs or TAFs, which are only
+// useful while current), and each visitor may make at most
 // RATE_LIMIT requests a minute. A flight feed that refuses or limits us is also remembered in the
 // edge cache and left alone for a while (6 hours for a refusal, a minute or as long as it asks for
 // a limit; separately when asked direct and through the relay), so the other feeds answer
@@ -278,9 +280,14 @@ async function takeTrackTurn(cache, origin, env) {
 // request carries (the case of the address, other parameters), so that none of those can ask
 // OpenSky again for the same aircraft.
 function cacheUrl(url) {
-  if (url.pathname.replace(/\/+$/, '') === '/track') {
+  const path = url.pathname.replace(/\/+$/, '');
+  if (path === '/track') {
     const icao24 = (url.searchParams.get('icao24') ?? '').toLowerCase();
     if (/^[0-9a-f]{6}$/.test(icao24)) return `${url.origin}/track?icao24=${icao24}`;
+  }
+  // The same goes for METARs and TAFs: only the airports count, not their case or other parameters.
+  if (path === '/metar' || path === '/taf') {
+    return `${url.origin}${path}?ids=${(url.searchParams.get('ids') ?? '').toUpperCase()}`;
   }
   return url.toString();
 }
@@ -302,7 +309,7 @@ export async function route(url, env = {}, fetchFn = fetch, cache) {
     return json(
       {
         name: 'Power Globe API',
-        routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/track?icao24=', '/metar?ids=', '/satellites/<group>', '/forecast?', '/tiles/openaip/<z>/<x>/<y>.png'],
+        routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/track?icao24=', '/metar?ids=', '/taf?ids=', '/satellites/<group>', '/forecast?', '/tiles/openaip/<z>/<x>/<y>.png'],
         opensky: openskyAccount(env) ? 'account' : 'anonymous',
         chart: env.OPENAIP_API_KEY ? 'openAIP' : 'no key',
         relay: relayOn(env) ? 'on' : 'off',
@@ -339,6 +346,13 @@ export async function route(url, env = {}, fetchFn = fetch, cache) {
     const ids = (url.searchParams.get('ids') ?? '').toUpperCase();
     if (!/^[A-Z0-9]{3,4}(,[A-Z0-9]{3,4}){0,19}$/.test(ids)) throw new HttpError(400, 'ids: up to 20 ICAO codes, comma-separated');
     const res = await upstream(fetchFn, `https://aviationweather.gov/api/data/metar?ids=${ids}&format=json&hours=3`);
+    const text = await res.text();
+    return new Response(text.trim() ? text : '[]', { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=120' } });
+  }
+  if (path === '/taf') {
+    const ids = (url.searchParams.get('ids') ?? '').toUpperCase();
+    if (!/^[A-Z0-9]{3,4}(,[A-Z0-9]{3,4}){0,19}$/.test(ids)) throw new HttpError(400, 'ids: up to 20 ICAO codes, comma-separated');
+    const res = await upstream(fetchFn, `https://aviationweather.gov/api/data/taf?ids=${ids}&format=json`);
     const text = await res.text();
     return new Response(text.trim() ? text : '[]', { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=120' } });
   }
@@ -406,8 +420,9 @@ export default {
     const key = new Request(cacheUrl(url), { method: 'GET' });
     const backupKey = new Request(`${url.origin}/__backup${url.pathname}${url.search}`, { method: 'GET' });
     const isTrack = url.pathname.replace(/\/+$/, '') === '/track';
-    // An old track would draw a flight that is long over, so tracks have no backup copy.
-    const backedUp = !isTrack;
+    // An old track would draw a flight that is long over, and an old METAR or TAF would pass for the
+    // current one (a TAF that has been replaced most of all), so these have no backup copy.
+    const backedUp = !isTrack && !['/metar', '/taf'].includes(url.pathname.replace(/\/+$/, ''));
     let res = await cache?.match(key);
     if (!res) {
       const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';

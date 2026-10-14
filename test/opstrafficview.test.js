@@ -234,8 +234,8 @@ describe('the part', () => {
   const inbound = (id = 'inb1', seen = Date.now()) => ({ id, callsign: 'KLM1', type: 'B738', category: 'Large aircraft', lat: 52.3086, lng: 4.7639 + 60 / (60 * Math.cos((52.3086 * Math.PI) / 180)), altitudeFt: 9000, onGround: false, speedKt: 250, track: 270, verticalFpm: -1500, military: false, seen });
   const context = (src, airport = () => EHAM) => () => ({ airport: airport(), now: Date.now(), formatTick, trafficSource: src });
 
-  it('is in the Ops parts, after the runway and lightning parts', () => {
-    expect(OPS_PARTS.map((p) => p.id)).toEqual(['runway', 'lightning', 'traffic']);
+  it('is in the Ops parts, after the runway, visibility and lightning parts', () => {
+    expect(OPS_PARTS.map((p) => p.id)).toEqual(['runway', 'visibility', 'lightning', 'traffic']);
   });
 
   it('shows its fact and section in the panel, and waits for data first', () => {

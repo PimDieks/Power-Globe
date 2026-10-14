@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  AIRPORT_VARIABLES,
+  airportValue,
   apiBudget,
   buildGrid,
   buildUrl,
@@ -10,6 +12,7 @@ import {
   gridShape,
   loadForecast,
   parseTime,
+  roundVisibility,
   precipitationRate,
   resetApiBudget,
   seriesHours,
@@ -470,5 +473,31 @@ describe('limitPause', () => {
     expect(limitPause('Daily API request limit exceeded. Please try again tomorrow.', now)).toBe(6 * 3_600_000);
     expect(limitPause('Hourly API request limit exceeded.', now)).toBe(3_600_000);
     expect(limitPause('Minutely API request limit exceeded.', now)).toBe(60_000);
+  });
+});
+
+describe('airport visibility', () => {
+  it('is asked for with the ground conditions, and kept in the site copy to 100 m and no more than 10 km', () => {
+    expect(AIRPORT_VARIABLES).toContain('visibility');
+    expect(roundVisibility(24_140)).toBe(10_000);
+    expect(roundVisibility(9_960)).toBe(10_000);
+    expect(roundVisibility(1_449)).toBe(1_400);
+    expect(roundVisibility(820)).toBe(800);
+    expect(roundVisibility(0)).toBe(0);
+    expect(roundVisibility(null)).toBeNull();
+    expect(roundVisibility(undefined)).toBeNull();
+  });
+
+  it('keeps each variable of the site copy as it should be: tenths for temperature, whole numbers for wind, rounded visibility', () => {
+    expect(airportValue('temperature_2m', 12.34)).toBe(12.3);
+    expect(airportValue('dew_point_2m', -0.06)).toBe(-0.1);
+    expect(airportValue('wind_speed_10m', 7.6)).toBe(8);
+    expect(airportValue('wind_gusts_10m', 14.4)).toBe(14);
+    expect(airportValue('wind_direction_10m', 359.6)).toBe(360);
+    expect(airportValue('visibility', 24_140)).toBe(10_000);
+    expect(airportValue('visibility', 830)).toBe(800);
+    expect(airportValue('visibility', null)).toBeNull();
+    expect(airportValue('wind_speed_10m', undefined)).toBeNull();
+    expect(AIRPORT_VARIABLES.map((v) => airportValue(v, 1.26))).toEqual([1.3, 1.3, 1, 1, 1, 1, 1, 0]);
   });
 });
