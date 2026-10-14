@@ -10,6 +10,7 @@ import {
   loadForecast,
   loadPointForecast,
   loadRegion,
+  cloudTimes,
   parseTime,
   startIndex,
 } from './weather.js';
@@ -31,8 +32,12 @@ import { CARD_REFRESH_MS, cardText, focusTarget, followLayout, freeArea, spokenD
 import { latestObservation } from './metar.js';
 import { explain } from './api.js';
 
-// Timeline playback speed, in forecast steps (3 hours each) per second.
-const STEPS_PER_SECOND = 1;
+// Timeline playback speed, in forecast steps (an hour each) per second: three hours of forecast a
+// second.
+const STEPS_PER_SECOND = 3;
+// While the timeline plays, the moving clouds load the images for this many steps ahead (see
+// cloudTimes), two seconds' worth.
+const CLOUD_LOOKAHEAD_STEPS = 2 * STEPS_PER_SECOND;
 // Seconds for the colour field to fade in after switching layers.
 const LAYER_FADE = 0.9;
 // Controls fade away after this long without interaction, leaving just the globe.
@@ -406,9 +411,8 @@ function drawStep(step) {
   els.slider.value = String(step);
   els.slider.setAttribute('aria-valuetext', formatTime(times[step]));
   els.timeLabel.textContent = formatTime(times[step]);
-  // While the timeline plays, the clouds for the next two steps load ahead.
-  const ahead = state.playing ? [1, 2].map((k) => parseTime(times[(step + k) % times.length])) : [];
-  basemap.setTime(parseTime(times[step]), ahead);
+  const clouds = cloudTimes(times, step, { playing: state.playing, lookahead: CLOUD_LOOKAHEAD_STEPS });
+  basemap.setTime(clouds.time, clouds.ahead);
   renderCaption();
   renderDetails();
   windCheck.update();
@@ -544,6 +548,9 @@ function tick(now) {
 
 function setPlaying(playing) {
   state.playing = playing;
+  // The moving clouds follow the timeline differently while it plays (see cloudTimes).
+  state.drawnStep = -1;
+  state.dirty = true;
   els.playIcon.textContent = playing ? '❚❚' : '▶';
   els.playText.textContent = playing ? 'Pause forecast' : 'Play forecast';
 }
@@ -576,7 +583,7 @@ async function refresh(force = false) {
     const updated = state.forecast.built
       ? ` · updated ${new Date(state.forecast.built).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`
       : '';
-    els.status.textContent = `${FORECAST_DAYS}-day forecast, every 3 hours${updated}`;
+    els.status.textContent = `${FORECAST_DAYS}-day forecast, every hour${updated}`;
   } catch (err) {
     console.error(err);
     // Most failures are temporary (a busy or rate-limited API), so try again by itself.
@@ -1217,8 +1224,8 @@ function renderDetails() {
   const { data } = detail;
   const index = detailIndex(data);
   const value = (variable) =>
-    // Same definition as the map: the average rate over the 3 hours up to this time (the global
-    // grid already holds that rate).
+    // Same definition as the map: the rate over the hour up to this time (the global grid already
+    // holds that rate).
     variable === 'precipitation' && !data.fromGrid ? precipitationRate(data.precipitation ?? [], index) : data[variable]?.[index];
   const rows = LAYERS.map((l) => `<dt>${l.label}</dt><dd>${fmt(value(l.variable), l.unit)}</dd>`).join('');
   els.detailsBody.innerHTML = `

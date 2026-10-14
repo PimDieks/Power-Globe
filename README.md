@@ -18,7 +18,7 @@ An open-source, interactive 3D globe that visualizes temperature and other weath
 - **Five views of the Earth:** satellite imagery, streets, topographic, an aviation chart (openAIP airspaces, airports and navaids over a light grey map; needs an openAIP key in the Power Globe API), or the clouds as seen from space. Over Europe and Africa they move with the timeline: EUMETSAT's Meteosat images, one every 10 minutes, showing clouds by day and clouds over a dark Earth with city lights by night, at each step's time (and the newest image, about half an hour old, for the forecast part, as the caption says). Elsewhere, and over Europe and Africa too once zoomed in past the Meteosat images' detail of 1 to 2 km, they are yesterday's (NASA VIIRS true colour), continuing as the satellite imagery past its 300 m resolution. Choose **None** among the weather layers for just the map.
 - **Wind as living brushstrokes:** thousands of glowing particles drift along the forecast wind, leaving fading trails, in the spirit of [earth.nullschool.net](https://earth.nullschool.net).
 - **Smooth colour fields:** temperature, wind speed, precipitation, cloud cover and humidity are painted as soft, bicubic-interpolated colour maps in muted palettes. Clear skies and dry areas fade to transparent so the Earth shows through.
-- **An animated 5-day forecast:** it plays on its own in 3-hour steps, blending smoothly between them. Pause, scrub or jump back to **Now** at any time.
+- **An animated 5-day forecast:** it plays on its own at three hours of forecast a second, with a step for every hour and a smooth blend between them. Pause, scrub or jump back to **Now** at any time.
 - **A map when you zoom in:** satellite imagery sharpens as you zoom, down to city level ([Esri World Imagery](https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9) tiles, with the detail level matched to your screen), country borders and city names fade in, and, while a weather layer or wind flow is on, the area in view loads its own finer weather grid (down to 0.25° spacing), so wind and colour fields show local detail instead of a magnified blur.
 - **Made to be watched:** the camera turns slowly, and the controls fade away after a few seconds without interaction, leaving just the globe and a small caption.
 - **Severe weather:** soft pulses mark thunderstorms, heavy rain and heavy snow.
@@ -47,7 +47,7 @@ Visitors should not depend on public services that limit or refuse requests, so 
 
 | File | Contents | Source |
 | --- | --- | --- |
-| `data/api/forecast.json` | The global forecast grid the globe shows, 5 days every 3 hours | Open-Meteo |
+| `data/api/forecast.json` | The global forecast grid the globe shows, 5 days every hour | Open-Meteo |
 | `data/api/airport-weather.json` | Temperature, dew point, wind and gusts (kt) at the ~1,150 major airports, 5 days every 3 hours | Open-Meteo |
 | `data/airports.json` | Airports, runways (headings, thresholds, widths) and route counts | OurAirports, OpenFlights |
 | `data/satellites/<group>.tle` | Satellite orbital elements | CelesTrak |
@@ -120,7 +120,7 @@ Every push to `main` builds the site and deploys it to GitHub Pages via
 | File | Purpose |
 | --- | --- |
 | `src/main.js` | Sets up the [globe.gl](https://github.com/vasturiano/globe.gl) scene, controls, idle fade, timeline playback loop and the details panel. |
-| `src/weather.js` | Builds a 12° sample grid (390 locations, within the free API's per-minute limit) and fetches the 5-day forecast in 3-hour steps. All requests share one queue (the free API allows only a few at once), retry when the API is busy, time out, and are counted against the free limits. Cached in `localStorage` for an hour. |
+| `src/weather.js` | Builds a 12° sample grid (390 locations, within the free API's per-minute limit) and fetches the 5-day forecast, a step for every hour. All requests share one queue (the free API allows only a few at once), retry when the API is busy, time out, and are counted against the free limits. Cached in `localStorage` for an hour (about 1.2 MB; the app works without it if storage is full or blocked). |
 | `src/field.js` | The colour field: bicubic interpolation of the grid painted onto a translucent sphere just above the Earth. |
 | `src/screenflow.js` | Zoomed-in wind particles, drawn straight onto a screen-sized canvas so they stay crisp at any zoom. |
 | `src/flow.js` | The wind particles: advected through the interpolated wind field and drawn with fading trails onto a glowing sphere. |
@@ -164,7 +164,7 @@ and the UI pick it up automatically.
 
 **The airport tools are an aid to planning, not for operational decisions.** Conditions are model forecasts for the airport's position and elevation, not observations: check the official METAR and TAF, and the limits for your aircraft and operator. Runway headings are true headings from OurAirports; wind directions are true as well.
 
-Precipitation is shown as a rate, mm per hour averaged over the 3 hours up to the time shown, on the map, in the storm markers and in the details panel alike.
+Precipitation is shown as a rate, mm per hour over the hour up to the time shown, on the map, in the storm markers and in the details panel alike.
 
 - Weather data: [Open-Meteo.com](https://open-meteo.com/), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The free API is for non-commercial use, with a fair-use limit of about 10,000 calls per day.
 - Observations (METAR): [NOAA Aviation Weather Center](https://aviationweather.gov/data/api/) (public domain).

@@ -6,12 +6,16 @@ const API_URL = 'https://api.open-meteo.com/v1/forecast';
 const CHUNK_SIZE = 100;
 // Give up on a request after this long rather than leaving the page loading forever.
 const TIMEOUT_MS = 30_000;
-const CACHE_KEY = 'power-globe:forecast:v2';
+// Bumped when the shape of the forecast changes (v3: a step for every hour, where v2 had one in
+// three), so that a copy kept by an older version is never mixed with new data.
+const CACHE_KEY = 'power-globe:forecast:v3';
+const CACHE_PREFIX = 'power-globe:forecast:';
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 export const FORECAST_DAYS = 5;
-// The global timeline uses 3-hour steps to keep the download and cache small.
-export const STEP_HOURS = 3;
+// The global timeline has a step for every hour of the forecast. The grid of 390 locations keeps
+// the browser's copy near 1.2 MB, well within the 5 MB a site may store.
+export const STEP_HOURS = 1;
 // 12° spacing gives 390 locations: under the free API's 600 locations per minute, while the
 // bicubic field and wind particles keep the result smooth.
 export const GRID_STEP = 12;
@@ -48,8 +52,7 @@ export function chunk(items, size) {
   return out;
 }
 
-// `threeHourly` asks Open-Meteo to aggregate to 3-hour steps, cutting the download ~3x.
-export function buildUrl(points, { threeHourly = false } = {}) {
+export function buildUrl(points) {
   const params = new URLSearchParams({
     latitude: points.map((p) => p.lat).join(','),
     longitude: points.map((p) => p.lng).join(','),
@@ -57,7 +60,6 @@ export function buildUrl(points, { threeHourly = false } = {}) {
     forecast_days: String(FORECAST_DAYS),
     timezone: 'GMT',
   });
-  if (threeHourly) params.set('temporal_resolution', 'hourly_3');
   return `${API_URL}?${params}`;
 }
 
@@ -222,19 +224,12 @@ function fetchJson(url, { skipped = false } = {}) {
 
 // Hourly forecasts for a list of points, in the same order. The API returns an array for
 // multiple coordinates and a single object for one. `onProgress(done, total)` reports chunks.
-export async function fetchHourly(points, { threeHourly = false, onProgress } = {}) {
+export async function fetchHourly(points, { onProgress } = {}) {
   const parts = chunk(points, CHUNK_SIZE);
   const results = [];
   for (const [i, part] of parts.entries()) {
-    let data;
     spend(part.length);
-    try {
-      data = await fetchJson(buildUrl(part, { threeHourly }));
-    } catch (err) {
-      // Fall back to plain hourly data if the API rejects the aggregation option.
-      if (!threeHourly || err.status !== 400) throw err;
-      data = await fetchJson(buildUrl(part));
-    }
+    const data = await fetchJson(buildUrl(part));
     onProgress?.(i + 1, parts.length);
     results.push(...(Array.isArray(data) ? data : [data]).map((item) => item.hourly));
   }
@@ -312,8 +307,8 @@ export async function fetchAirportHourly(airports, { onProgress, onBatch, onWait
 
 const round1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
 
-// Hours between consecutive entries of a series: 1 for hourly data, 3 when the API
-// aggregated it to 3-hour steps.
+// Hours between consecutive entries of a series: 1 for hourly data, more when the data was
+// aggregated to longer steps.
 const seriesHours = (times) => (times.length > 1 ? (parseTime(times[1]) - parseTime(times[0])) / 3_600_000 : 1);
 
 // Indices of the times falling on a multiple of `stepHours` (00:00, 03:00, ... GMT), or all
@@ -365,6 +360,29 @@ export function startIndex(times, now = Date.now()) {
   return index;
 }
 
+// The times (ms) of the `count` steps after step `step`, wrapping round to the start as the timeline
+// does when it plays.
+export function timesAhead(times, step, count) {
+  return Array.from({ length: count }, (_, k) => parseTime(times[(step + k + 1) % times.length]));
+}
+
+// While the timeline plays, the moving clouds change every three hours rather than every hour: an
+// image for each hour would be three times the downloads, more than the tiles kept in memory
+// could hold, so every pass would load them all again. Paused or scrubbed, they follow the hour.
+export const CLOUD_PLAY_HOURS = 3;
+
+// The time (ms) the moving clouds show at `step`, and while `playing` the times of the next
+// `lookahead` steps to load images for in advance (without repeats).
+export function cloudTimes(times, step, { playing = false, lookahead = 0 } = {}) {
+  const time = parseTime(times[step]);
+  if (!playing) return { time, ahead: [] };
+  const span = CLOUD_PLAY_HOURS * 3_600_000;
+  const floor = (t) => Math.floor(t / span) * span;
+  const shown = floor(time);
+  const ahead = [...new Set(timesAhead(times, step, lookahead).map(floor))].filter((t) => t !== shown);
+  return { time: shown, ahead };
+}
+
 function readCache(key) {
   try {
     const raw = localStorage.getItem(key);
@@ -376,20 +394,31 @@ function readCache(key) {
   }
 }
 
+// Removes forecast copies kept by other versions (such as the 3-hourly v2): they are never read
+// again and only take up room.
+function dropStaleCaches() {
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const name = localStorage.key(i);
+    if (name?.startsWith(CACHE_PREFIX) && !name.startsWith(`${CACHE_KEY}:`)) localStorage.removeItem(name);
+  }
+}
+
 function writeCache(key, data) {
   try {
+    dropStaleCaches();
     localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
   } catch {
     // Storage unavailable or full; caching is only a convenience.
   }
 }
 
-// The global forecast from the site's own data API, with `built` (ms), if it is there and still
+// The global forecast from the site's own data API, with `built` (ms), if it is there, has this
+// grid and a step every hour (a copy built with 3-hour steps does not say `hours`), and still
 // reaches the present.
 async function forecastSnapshot(step) {
   const snapshot = await fetchSnapshot('api/forecast.json');
   const data = snapshot?.data;
-  if (!data?.times?.length || snapshot.step !== step) return null;
+  if (!data?.times?.length || snapshot.step !== step || snapshot.hours !== STEP_HOURS) return null;
   if (parseTime(data.times.at(-1)) < Date.now()) return null;
   return { ...data, built: Date.parse(snapshot.built) };
 }
@@ -411,7 +440,7 @@ export async function loadForecast({ step = GRID_STEP, force = false, onProgress
   }
   try {
     const points = buildGrid(step);
-    const data = toForecast(points, await fetchHourly(points, { threeHourly: true, onProgress }));
+    const data = toForecast(points, await fetchHourly(points, { onProgress }));
     writeCache(key, data);
     return data;
   } catch (err) {
@@ -432,7 +461,7 @@ export async function loadRegion(shape) {
   const key = JSON.stringify(shape);
   if (!regionCache.has(key)) {
     const points = shapePoints(shape);
-    const request = fetchHourly(points, { threeHourly: true }).then((hourly) => ({
+    const request = fetchHourly(points).then((hourly) => ({
       ...toForecast(points, hourly),
       shape,
     }));

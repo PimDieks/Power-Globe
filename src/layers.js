@@ -43,7 +43,7 @@ export const LAYERS = [
     key: 'precipitation',
     label: 'Precipitation',
     variable: 'precipitation',
-    // Averaged over the 3 hours up to the time shown, on the map and in the details panel alike.
+    // The rate over the hour up to the time shown, on the map and in the details panel alike.
     unit: 'mm/h',
     opacity: 0.8,
     fade: [0.05, 1.5],
