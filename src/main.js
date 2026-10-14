@@ -28,6 +28,8 @@ import { airportDetailsHtml, airportPlace, panelStays, verdictText } from './air
 import { setupWindCheck } from './windcheck.js';
 import { DETAIL_TABS, OPS_PARTS, createOpsHost, readTab, saveTab, tabAfterKey } from './ops.js';
 import { formatClock, formatClockShort, formatTick, zoneName } from './opsclock.js';
+import { releaseLightning, setLightningOverlay } from './opslightningview.js';
+import { setupLightningOverlay } from './lightningmap.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
@@ -325,6 +327,9 @@ const airportMap = setupAirportMap({
     goToAirport(airport, { stayClose: true });
   },
 });
+
+// The Ops tab's lightning part draws its rings and image on the map through this.
+setLightningOverlay(setupLightningOverlay(globe));
 
 // What the Ops tab's traffic part reads from the page and asks of it (see opstrafficview.js).
 const opsTraffic = {
@@ -1220,6 +1225,8 @@ async function showAirport(airport, { fromList = false } = {}) {
   // `observation`: undefined while the METAR loads, null if there is none. `error`: why there is
   // no forecast, once it is known.
   const detail = { airport, hourly: null, fromList, observation: undefined, error: null };
+  // The lightning of the airport that was open stops now, not when the new one has its forecast.
+  releaseLightning();
   state.opsReturn = null;
   setBackLabel('Wind check');
   state.detail = detail;

@@ -271,7 +271,7 @@ describe('airport weather requests', () => {
     expect(url.searchParams.get('latitude')).toBe('52.3086,51');
     expect(url.searchParams.get('elevation')).toBe('-3,91');
     expect(url.searchParams.get('wind_speed_unit')).toBe('kn');
-    expect(url.searchParams.get('hourly')).toBe('temperature_2m,dew_point_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m');
+    expect(url.searchParams.get('hourly')).toBe('temperature_2m,dew_point_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,weather_code,cape');
   });
 
   it('hands over each batch as it arrives', async () => {

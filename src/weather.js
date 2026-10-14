@@ -237,13 +237,17 @@ export async function fetchHourly(points, { onProgress } = {}) {
 }
 
 // Ground conditions at airports, as aviation weather reports them: wind in knots at 10 m (the
-// height of airport anemometers), temperature and dew point at 2 m, every hour.
+// height of airport anemometers), temperature and dew point at 2 m, every hour, and the weather
+// code and CAPE that the Ops view's thunderstorm risk is made from (about 0.2 MB more compressed
+// in the site's copy, which is 0.7 MB).
 export const AIRPORT_VARIABLES = [
   'temperature_2m',
   'dew_point_2m',
   'wind_speed_10m',
   'wind_direction_10m',
   'wind_gusts_10m',
+  'weather_code',
+  'cape',
 ];
 const FEET = 0.3048;
 
