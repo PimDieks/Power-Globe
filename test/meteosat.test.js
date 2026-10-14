@@ -7,7 +7,7 @@ import {
   LOOP_HOLD_MS,
   coarserView,
   loopFrames,
-  loopPosition,
+  loopStep,
   loopStatus,
   MAX_ATTEMPTS,
   TileStore,
@@ -227,8 +227,7 @@ describe('TileStore', () => {
     // After the pause the owner is told, and asks again.
     onSettle.mockImplementation(() => store.want(jobs(['a', 'b'])));
     await vi.advanceTimersByTimeAsync(200);
-    // The tile not asked for yet goes first, then the failed one again.
-    expect(load.mock.calls.map(([url]) => url)).toEqual(['u:a', 'u:b', 'u:a']);
+    expect(load.mock.calls.map(([url]) => url)).toEqual(['u:a', 'u:a', 'u:b']);
     expect(store.get('a')).toMatchObject({ state: 'done', failures: 1 });
     expect(store.get('b').state).toBe('done');
   });
@@ -393,21 +392,21 @@ describe('TileStore', () => {
     expect(load.mock.calls.map(([url]) => url)).toEqual(['u:a', 'u:b', 'u:a']);
   });
 
-  it('asks for new tiles before failed ones again, so a broken tile cannot hold up the rest', async () => {
+  it('drops tiles beyond a lowered bound as soon as they are no longer wanted', async () => {
     vi.useFakeTimers();
-    const load = vi.fn(async (url) => {
-      if (url === 'u:bad') throw new Error('broken');
-      return url;
-    });
-    let store;
-    const onSettle = () => store.want(jobs(['bad', 'a', 'b']));
-    store = new TileStore({ load, concurrency: 1, backoff: new Backoff({ first: 1000 }), onSettle });
-    store.want(jobs(['bad', 'a', 'b']));
-    await vi.advanceTimersByTimeAsync(1500);
-    // After the pause the one request let through is a new tile, not the broken one.
-    expect(load.mock.calls.map(([url]) => url).slice(0, 2)).toEqual(['u:bad', 'u:a']);
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(store.get('b').state).toBe('done');
+    const dispose = vi.fn();
+    const store = new TileStore({ load: async (url) => url, max: 10, concurrency: 10, dispose });
+    store.want(jobs(['a', 'b', 'c', 'd', 'e', 'f']));
+    await flush();
+    store.max = 2;
+    store.evict();
+    // Still wanted: all kept.
+    expect(store.entries.size).toBe(6);
+    // Wanted no more, with nothing new to load: down to the bound at once.
+    store.want(jobs(['f']));
+    expect(store.entries.size).toBe(2);
+    expect(store.get('f').state).toBe('done');
+    expect(dispose).toHaveBeenCalledTimes(4);
   });
 
   it('lets go of every loaded image when cleared, but not of those loading', async () => {
@@ -456,13 +455,22 @@ describe('the clouds loop', () => {
   });
 
   it('fades each image into the next, holds the newest, and starts again', () => {
-    expect(loopPosition(0, 25)).toEqual({ index: 0, next: 1, mix: 0 });
-    expect(loopPosition(LOOP_FRAME_MS * 2.5, 25)).toEqual({ index: 2, next: 3, mix: 0.5 });
-    const run = 24 * LOOP_FRAME_MS;
-    expect(loopPosition(run + 10, 25)).toEqual({ index: 24, next: 24, mix: 0 });
-    expect(loopPosition(run + LOOP_HOLD_MS - 1, 25).index).toBe(24);
-    expect(loopPosition(run + LOOP_HOLD_MS, 25)).toEqual({ index: 0, next: 1, mix: 0 });
-    expect(loopPosition(123_456, 1)).toEqual({ index: 0, next: 0, mix: 0 });
+    let at = { index: 0, since: 1000 };
+    expect(loopStep(at, 1000, 25)).toEqual({ index: 0, since: 1000, next: 1, mix: 0 });
+    expect(loopStep(at, 1000 + LOOP_FRAME_MS / 2, 25)).toEqual({ index: 0, since: 1000, next: 1, mix: 0.5 });
+    at = loopStep(at, 1000 + LOOP_FRAME_MS, 25);
+    expect(at).toEqual({ index: 1, since: 1000 + LOOP_FRAME_MS, next: 2, mix: 0 });
+    // The newest stays, then the loop jumps back to the oldest.
+    const newest = { index: 24, since: 0 };
+    expect(loopStep(newest, LOOP_FRAME_MS, 25)).toEqual({ index: 24, since: 0, next: 24, mix: 0 });
+    expect(loopStep(newest, LOOP_HOLD_MS, 25)).toEqual({ index: 0, since: LOOP_HOLD_MS, next: 1, mix: 0 });
+    // More images arrived meanwhile: what was the newest goes on to the next.
+    expect(loopStep({ index: 19, since: 0 }, LOOP_FRAME_MS, 25).index).toBe(20);
+    expect(loopStep({ index: 0, since: 0 }, 5000, 1)).toEqual({ index: 0, since: 5000, next: 0, mix: 0 });
+  });
+
+  it('never goes backwards when a frame comes with an earlier time than the last change', () => {
+    expect(loopStep({ index: 3, since: 1000 }, 950, 25)).toEqual({ index: 3, since: 1000, next: 4, mix: 0 });
   });
 
   it('starts once nearly all images are there, and gives up only when there are not two', () => {

@@ -112,8 +112,8 @@ export function passedFrames(asked, wanted, shown, max = 2) {
     .slice(0, max);
 }
 
-// While the timeline plays through the past or the clouds loop, many images follow one another:
-// they use the finest tiles of which no more than this many cover the view, about half the detail
+// The clouds loop shows many images one after another: they use the finest tiles of which no more
+// than this many cover the view, about half the detail
 // of the still view when zoomed in to Europe (8 tiles where it has 21) and the same when looking
 // at the whole globe (4).
 export const ANIMATION_MAX_TILES = 8;
@@ -142,16 +142,20 @@ export function loopFrames({ start, end }, hours = LOOP_HOURS, step = LOOP_STEP_
   return frames;
 }
 
-// Where the loop is `elapsed` ms after it started, with `count` images: the image on show, the
-// next one, and how far (0 to 1) the first has faded into the second. The newest image does not
-// fade back into the oldest: the loop jumps back, as a radar loop does.
-export function loopPosition(elapsed, count, { frameMs = LOOP_FRAME_MS, holdMs = LOOP_HOLD_MS } = {}) {
-  if (count < 2) return { index: 0, next: 0, mix: 0 };
-  const run = (count - 1) * frameMs;
-  const t = elapsed % (run + holdMs);
-  if (t >= run) return { index: count - 1, next: count - 1, mix: 0 };
-  const index = Math.floor(t / frameMs);
-  return { index, next: index + 1, mix: (t - index * frameMs) / frameMs };
+// One step of the loop at time `now` (ms), from `at`: { index, since }, the image on show and when
+// it came. `count` is how many images the loop has now (more arrive while it plays). Returns the
+// next { index, since }, the image to fade into and how far (0 to 1) the first has faded into it.
+// The newest image does not fade back into the oldest: the loop jumps back, as a radar loop does.
+export function loopStep({ index, since }, now, count, { frameMs = LOOP_FRAME_MS, holdMs = LOOP_HOLD_MS } = {}) {
+  const last = index >= count - 1;
+  if (now - since >= (last ? holdMs : frameMs)) {
+    index = last ? 0 : index + 1;
+    since = now;
+  }
+  const atLast = index >= count - 1;
+  // A frame's time can be a little before `since`.
+  const t = Math.max(0, now - since);
+  return { index, since, next: atLast ? index : index + 1, mix: atLast ? 0 : Math.min(1, t / frameMs) };
 }
 
 // Whether the loop can start: 'ready' once nearly all of its `frames` images have every tile
@@ -248,17 +252,15 @@ export class TileStore {
   want(jobs) {
     const now = this.now();
     this.wanted = new Set(jobs.map((j) => j.key));
-    // Tiles not asked for yet go first and failed ones after them, so that a few that keep
-    // failing (or hang) cannot hold up the rest.
-    const fresh = [];
-    const again = [];
+    this.queue = [];
     for (const job of jobs) {
       const entry = this.entries.get(job.key);
-      if (this.due(job.key, now)) (entry ? again : fresh).push(job);
+      if (this.due(job.key, now)) this.queue.push(job);
       // A failed tile that is not due yet: look again when it is.
       else if (entry.state === 'failed' && entry.failures < MAX_ATTEMPTS) this.wake(entry.retryAt - now);
     }
-    this.queue = [...fresh, ...again];
+    // Tiles no longer wanted may go now, as when the bound has just been lowered.
+    this.evict();
     this.pump();
   }
 

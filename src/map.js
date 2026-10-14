@@ -13,7 +13,7 @@ import {
   coarserView,
   framesFor,
   loopFrames,
-  loopPosition,
+  loopStep,
   loopStatus,
   parseTimes,
   passedFrames,
@@ -426,6 +426,10 @@ function tileMaterial(texture) {
 // the graphics card at a time.
 const STORE_MAX = 100;
 const LOAD_TIMEOUT_MS = 20_000;
+// How long the page is told a loop could not load, before it shows the time again, and how long a
+// loop that is loading may go without a new image before it counts as failed.
+const FAILED_NOTICE_MS = 6000;
+const LOOP_STALL_MS = 30_000;
 const LOOP_STORE_MAX = 230;
 
 // The moving clouds of the Clouds view (see meteosat.js), in a layer of tiles of their own just
@@ -433,8 +437,8 @@ const LOOP_STORE_MAX = 230;
 // the image for the timeline's time, the newest one for times after it. A new image (or the
 // tiles for a new view) takes the place of the one on show only once all its tiles in view have
 // loaded, so the clouds never flash blank or half drawn; while the timeline plays, the next
-// images load ahead, as coarser tiles (see coarserView). The clouds loop plays the last 12 hours
-// like a weather radar, once nearly all its images have loaded, each fading into the next.
+// images load ahead. The clouds loop plays the last 12 hours like a weather radar, once nearly all
+// its images have loaded, each fading into the next, with coarser tiles (see coarserView).
 // `baseEngine()` is the map's own tile engine, whose tile level this follows.
 // Returns { setActive(on), update(), setFollowing(on), setTime(time, ahead, playing), asOf(),
 // shown(), startLoop({ manual }), stopLoop(), advanceLoop(), loopState() }.
@@ -457,8 +461,8 @@ function setupMovingClouds(globe, baseEngine, onChange) {
   // one while they loaded (see passedFrames).
   let lastFrames = [];
   let passed = [];
-  // The tiles in view: `full` for a still view and `coarse` for images that follow one another
-  // (see coarserView), or null when zoomed in closer than the images have detail for.
+  // The tiles in view: `full` for the timeline's images and `coarse` for the loop's many (see
+  // coarserView), or null when zoomed in closer than the images have detail for.
   let views = null;
   // On show: the image's time, and a mesh per tile by "level/x/y", with the store's key for its
   // image as `userData.key`.
@@ -466,7 +470,8 @@ function setupMovingClouds(globe, baseEngine, onChange) {
   const meshes = new Map();
   const shownKeys = new Set();
   // The clouds loop while it runs: { frames, status ('loading' or 'playing'), progress (0 to 1),
-  // playable (the frames with every tile), manual, index, start, raf }.
+  // playable (the frames it shows), ready (the tiles it shows), manual, index (the frame on show),
+  // since (when that frame came), raf }.
   let loop = null;
   let loopFailed = false;
 
@@ -474,14 +479,22 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     max: STORE_MAX,
     // A request that has not been answered after LOAD_TIMEOUT_MS counts as failed, so that a few
     // stalled ones cannot hold up all the others.
+    // An image that arrives after that is let go: nothing would own its texture.
     load: (url) =>
       new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error(`No answer for ${url}`)), LOAD_TIMEOUT_MS);
-        loader.load(
+        let timedOut = false;
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          // Stops the download.
+          if (image) image.src = '';
+          reject(new Error(`No answer for ${url}`));
+        }, LOAD_TIMEOUT_MS);
+        const image = loader.load(
           url,
-          (image) => {
+          (loaded) => {
             clearTimeout(timeout);
-            const texture = new THREE.Texture(image);
+            if (timedOut) return;
+            const texture = new THREE.Texture(loaded);
             texture.colorSpace = THREE.SRGBColorSpace;
             texture.needsUpdate = true;
             // Sent to the graphics card as it arrives, rather than a dozen at once when the image
@@ -626,9 +639,10 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     return true;
   }
 
-  // The loop's images `a` and `b` on its tiles, `mix` of the way from one to the other.
+  // The loop's images `a` and `b` on its tiles, `mix` of the way from one to the other. Tiles that
+  // came into view since it started join once all its images for them are there.
   function showLoop(a, b, mix) {
-    const tiles = tileKeys(views.coarse);
+    const tiles = tileKeys(views.coarse).filter((tile) => loop.ready.has(tile));
     const keep = new Set(tiles);
     for (const tile of [...meshes.keys()]) if (!keep.has(tile)) removeMesh(tile);
     for (const tile of tiles) {
@@ -641,31 +655,68 @@ function setupMovingClouds(globe, baseEngine, onChange) {
 
   function animateLoop() {
     if (!globalThis.requestAnimationFrame) return;
-    const step = (now) => {
+    const frame = (now) => {
       if (loop?.status !== 'playing') return;
-      const { index, next, mix } = loopPosition(now - loop.start, loop.playable.length);
-      showLoop(loop.playable[index], loop.playable[next], mix);
-      loop.raf = requestAnimationFrame(step);
+      try {
+        const step = loopStep({ index: loop.index, since: loop.since }, now, loop.playable.length);
+        loop.index = step.index;
+        loop.since = step.since;
+        showLoop(loop.playable[step.index], loop.playable[step.next], step.mix);
+      } finally {
+        if (loop?.status === 'playing') loop.raf = requestAnimationFrame(frame);
+      }
     };
-    loop.raf = requestAnimationFrame(step);
+    loop.raf = requestAnimationFrame(frame);
   }
 
+  // Ends the loop. The store goes back to its usual bound once the refresh that follows has said
+  // which tiles are wanted now (see TileStore.want).
   function stopLoop({ failed = false } = {}) {
     if (!loop) return;
     if (loop.raf) cancelAnimationFrame(loop.raf);
+    clearTimeout(loop.stall);
     loop = null;
-    loopFailed = failed;
+    setFailed(failed);
     store.max = STORE_MAX;
     store.evict();
-    for (const mesh of meshes.values()) mesh.material.userData.cross.crossMix.value = 0;
+    for (const mesh of meshes.values()) {
+      const { cross } = mesh.material.userData;
+      if (cross.map2.value !== mesh.material.map) cross.map2.value?.dispose();
+      cross.map2.value = mesh.material.map;
+      cross.crossMix.value = 0;
+    }
     onChange?.();
   }
 
-  // Loads the loop's images for the tiles in view, and starts or holds it as they arrive.
+  // A loop that could not load says so for a while, then the time comes back.
+  let failedTimer = null;
+  function setFailed(failed) {
+    clearTimeout(failedTimer);
+    const changed = failed !== loopFailed;
+    loopFailed = failed;
+    if (failed) {
+      failedTimer = setTimeout(() => setFailed(false), FAILED_NOTICE_MS);
+    }
+    if (changed && !loop) onChange?.();
+  }
+
+  // Loads the loop's images for the tiles in view, and starts it once nearly all have arrived.
   function refreshLoop() {
     const view = views.coarse;
     store.want(jobsFor(loop.frames, view));
     const tiles = tileKeys(view);
+    if (loop.status === 'playing') {
+      // Images that arrive while it plays join it, in their place in time, once they are there
+      // for every tile it shows. When the view moves (the globe turns by itself, or follows an
+      // aircraft) the loop plays on, and new tiles join it once they have all its images.
+      const has = (frame, tile) => store.get(`${frame}/${tile}`)?.state === 'done';
+      const shown = loop.playable[loop.index];
+      loop.playable = loop.frames.filter((frame) => loop.playable.includes(frame) || [...loop.ready].every((tile) => has(frame, tile)));
+      loop.index = Math.max(0, loop.playable.indexOf(shown));
+      for (const tile of tiles) if (!loop.ready.has(tile) && loop.playable.every((frame) => has(frame, tile))) loop.ready.add(tile);
+      loop.progress = loop.frames.reduce((n, frame) => n + tiles.filter((tile) => has(frame, tile)).length, 0) / (loop.frames.length * tiles.length || 1);
+      return;
+    }
     let done = 0;
     let settled = true;
     const playable = loop.frames.filter((frame) => {
@@ -683,23 +734,31 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     const status = tiles.length ? loopStatus({ frames: loop.frames.length, complete: playable.length, settled }) : 'failed';
     if (status === 'failed') {
       stopLoop({ failed: true });
+      refresh();
       return;
     }
     const progress = done / (loop.frames.length * tiles.length);
     const changed = Math.floor(progress * 20) !== Math.floor(loop.progress * 20);
+    // When EUMETSAT stops answering, the store waits longer and longer between tries: the loop
+    // gives up once nothing new has come for a while.
+    if (progress > loop.progress || !loop.stall) {
+      clearTimeout(loop.stall);
+      const stalled = loop;
+      loop.stall = setTimeout(() => {
+        if (loop !== stalled || loop.status !== 'loading') return;
+        stopLoop({ failed: true });
+        refresh();
+      }, LOOP_STALL_MS);
+    }
     loop.progress = progress;
     loop.playable = playable;
-    if (status === 'ready' && loop.status === 'loading') {
+    if (status === 'ready') {
       loop.status = 'playing';
-      loop.start = performance.now();
+      loop.ready = new Set(tiles);
+      loop.since = performance.now();
       loop.index = 0;
       showLoop(playable[0], playable[0], 0);
       if (!loop.manual) animateLoop();
-      onChange?.();
-    } else if (status === 'loading' && loop.status === 'playing') {
-      // The view moved on to tiles not loaded yet: the loop waits for them.
-      if (loop.raf) cancelAnimationFrame(loop.raf);
-      loop.status = 'loading';
       onChange?.();
     } else if (changed) {
       onChange?.();
@@ -726,7 +785,7 @@ function setupMovingClouds(globe, baseEngine, onChange) {
       refreshLoop();
       return;
     }
-    const view = playing ? views.coarse : views.full;
+    const view = views.full;
     const frames = framesFor(time, ahead, times);
     passed = passedFrames([...passed, ...lastFrames], frames[0], shownFrame);
     lastFrames = frames;
@@ -805,7 +864,7 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     setActive(on) {
       if (on === active) return;
       active = on;
-      loopFailed = false;
+      setFailed(false);
       if (on) {
         loadTimes();
         settled.update();
@@ -826,9 +885,12 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     // `next` and `nextAhead` in milliseconds; `nextPlaying` while the timeline plays.
     setTime(next, nextAhead = [], nextPlaying = false) {
       if (next === time && nextAhead.join() === ahead.join() && nextPlaying === playing) return;
+      if (next !== time) setFailed(false);
       time = next;
       ahead = nextAhead;
       playing = nextPlaying;
+      // The loop and the timeline do not play together.
+      if (playing) stopLoop();
       if (active) refresh();
     },
     // The time of the image on show when the timeline is later than it (the newest image, or
@@ -841,17 +903,17 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     // Starts the clouds loop; `manual` steps it on with advanceLoop() instead of playing it.
     // Returns whether it could start (the clouds are shown, their times known and some in view).
     startLoop({ manual = false } = {}) {
-      loopFailed = false;
+      setFailed(false);
       if (!active || !times || !views?.coarse.tiles.length) return false;
       if (loop) stopLoop();
-      loop = { frames: loopFrames(times), status: 'loading', progress: 0, playable: [], manual, index: 0, start: 0, raf: null };
+      loop = { frames: loopFrames(times), status: 'loading', progress: 0, playable: [], ready: new Set(), manual, index: 0, since: 0, raf: null };
       store.max = LOOP_STORE_MAX;
       refresh();
       onChange?.();
       return true;
     },
     stopLoop() {
-      loopFailed = false;
+      setFailed(false);
       if (!loop) return;
       stopLoop();
       refresh();
