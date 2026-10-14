@@ -986,6 +986,40 @@ input:disabled {
   height: 10px;
 }
 
+/* The airports at the ends of the selected aircraft's lines: a ring on the spot and the code beside it. */
+
+.flight-end {
+  position: relative;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.flight-end::before {
+  content: '';
+  position: absolute;
+  left: -5px;
+  top: -5px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #0a0e18;
+  box-shadow: 0 0 0 2px #ffc247;
+}
+
+.flight-end span {
+  position: absolute;
+  left: 11px;
+  top: -9px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  color: #0a0e18;
+  background: #ffc247;
+}
+
 /* Runway ends and airport winds on the map. Zero-size anchors like the city labels. */
 
 .runway-label,

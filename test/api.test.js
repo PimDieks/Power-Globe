@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import worker, { corsHeaders, route } from '../api/worker.js';
+import worker, { MAX_TRACK_POINTS, TRACKS_PER_HOUR, TRACKS_PER_HOUR_ANONYMOUS, TRACK_RATE_LIMIT, compactTrack, corsHeaders, route } from '../api/worker.js';
 import { ceilingFt, flightCategory, toObservation, visibilityMiles } from '../src/metar.js';
 import { bearingBetween, destination, placeLabels, runwayEnds, runwayStatus } from '../src/runwaymap.js';
 import { conditionsAt, snapshotSeries, toAirport } from '../src/airports.js';
@@ -454,6 +454,223 @@ describe('leaving a flight feed alone after it refuses or limits the API', () =>
       await Promise.all(pending);
     }
     expect(hosts()).toEqual([LOL, FI, FI]);
+  });
+});
+
+describe('aircraft tracks', () => {
+  const TRACK = new URL('https://api.example/track?icao24=486898');
+  const RELAY = { FLIGHT_RELAY_URL: 'https://relay.example/', FLIGHT_RELAY_KEY: 'relay-secret-123456' };
+  const ACCOUNT = { OPENSKY_CLIENT_ID: 'id', OPENSKY_CLIENT_SECRET: 'secret' };
+  const opensky = {
+    icao24: '486898',
+    callsign: 'KLM66A  ',
+    startTime: 1000,
+    endTime: 1300,
+    path: [
+      [1000, 51.4776, -0.4469, -304, 269, false],
+      [1100, 51.5, -0.6, 3048.4, 300, false],
+      [1200, null, null, 6000, 300, false],
+      [1300, 51.7, -1.1, null, 310, true],
+    ],
+  };
+  const fakeCache = () => {
+    const entries = new Map();
+    return { entries, match: async (request) => entries.get(request.url)?.clone(), put: async (request, response) => void entries.set(request.url, response) };
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('turns the OpenSky track into compact points, in feet, without the gaps, cached for a minute', async () => {
+    const fetchFn = vi.fn(async () => reply(opensky));
+    const res = await route(TRACK, {}, fetchFn);
+    expect(fetchFn.mock.calls[0][0]).toBe('https://opensky-network.org/api/tracks/all?icao24=486898&time=0');
+    expect(res.headers.get('Cache-Control')).toBe('public, max-age=60');
+    expect(await res.json()).toEqual({
+      source: 'OpenSky Network',
+      icao24: '486898',
+      callsign: 'KLM66A',
+      startTime: 1000,
+      endTime: 1300,
+      points: [
+        [1000, 51.4776, -0.4469, -997, 0],
+        [1100, 51.5, -0.6, 10001, 0],
+        [1300, 51.7, -1.1, null, 1],
+      ],
+    });
+  });
+
+  it('thins a long track evenly down to at most 300 points, keeping the first and the last', () => {
+    const path = Array.from({ length: 1000 }, (_, i) => [i, 50 + i / 1000, 4, 1000, 0, false]);
+    const points = compactTrack({ path });
+    expect(points).toHaveLength(MAX_TRACK_POINTS);
+    expect(points[0][0]).toBe(0);
+    expect(points.at(-1)[0]).toBe(999);
+    expect(points.map((p) => p[0])).toEqual([...points.map((p) => p[0])].sort((a, b) => a - b));
+    expect(compactTrack({ path: path.slice(0, 120) })).toHaveLength(120);
+    expect(compactTrack({ path: path.slice(0, 20) }, 5).map((p) => p[0])).toEqual([0, 5, 10, 14, 19]);
+    expect(compactTrack({})).toEqual([]);
+    expect(compactTrack({ path: [[1, 'x', 2]] })).toEqual([]);
+  });
+
+  it('wants a six-digit hexadecimal address, in either case', async () => {
+    const fetchFn = vi.fn(async () => reply(opensky));
+    for (const bad of ['', '12345', '1234567', 'zzzzzz', '48689g', '486898/../x']) {
+      await expect(route(new URL(`https://api.example/track?icao24=${encodeURIComponent(bad)}`), {}, fetchFn)).rejects.toMatchObject({ status: 400 });
+    }
+    await expect(route(new URL('https://api.example/track'), {}, fetchFn)).rejects.toMatchObject({ status: 400 });
+    expect(fetchFn).not.toHaveBeenCalled();
+    await route(new URL('https://api.example/track?icao24=48689A'), {}, fetchFn);
+    expect(fetchFn.mock.calls[0][0]).toContain('icao24=48689a&');
+  });
+
+  it('answers "no track" for an aircraft OpenSky has no current flight for, and cools off for nothing', async () => {
+    const cache = fakeCache();
+    const fetchFn = vi.fn(async (url) => (url.includes('auth.opensky') ? reply({ access_token: 'tok', expires_in: 1800 }) : reply('{}', { status: 404 })));
+    const res = await route(TRACK, ACCOUNT, fetchFn, cache);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ icao24: '486898', startTime: null, endTime: null, points: [] });
+    expect(res.headers.get('Cache-Control')).toBe('public, max-age=60');
+    await route(TRACK, ACCOUNT, fetchFn, cache);
+    expect(fetchFn.mock.calls.filter(([url]) => url.includes('tracks/all'))).toHaveLength(2);
+    expect([...cache.entries.keys()].some((k) => k.includes('__feeds'))).toBe(false);
+  });
+
+  it('signs in with the OpenSky account and asks through the relay like the flights', async () => {
+    const env = { ...RELAY, OPENSKY_CLIENT_ID: 'id', OPENSKY_CLIENT_SECRET: 'secret' };
+    const fetchFn = vi.fn(async (url) => (url.includes('auth.opensky') ? reply({ access_token: 'tok', expires_in: 1800 }) : reply(opensky)));
+    await route(TRACK, env, fetchFn);
+    const [url, init] = fetchFn.mock.lastCall;
+    expect(url).toBe('https://relay.example/opensky-network.org/api/tracks/all?icao24=486898&time=0');
+    expect(init.headers.Authorization).toBe('Bearer tok');
+    expect(init.headers['X-Relay-Key']).toBe('relay-secret-123456');
+  });
+
+  it('leaves OpenSky alone after it refuses or limits the API, and treats a 404 from the relay itself as a failure', async () => {
+    for (const [code, headers, kept] of [[429, undefined, 60], [429, { 'Retry-After': '300' }, 300], [403, undefined, 21600]]) {
+      const cache = fakeCache();
+      const fetchFn = vi.fn(async () => reply('no', { status: code, headers }));
+      await expect(route(TRACK, {}, fetchFn, cache)).rejects.toMatchObject({ status: code === 429 ? 429 : 502 });
+      expect(cache.entries.get('https://api.example/__feeds/direct/opensky-tracks').headers.get('Cache-Control')).toBe(`public, max-age=${kept}`);
+      await expect(route(TRACK, {}, fetchFn, cache)).rejects.toThrow('OpenSky is not asked for now');
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    }
+    const cache = fakeCache();
+    const fetchFn = vi.fn(async () => reply('no', { status: 404 }));
+    await expect(route(TRACK, RELAY, fetchFn, cache)).rejects.toMatchObject({ status: 502 });
+    expect(cache.entries.get('https://api.example/__feeds/relay/opensky-tracks').headers.get('Cache-Control')).toBe('public, max-age=60');
+    const marked = vi.fn(async () => reply('{}', { status: 404, headers: { 'X-Answered-By': 'opensky-network.org' } }));
+    expect((await route(TRACK, RELAY, marked)).status).toBe(200);
+  });
+
+  it('is shared between visitors for a minute, and never answers with an old track when OpenSky fails', async () => {
+    const cache = fakeCache();
+    let fail = false;
+    const fetchFn = vi.fn(async (url) => (url.includes('auth.opensky') ? reply({ access_token: 'tok', expires_in: 1800 }) : fail ? reply('down', { status: 503 }) : reply(opensky)));
+    vi.stubGlobal('caches', { default: cache });
+    vi.stubGlobal('fetch', fetchFn);
+    const pending = [];
+    const ctx = { waitUntil: (promise) => pending.push(promise) };
+    const ask = async (hex) => {
+      const res = await worker.fetch(new Request(`https://api.example/track?icao24=${hex}`), ACCOUNT, ctx);
+      await Promise.all(pending);
+      return res;
+    };
+    expect((await ask('486898')).status).toBe(200);
+    expect((await ask('486898')).status).toBe(200);
+    expect(fetchFn.mock.calls.filter(([url]) => url.includes('tracks/all'))).toHaveLength(1);
+    expect([...cache.entries.keys()].some((k) => k.includes('__backup'))).toBe(false);
+    fail = true;
+    const res = await ask('4b1805');
+    expect(res.status).toBe(502);
+    expect(res.headers.get('X-Power-Globe-Backup')).toBeNull();
+  });
+
+  describe('keeping the OpenSky credits', () => {
+    const START = Date.parse('2026-10-14T12:10:00Z');
+    let cache;
+    let fetchFn;
+    let pending;
+    const trackCalls = () => fetchFn.mock.calls.filter(([url]) => url.includes('tracks/all')).length;
+    // A request for a track as a visitor at `ip` makes it.
+    const ask = async (query, { ip = '203.0.113.1', env = ACCOUNT } = {}) => {
+      const request = new Request(`https://api.example/track?${query}`, { headers: { 'CF-Connecting-IP': ip } });
+      const res = await worker.fetch(request, env, { waitUntil: (p) => pending.push(p) });
+      await Promise.all(pending);
+      return res;
+    };
+    const hex = (n) => (0x400000 + n).toString(16);
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(START);
+      cache = fakeCache();
+      pending = [];
+      fetchFn = vi.fn(async (url) => (url.includes('auth.opensky') ? reply({ access_token: 'tok', expires_in: 1800 }) : reply(opensky)));
+      vi.stubGlobal('caches', { default: cache });
+      vi.stubGlobal('fetch', fetchFn);
+    });
+    afterEach(() => vi.useRealTimers());
+
+    it('keeps one cached answer per aircraft, whatever else the request says', async () => {
+      let n = 0;
+      for (const query of ['icao24=4b1805', 'icao24=4b1805&x=1', 'icao24=4b1805&_=1791965500', 'icao24=4B1805', 'icao24=4b1805&icao24=ffffff', 'x=2&icao24=4b1805']) {
+        expect((await ask(query, { ip: `198.51.100.${n++}` })).status).toBe(200);
+      }
+      expect(trackCalls()).toBe(1);
+      expect([...cache.entries.keys()].filter((k) => k.includes('/track'))).toEqual(['https://api.example/track?icao24=4b1805']);
+      // A path with a trailing slash is the same route.
+      const res = await worker.fetch(new Request('https://api.example/track/?icao24=4B1805'), ACCOUNT, { waitUntil() {} });
+      expect(res.status).toBe(200);
+      expect(trackCalls()).toBe(1);
+    });
+
+    it('lets a visitor ask for only a few tracks a minute', async () => {
+      for (let i = 0; i < TRACK_RATE_LIMIT; i++) expect((await ask(`icao24=${hex(i)}`, { ip: '203.0.113.9' })).status).toBe(200);
+      const res = await ask(`icao24=${hex(99)}`, { ip: '203.0.113.9' });
+      expect(res.status).toBe(429);
+      expect(trackCalls()).toBe(TRACK_RATE_LIMIT);
+      // Answers from the cache cost no turn, and another visitor is not held up by this one.
+      expect((await ask(`icao24=${hex(1)}`, { ip: '203.0.113.9' })).status).toBe(200);
+      expect((await ask(`icao24=${hex(98)}`, { ip: '203.0.113.10' })).status).toBe(200);
+    });
+
+    it('asks OpenSky for at most 13 tracks an hour, then says "not now" until the hour is over', async () => {
+      expect(TRACKS_PER_HOUR).toBe(13);
+      for (let i = 0; i < TRACKS_PER_HOUR; i++) expect((await ask(`icao24=${hex(i)}`, { ip: `198.51.100.${i}` })).status).toBe(200);
+      expect(trackCalls()).toBe(TRACKS_PER_HOUR);
+      const refused = await ask(`icao24=${hex(50)}`, { ip: '198.51.100.99' });
+      expect(refused.status).toBe(503);
+      expect((await refused.json()).error).toContain('hourly limit');
+      expect(trackCalls()).toBe(TRACKS_PER_HOUR);
+      // Aircraft already answered still are, and the refusal is not kept beyond the failure time.
+      expect((await ask(`icao24=${hex(2)}`, { ip: '198.51.100.98' })).status).toBe(200);
+      const kept = cache.entries.get(`https://api.example/track?icao24=${hex(50)}`).headers.get('Cache-Control');
+      expect(Number(kept.match(/max-age=(\d+)/)[1])).toBeLessThanOrEqual(120);
+      // The next hour starts again.
+      vi.setSystemTime(Math.ceil(START / 3_600_000) * 3_600_000 + 1000);
+      expect((await ask(`icao24=${hex(51)}`, { ip: '198.51.100.97' })).status).toBe(200);
+      expect(trackCalls()).toBe(TRACKS_PER_HOUR + 1);
+    });
+
+    it('is stricter without an OpenSky account, whose allowance is a tenth of that', async () => {
+      expect(TRACKS_PER_HOUR_ANONYMOUS).toBe(1);
+      expect((await ask(`icao24=${hex(1)}`, { env: {} })).status).toBe(200);
+      expect((await ask(`icao24=${hex(2)}`, { env: {} })).status).toBe(503);
+      expect(trackCalls()).toBe(1);
+    });
+
+    it('remembers "not asked for now" no longer than OpenSky is left alone', async () => {
+      fetchFn.mockImplementation(async (url) => (url.includes('auth.opensky') ? reply({ access_token: 'tok', expires_in: 1800 }) : reply('slow down', { status: 429, headers: { 'Retry-After': '10' } })));
+      expect((await ask(`icao24=${hex(1)}`)).status).toBe(429);
+      vi.setSystemTime(START + 6000);
+      const res = await ask(`icao24=${hex(2)}`);
+      expect(res.status).toBe(502);
+      expect((await res.json()).error).toContain('not asked for now');
+      expect(cache.entries.get(`https://api.example/track?icao24=${hex(2)}`).headers.get('Cache-Control')).toBe('public, max-age=4');
+    });
   });
 });
 

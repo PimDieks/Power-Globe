@@ -746,6 +746,19 @@ function airportElement(airport, status, onClick) {
   return el;
 }
 
+// The code of an airport at the end of an aircraft's line. Hidden from screen readers: the aircraft's
+// panel says the same.
+function flightEndElement(end) {
+  const el = document.createElement('div');
+  el.className = `flight-end ${end.kind}`;
+  el.setAttribute('aria-hidden', 'true');
+  el.title = end.title ?? '';
+  const label = document.createElement('span');
+  label.textContent = end.text;
+  el.append(label);
+  return el;
+}
+
 // A label at a runway end ("27 ✓"), the wind at an airport with an arrow pointing downwind, or
 // where an airfield is ("✈ AMS Schiphol", coloured by its wind status once known). The airport
 // open in the panel has its label `selected` (see airportmap.js). Hidden from screen readers: the
@@ -819,6 +832,8 @@ export function setupMapFeatures(globe) {
   // keeps an object on screen as long as the same datum is passed in).
   let airportMarkers = new Map();
   let runwayLabels = [];
+  // The airports at the ends of the selected aircraft's lines (see flightlines.js).
+  let flightEnds = [];
   let borders = null;
   let bordersShown = false;
 
@@ -826,8 +841,11 @@ export function setupMapFeatures(globe) {
     const cities = CITIES.filter((city) => city.tier <= tier && !(marker && city.name === marker.name));
     // An airport with a label of its own on the map (see airportmap.js) needs no marker.
     const labelled = new Set(runwayLabels.map((l) => l.ident).filter(Boolean));
-    const shown = airports.filter((a) => !labelled.has(a.ident) && !(marker && a.lat === marker.lat && a.lng === marker.lng));
-    globe.htmlElementsData([...cities, ...runwayLabels, ...shown, ...(marker ? [marker] : [])]);
+    // An airport at the end of a flight line has that label instead of its own, so it has just one.
+    const ends = new Set(flightEnds.map((e) => e.ident).filter(Boolean));
+    const shown = airports.filter((a) => !labelled.has(a.ident) && !ends.has(a.ident) && !(marker && a.lat === marker.lat && a.lng === marker.lng));
+    const named = runwayLabels.filter((l) => !(l.kind === 'airport' && ends.has(l.ident)));
+    globe.htmlElementsData([...cities, ...named, ...shown, ...flightEnds, ...(marker ? [marker] : [])]);
   }
 
   async function loadBorders() {
@@ -863,7 +881,16 @@ export function setupMapFeatures(globe) {
   // can never be left at a previous layout's position.
   function setRunwayLabels(labels, onSelect) {
     if (!labels.length && !runwayLabels.length) return;
-    runwayLabels = labels.map((label) => ({ lat: label.lat, lng: label.lng, ident: label.airport?.ident, el: runwayLabelElement(label, onSelect) }));
+    runwayLabels = labels.map((label) => ({ lat: label.lat, lng: label.lng, ident: label.airport?.ident, kind: label.kind, el: runwayLabelElement(label, onSelect) }));
+    refreshLabels();
+  }
+
+  // Labels for the airports a selected aircraft left from and is going to: [{ lat, lng, text,
+  // title, ident, kind }] (`ident` is the airport's ICAO code, whose own label is then left out), or
+  // [] to remove them.
+  function setFlightEnds(ends) {
+    if (!ends.length && !flightEnds.length) return;
+    flightEnds = ends.map((end) => ({ lat: end.lat, lng: end.lng, ident: end.ident, el: flightEndElement(end) }));
     refreshLabels();
   }
 
@@ -892,5 +919,5 @@ export function setupMapFeatures(globe) {
     });
   }
 
-  return { update, setMarker, setAirports, setRunwayLabels };
+  return { update, setMarker, setAirports, setRunwayLabels, setFlightEnds };
 }

@@ -296,3 +296,206 @@ export function orbitLine(globe) {
     },
   };
 }
+
+// A line drawn as a ribbon a few pixels wide, since WebGL draws no thicker lines: a bright core
+// with a dark edge, so it reads over any map or weather. Like the aircraft it is drawn after the
+// weather layers without depth testing, and hidden behind the globe by the same test. It goes over
+// the other aircraft (under the selection ring), which would otherwise hide most of it among dense
+// traffic. Each segment is a quad of its own (a square end covers the joints), so a changed end
+// can be rewritten, and uploaded, without touching the rest. `dashed` lines break into dashes of
+// `dash` scene units. A segment that crosses the camera's plane is cut at it. The end called the
+// tip (the last point of a line with `tip: 'end'`, the first with `tip: 'start'`) is where the
+// aircraft is, and stops `gap` pixels short of it instead of running over it.
+const LINE_VERTEX = /* glsl */ `
+  attribute vec3 aOther;
+  attribute float aSide;
+  attribute float aEnd;
+  attribute float aDist;
+  attribute float aTip;
+  uniform vec2 uViewport;
+  uniform float uWidth;
+  uniform float uGap;
+  varying vec3 vWorld;
+  varying float vSide;
+  varying float vDist;
+  // The distance in front of the camera under which a segment is cut.
+  const float NEAR_W = 0.05;
+  void main() {
+    vec4 here = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    vec4 there = projectionMatrix * modelViewMatrix * vec4(aOther, 1.0);
+    vec3 world = position;
+    float dist = aDist;
+    if (here.w < NEAR_W && there.w < NEAR_W) {
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      return;
+    }
+    // Cut at the camera's plane: in clip space the cut point is on the straight line between the two.
+    if (here.w < NEAR_W) {
+      float t = (NEAR_W - here.w) / (there.w - here.w);
+      here = mix(here, there, t);
+      world = mix(position, aOther, t);
+      dist = aDist + aEnd * t * length(aOther - position);
+    } else if (there.w < NEAR_W) {
+      there = mix(there, here, (NEAR_W - there.w) / (here.w - there.w));
+    }
+    vWorld = world;
+    vSide = aSide;
+    vDist = dist;
+    vec2 toOther = (there.xy / there.w - here.xy / here.w) * uViewport * 0.5;
+    float len = length(toOther);
+    // The segment's direction on screen, from its first end to its second.
+    vec2 dir = len > 1e-4 ? toOther / len * aEnd : vec2(1.0, 0.0);
+    vec2 normal = vec2(-dir.y, dir.x);
+    float hw = uWidth * 0.5;
+    // The ends are squared off past the point by half the width, except the tip, which stops short.
+    float along = aTip > 0.5 ? aEnd * min(uGap, len) : -aEnd * hw;
+    vec2 offset = (normal * aSide * hw + dir * along) / (uViewport * 0.5);
+    gl_Position = vec4(here.xy + offset * here.w, here.z, here.w);
+  }
+`;
+
+const LINE_FRAGMENT = /* glsl */ `
+  ${BEHIND_GLOBE}
+  uniform vec3 uColor;
+  uniform float uAlpha;
+  uniform float uDash;
+  varying vec3 vWorld;
+  varying float vSide;
+  varying float vDist;
+  void main() {
+    if (behindGlobe(vWorld)) discard;
+    if (uDash > 0.0 && mod(vDist, uDash * 1.8) > uDash) discard;
+    float edge = smoothstep(0.5, 0.66, abs(vSide));
+    float soft = 1.0 - smoothstep(0.88, 1.0, abs(vSide));
+    gl_FragColor = vec4(mix(uColor, vec3(0.04, 0.05, 0.09), edge * 0.85), uAlpha * soft);
+  }
+`;
+
+export function flightLine(globe, { color, dashed = false, width = 5, alpha = 0.95, renderOrder = 10.5, tip = null }) {
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      uViewport: { value: new THREE.Vector2(1, 1) },
+      uWidth: { value: width },
+      uGap: { value: 0 },
+      uColor: { value: new THREE.Color(...color) },
+      uAlpha: { value: alpha },
+      uDash: { value: 0 },
+      uHideRadiusSq: hideUniform(globe),
+    },
+    vertexShader: LINE_VERTEX,
+    fragmentShader: LINE_FRAGMENT,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const geometry = new THREE.BufferGeometry();
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = renderOrder;
+  mesh.raycast = () => {};
+  mesh.visible = false;
+  globe.scene().add(mesh);
+
+  const sizes = { position: 3, aOther: 3, aSide: 1, aEnd: 1, aDist: 1, aTip: 1 };
+  let capacity = 0;
+  let segments = 0;
+  let points = new Float32Array(0);
+
+  function reserve(n) {
+    if (n <= capacity) return;
+    // The buffers being replaced are freed, rather than left on the graphics card.
+    geometry.dispose();
+    capacity = Math.max(n, Math.ceil(capacity * 1.5), 64);
+    for (const [name, size] of Object.entries(sizes)) {
+      const attribute = new THREE.BufferAttribute(new Float32Array(capacity * 4 * size), size);
+      attribute.setUsage(THREE.DynamicDrawUsage);
+      geometry.setAttribute(name, attribute);
+    }
+    const index = new Uint32Array(capacity * 6);
+    for (let k = 0; k < capacity; k++) index.set([4 * k, 4 * k + 1, 4 * k + 2, 4 * k + 2, 4 * k + 1, 4 * k + 3], 6 * k);
+    geometry.setIndex(new THREE.BufferAttribute(index, 1));
+  }
+
+  // Writes segment k, from point k to point k + 1 of `points`, whose distance along the line at
+  // its start is `dist`; returns the distance at its end.
+  function writeSegment(k, dist) {
+    const a = 3 * k;
+    const b = a + 3;
+    const length = Math.hypot(points[b] - points[a], points[b + 1] - points[a + 1], points[b + 2] - points[a + 2]);
+    const { position, aOther, aSide, aEnd, aDist, aTip } = geometry.attributes;
+    for (let v = 0; v < 4; v++) {
+      const startVertex = v < 2;
+      const own = startVertex ? a : b;
+      const other = startVertex ? b : a;
+      const i = 4 * k + v;
+      position.array.set([points[own], points[own + 1], points[own + 2]], 3 * i);
+      aOther.array.set([points[other], points[other + 1], points[other + 2]], 3 * i);
+      aSide.array[i] = v % 2 ? 1 : -1;
+      aEnd.array[i] = startVertex ? 1 : -1;
+      aDist.array[i] = startVertex ? dist : dist + length;
+      aTip.array[i] = (tip === 'end' && k === segments - 1 && !startVertex) || (tip === 'start' && k === 0 && startVertex) ? 1 : 0;
+    }
+    return dist + length;
+  }
+
+  // Uploads all of the named attributes, or only those of the vertices of one segment.
+  function touch(names, segment = null) {
+    for (const name of names) {
+      const attribute = geometry.attributes[name];
+      attribute.clearUpdateRanges();
+      if (segment !== null) attribute.addUpdateRange(4 * segment * attribute.itemSize, 4 * attribute.itemSize);
+      attribute.needsUpdate = true;
+    }
+  }
+
+  return {
+    mesh,
+    // The line through `flat` (x, y, z of each point, in scene units).
+    set(flat) {
+      const n = Math.floor(flat.length / 3);
+      if (n < 2) {
+        segments = 0;
+        mesh.visible = false;
+        return;
+      }
+      reserve(n - 1);
+      points = Float32Array.from(flat);
+      segments = n - 1;
+      let dist = 0;
+      for (let k = 0; k < segments; k++) dist = writeSegment(k, dist);
+      geometry.setDrawRange(0, segments * 6);
+      touch(Object.keys(sizes));
+      mesh.visible = true;
+    },
+    // Moves the last point, e.g. to where the aircraft is now, rewriting only the last segment.
+    moveEnd(x, y, z) {
+      if (!segments) return;
+      points.set([x, y, z], 3 * segments);
+      writeSegment(segments - 1, geometry.attributes.aDist.array[4 * (segments - 1)]);
+      touch(['position', 'aOther', 'aDist'], segments - 1);
+    },
+    // Moves the first point, rewriting only the first segment.
+    moveStart(x, y, z) {
+      if (!segments) return;
+      points.set([x, y, z], 0);
+      writeSegment(0, 0);
+      touch(['position', 'aOther', 'aDist'], 0);
+    },
+    hide() {
+      segments = 0;
+      mesh.visible = false;
+    },
+    setViewport(w, h) {
+      material.uniforms.uViewport.value.set(w, h);
+    },
+    // How far the tip stops short of the aircraft, in pixels.
+    set gap(pixels) {
+      material.uniforms.uGap.value = pixels;
+    },
+    // Dash length in scene units (dashed lines only), kept at about the same size on screen.
+    set dash(units) {
+      if (dashed) material.uniforms.uDash.value = units;
+    },
+  };
+}

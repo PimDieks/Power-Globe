@@ -218,6 +218,7 @@ const traffic = setupTraffic({
     state.detail = null;
     els.details.classList.add('hidden');
   },
+  onFlightEnds: (ends) => mapFeatures.setFlightEnds(ends),
   announce: (message) => announce(message),
 });
 const windCheck = setupWindCheck({
@@ -913,7 +914,7 @@ function syncFollowCard() {
   const report = traffic.selectedAircraft();
   if (!report) return;
   cardAt = now;
-  const { name, line } = cardText(report);
+  const { name, line } = cardText(report, { to: traffic.flightInfo()?.to?.code });
   if (els.followCardName.textContent !== name) {
     els.followCardName.textContent = name;
     els.followCardOpen.setAttribute('aria-label', `Show full details for ${name}`);
