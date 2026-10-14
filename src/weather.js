@@ -237,14 +237,22 @@ export async function fetchHourly(points, { onProgress } = {}) {
 }
 
 // Ground conditions at airports, as aviation weather reports them: wind in knots at 10 m (the
-// height of airport anemometers), temperature and dew point at 2 m, every hour.
+// height of airport anemometers), temperature and dew point at 2 m, and visibility in metres,
+// every hour.
 export const AIRPORT_VARIABLES = [
   'temperature_2m',
   'dew_point_2m',
   'wind_speed_10m',
   'wind_direction_10m',
   'wind_gusts_10m',
+  'visibility',
 ];
+
+// Visibility as the site's copy keeps it: to 100 m, and no more than 10 km (reports say 9999 for
+// that or more, and no limit is anywhere near), so that the clear hours that are nearly all of them
+// are the same number and the copy compresses to almost the size it had without visibility.
+export const AIRPORT_VISIBILITY_CAP = 10_000;
+export const roundVisibility = (metres) => (metres == null ? null : Math.min(AIRPORT_VISIBILITY_CAP, Math.round(metres / 100) * 100));
 const FEET = 0.3048;
 
 // The airport's own elevation lets Open-Meteo correct the temperature for its height.

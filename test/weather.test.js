@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  AIRPORT_VARIABLES,
   apiBudget,
   buildGrid,
   buildUrl,
@@ -10,6 +11,7 @@ import {
   gridShape,
   loadForecast,
   parseTime,
+  roundVisibility,
   precipitationRate,
   resetApiBudget,
   seriesHours,
@@ -470,5 +472,18 @@ describe('limitPause', () => {
     expect(limitPause('Daily API request limit exceeded. Please try again tomorrow.', now)).toBe(6 * 3_600_000);
     expect(limitPause('Hourly API request limit exceeded.', now)).toBe(3_600_000);
     expect(limitPause('Minutely API request limit exceeded.', now)).toBe(60_000);
+  });
+});
+
+describe('airport visibility', () => {
+  it('is asked for with the ground conditions, and kept in the site copy to 100 m and no more than 10 km', () => {
+    expect(AIRPORT_VARIABLES).toContain('visibility');
+    expect(roundVisibility(24_140)).toBe(10_000);
+    expect(roundVisibility(9_960)).toBe(10_000);
+    expect(roundVisibility(1_449)).toBe(1_400);
+    expect(roundVisibility(820)).toBe(800);
+    expect(roundVisibility(0)).toBe(0);
+    expect(roundVisibility(null)).toBeNull();
+    expect(roundVisibility(undefined)).toBeNull();
   });
 });
