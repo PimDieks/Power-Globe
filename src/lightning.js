@@ -576,8 +576,10 @@ export async function decodeBlob(blob) {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(bitmap, 0, 0);
   const { data } = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+  // Its size is read before it is closed, which empties it.
+  const { width, height } = bitmap;
   bitmap.close?.();
-  return { width: bitmap.width, height: bitmap.height, data };
+  return { width, height, data };
 }
 
 const fetchText = async (url) => {
@@ -587,7 +589,7 @@ const fetchText = async (url) => {
 };
 
 // A time past the layer's newest, or any other mistake, comes back as an XML error and not an image.
-const loadImage = async (url) => {
+export const loadFrameImage = async (url) => {
   const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (!res.ok || !/^image\/png/.test(res.headers.get('content-type') ?? '')) throw new Error(`HTTP ${res.status}`);
   return decodeBlob(await res.blob());
@@ -603,8 +605,9 @@ const keyOf = (lat, lon) => `${lat.toFixed(3)},${lon.toFixed(3)}`;
 // `onUpdate(result)` gets a result (see summarise, uncovered, unavailable) after each attempt.
 // `fetchText(url)` and `loadImage(url)` (to { width, height, data }) can be replaced for tests.
 export class LightningMonitor {
-  constructor({ fetchText: ft = fetchText, loadImage: li = loadImage, now = Date.now, onUpdate = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, maxAirports = 4, timeZone, backoff = new Backoff({ first: 30_000, max: 300_000 }) } = {}) {
-    Object.assign(this, { fetchText: ft, loadImage: li, now, onUpdate, setTimer, clearTimer, maxAirports, timeZone, backoff });
+  constructor({ fetchText: ft = fetchText, loadImage: li = loadFrameImage, now = Date.now, onUpdate = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, maxAirports = 4, timeZone, backoff = new Backoff({ first: 30_000, max: 300_000 }) } = {}) {
+    // The timers are called as plain functions: in a browser they must not be called as methods.
+    Object.assign(this, { fetchText: ft, loadImage: li, now, onUpdate, setTimer: (fn, ms) => setTimer(fn, ms), clearTimer: (timer) => clearTimer(timer), maxAirports, timeZone, backoff });
     this.cache = new Map();
     this.airport = null;
     this.timer = null;

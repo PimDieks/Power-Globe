@@ -742,6 +742,26 @@ describe('the monitor', () => {
     expect(r.status.text).toMatch(/^Lightning \d+ km N, approaching/);
   });
 
+  it('calls the timers as plain functions, as a browser needs', async () => {
+    const seen = [];
+    const service = fakeService(makeGeometry(52.31, 4.76));
+    const monitor = new LightningMonitor({
+      fetchText: service.fetchText,
+      loadImage: service.loadImage,
+      now: () => at('2026-10-14T15:38:00Z'),
+      setTimer: function (fn, ms) {
+        seen.push(['set', this, ms]);
+        return 7;
+      },
+      clearTimer: function (timer) {
+        seen.push(['clear', this, timer]);
+      },
+    });
+    await monitor.start(EHAM);
+    monitor.stop();
+    expect(seen).toEqual([['clear', undefined, null], ['set', undefined, 5 * MIN], ['clear', undefined, 7]]);
+  });
+
   it('uses fetch and a decoder of its own by default', () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 500 }));
     const m = new LightningMonitor({ setTimer: () => 0, clearTimer: () => {} });

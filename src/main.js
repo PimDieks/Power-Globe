@@ -28,6 +28,8 @@ import { airportDetailsHtml, airportPlace, panelStays, verdictText } from './air
 import { setupWindCheck } from './windcheck.js';
 import { DETAIL_TABS, OPS_PARTS, createOpsHost, readTab, saveTab, tabAfterKey } from './ops.js';
 import { formatClock, formatClockShort, formatTick, zoneName } from './opsclock.js';
+import { setLightningOverlay } from './opslightningview.js';
+import { setupLightningOverlay } from './lightningmap.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
@@ -322,6 +324,9 @@ const airportMap = setupAirportMap({
     goToAirport(airport, { stayClose: true });
   },
 });
+
+// The Ops tab's lightning part draws its rings and image on the map through this.
+setLightningOverlay(setupLightningOverlay(globe));
 
 globe.pointOfView({ lat: 22, lng: -25, altitude: narrowScreen ? 3.6 : 2.4 });
 const controls = globe.controls();
