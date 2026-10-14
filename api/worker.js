@@ -6,6 +6,8 @@
 //   GET /flights/global           all aircraft (OpenSky Network), cached 2 min with an account, else 5 min
 //   GET /flights/area?lat&lon&nm  aircraft around a point, up to 250 NM (adsb.lol, adsb.fi), cached 10 s
 //   GET /flights/military         military aircraft worldwide (same feeds), cached 30 s
+//   GET /track?icao24=<hex>       where an aircraft has been on its current flight (OpenSky Network),
+//                                 cached 1 min per aircraft
 //   GET /metar?ids=EHAM,KJFK      latest METARs (NOAA Aviation Weather Center), cached 2 min
 //   GET /satellites/<group>       orbital elements as TLE (CelesTrak), cached 2 h
 //   GET /forecast?<Open-Meteo query>  Open-Meteo forecasts (up to 100 places), cached 30 min
@@ -35,6 +37,10 @@ const DEFAULT_ORIGINS = 'https://pimdieks.github.io,http://localhost:5173,http:/
 const SATELLITE_GROUPS = ['active', 'stations', 'starlink', 'gnss', 'weather', 'military'];
 const FORECAST_PARAMS = new Set(['latitude', 'longitude', 'elevation', 'hourly', 'forecast_days', 'timezone', 'temporal_resolution', 'wind_speed_unit']);
 const MAX_FORECAST_PLACES = 100;
+// A track is thinned to about this many points. OpenSky gives 90 to 165 for a long flight.
+export const MAX_TRACK_POINTS = 300;
+const TRACK_SECONDS = 60;
+const FT_PER_M = 3.28084;
 // Answers kept to serve when a service fails or limits us.
 const BACKUP_SECONDS = 6 * 3600;
 // Give up on a service after this long, and remember a failure for a while so that neither the
@@ -183,6 +189,46 @@ const openskyAccount = (env) => Boolean(env.OPENSKY_CLIENT_ID && env.OPENSKY_CLI
 // a third of a day).
 const openskySeconds = (env) => (openskyAccount(env) ? 120 : 300);
 
+// OpenSky's /tracks/all answer ({ icao24, callsign, startTime, endTime, path: [[time, lat, lon,
+// baro altitude in metres, track, on ground], ...] }) as the points the page draws: [time in
+// seconds, lat, lon, altitude in feet or null, 1 on the ground else 0], thinned evenly (keeping the
+// first and last) to at most `max`. Points without a position (gaps) are left out.
+export function compactTrack(data, max = MAX_TRACK_POINTS) {
+  const path = (Array.isArray(data?.path) ? data.path : []).filter((p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2]));
+  const picked = path.length <= max ? path : Array.from({ length: max }, (_, i) => path[Math.round((i * (path.length - 1)) / (max - 1))]);
+  return picked.map(([t, lat, lon, altitude, , onGround]) => [
+    t,
+    Math.round(lat * 1e4) / 1e4,
+    Math.round(lon * 1e4) / 1e4,
+    Number.isFinite(altitude) ? Math.round(altitude * FT_PER_M) : null,
+    onGround ? 1 : 0,
+  ]);
+}
+
+// An aircraft's track on its current flight, asked of OpenSky (through the relay, like the
+// flights). OpenSky answers 404 for an aircraft with no current flight, which is an answer
+// here (no points), not a failure. Like a flight feed, OpenSky is left alone for a while after it
+// refuses or limits us.
+async function track(icao24, fetchFn, env, cache, origin) {
+  const key = feedKey(origin, env, { name: 'opensky-tracks' });
+  const reason = await leftAlone(cache, key);
+  if (reason) throw new HttpError(502, `OpenSky is not asked for now (${reason})`);
+  let data = null;
+  try {
+    const res = await upstream(fetchFn, `https://opensky-network.org/api/tracks/all?icao24=${icao24}&time=0`, { headers: await openskyHeaders(fetchFn, env) }, env);
+    data = await res.json();
+  } catch (err) {
+    // The relay's own 404 means it does not ask OpenSky; only OpenSky's is "no flight".
+    if (err.answered !== 404 || err.byRelay) {
+      const seconds = coolOff(err);
+      if (seconds > 0) await leaveAlone(cache, key, seconds, err.message);
+      throw err;
+    }
+  }
+  const points = compactTrack(data);
+  return json({ source: 'OpenSky Network', icao24, callsign: String(data?.callsign ?? '').trim(), startTime: points[0]?.[0] ?? null, points }, TRACK_SECONDS);
+}
+
 const json = (body, maxAge) =>
   new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${maxAge}` } });
 
@@ -200,7 +246,7 @@ export async function route(url, env = {}, fetchFn = fetch, cache) {
     return json(
       {
         name: 'Power Globe API',
-        routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/metar?ids=', '/satellites/<group>', '/forecast?', '/tiles/openaip/<z>/<x>/<y>.png'],
+        routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/track?icao24=', '/metar?ids=', '/satellites/<group>', '/forecast?', '/tiles/openaip/<z>/<x>/<y>.png'],
         opensky: openskyAccount(env) ? 'account' : 'anonymous',
         chart: env.OPENAIP_API_KEY ? 'openAIP' : 'no key',
         relay: relayOn(env) ? 'on' : 'off',
@@ -227,6 +273,11 @@ export async function route(url, env = {}, fetchFn = fetch, cache) {
   }
   if (path === '/flights/military') {
     return json({ fetched: Date.now(), ...(await fromFeeds(fetchFn, (f) => f.military, env, cache, url.origin)) }, 30);
+  }
+  if (path === '/track') {
+    const icao24 = (url.searchParams.get('icao24') ?? '').toLowerCase();
+    if (!/^[0-9a-f]{6}$/.test(icao24)) throw new HttpError(400, 'icao24: 6 hexadecimal characters');
+    return track(icao24, fetchFn, env, cache, url.origin);
   }
   if (path === '/metar') {
     const ids = (url.searchParams.get('ids') ?? '').toUpperCase();
@@ -298,6 +349,8 @@ export default {
     const cache = globalThis.caches?.default;
     const key = new Request(url.toString(), { method: 'GET' });
     const backupKey = new Request(`${url.origin}/__backup${url.pathname}${url.search}`, { method: 'GET' });
+    // An old track would draw a flight that is long over, so tracks have no backup copy.
+    const backedUp = !url.pathname.startsWith('/track');
     let res = await cache?.match(key);
     if (!res) {
       const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
@@ -306,14 +359,16 @@ export default {
       }
       try {
         res = await route(url, env, fetch, cache);
-        if (cache) {
+        if (cache && !backedUp) {
+          ctx?.waitUntil(cache.put(key, res.clone()));
+        } else if (cache) {
           const backup = new Response(res.clone().body, res);
           backup.headers.set('Cache-Control', `public, max-age=${BACKUP_SECONDS}`);
           ctx?.waitUntil(Promise.all([cache.put(key, res.clone()), cache.put(backupKey, backup)]));
         }
       } catch (err) {
         // Serve the last good answer rather than asking a failing or limiting service again.
-        res = await cache?.match(backupKey);
+        res = backedUp ? await cache?.match(backupKey) : undefined;
         if (res) {
           res = new Response(res.body, res);
           res.headers.set('X-Power-Globe-Backup', '1');
