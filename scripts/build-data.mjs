@@ -1,14 +1,14 @@
 // Builds the site's own data API in public/data/api/, so visitors share one download instead of
 // each asking the public services (and running into their limits):
-//   forecast.json         the global forecast grid the globe shows (Open-Meteo, 5 days, 3-hourly)
-//   airport-weather.json  ground conditions at the major airports (Open-Meteo, every 3 hours)
+//   forecast.json         the global forecast grid the globe shows (Open-Meteo, 5 days, hourly)
+//   airport-weather.json  ground conditions at the major airports (Open-Meteo, every hour)
 //   index.json            what is here and when it was built
 // Run at deploy time, every six hours: about 1,550 Open-Meteo locations a run, within its free
 // allowance of 10,000 a day.
 //
 //   node scripts/build-data.mjs
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { AIRPORT_SNAPSHOT_STEP, AIRPORT_VARIABLES, GRID_STEP, buildAirportUrl, buildGrid, buildUrl, chunk, toForecast } from '../src/weather.js';
+import { AIRPORT_SNAPSHOT_STEP, AIRPORT_VARIABLES, GRID_STEP, buildAirportUrl, buildGrid, buildUrl, chunk, forecastCopyOf } from '../src/weather.js';
 import { majorAirports, toAirport } from '../src/airports.js';
 
 const OUT = new URL('../public/data/api/', import.meta.url);
@@ -66,9 +66,9 @@ async function forecast() {
   const points = buildGrid(GRID_STEP);
   const hourly = [];
   for (const part of chunk(points, CHUNK)) {
-    hourly.push(...(await paced(buildUrl(part, { threeHourly: true }), part.length)).map((d) => d.hourly));
+    hourly.push(...(await paced(buildUrl(part), part.length)).map((d) => d.hourly));
   }
-  return { step: GRID_STEP, data: toForecast(points, hourly) };
+  return forecastCopyOf(points, hourly);
 }
 
 async function airportWeather() {
@@ -88,7 +88,7 @@ async function airportWeather() {
       continue;
     }
     data.forEach(({ hourly }, i) => {
-      // Every third hour (00, 03, ... GMT), the timeline's steps.
+      // Every step (an hour, see AIRPORT_SNAPSHOT_STEP) of the timeline.
       const keep = hourly.time.flatMap((t, k) => (Number(t.slice(11, 13)) % AIRPORT_SNAPSHOT_STEP === 0 ? [k] : []));
       times ??= keep.map((k) => hourly.time[k]);
       out[part[i].ident] = AIRPORT_VARIABLES.map((v) => keep.map((k) => round(hourly[v]?.[k], v === 'temperature_2m' || v === 'dew_point_2m' ? 1 : 0)));
@@ -124,8 +124,8 @@ await writeFile(
       name: 'Power Globe data API',
       built,
       endpoints: {
-        'api/forecast.json': 'Global forecast grid, 12° spacing, 5 days every 3 hours (Open-Meteo, CC BY 4.0)',
-        'api/airport-weather.json': 'Temperature, dew point, wind and gusts (kt) at major airports, 5 days every 3 hours (Open-Meteo, CC BY 4.0)',
+        'api/forecast.json': 'Global forecast grid, 12° spacing, 5 days every hour (Open-Meteo, CC BY 4.0)',
+        'api/airport-weather.json': 'Temperature, dew point, wind and gusts (kt) at major airports, 5 days every hour (Open-Meteo, CC BY 4.0)',
         'airports.json': 'Airports and runways (OurAirports, public domain; route counts from OpenFlights, ODbL)',
         'satellites/<group>.tle': 'Satellite orbital elements (CelesTrak)',
       },

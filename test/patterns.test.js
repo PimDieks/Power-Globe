@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { covers, cubicWeights, renderField, sampleGrid, sampleGridCubic, samplingTables } from '../src/field.js';
 import { advect, windComponents, windGrids } from '../src/flow.js';
-import { classifyHazard, hazardRings } from '../src/patterns.js';
+import { classifyHazard, hazardRings, reuseRings } from '../src/patterns.js';
 
 describe('sampleGrid', () => {
   // 2 rows (lat 0 and 10) x 4 columns (lng -180, -90, 0, 90).
@@ -125,6 +125,30 @@ describe('wind', () => {
     const [, nearEquator] = advect(0, 0, 10, 0, 1, 0.1);
     const [, nearPole] = advect(60, 0, 10, 0, 1, 0.1);
     expect(nearPole).toBeCloseTo(nearEquator * 2);
+  });
+});
+
+describe('reuseRings', () => {
+  const ring = (lat, kind = 'storm') => ({ lat, lng: 0, kind });
+
+  it('gives back the same list when nothing changed, as a new list of equal rings', () => {
+    const shown = [ring(1), ring(2, 'rain')];
+    expect(reuseRings(shown, [ring(1), ring(2, 'rain')])).toBe(shown);
+    expect(reuseRings([], [])).toEqual([]);
+  });
+
+  it('keeps the objects of the rings that stay', () => {
+    const shown = [ring(1), ring(2)];
+    const next = reuseRings(shown, [ring(2), ring(3)]);
+    expect(next).not.toBe(shown);
+    expect(next[0]).toBe(shown[1]);
+    expect(next[1]).toEqual(ring(3));
+  });
+
+  it('notices a ring changing kind, or going', () => {
+    const shown = [ring(1)];
+    expect(reuseRings(shown, [ring(1, 'rain')])).toEqual([ring(1, 'rain')]);
+    expect(reuseRings(shown, [])).toEqual([]);
   });
 });
 
