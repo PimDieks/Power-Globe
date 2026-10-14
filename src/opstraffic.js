@@ -28,6 +28,9 @@ export const MIN_ETA_SPEED_KT = 120;
 // The routes of aircraft heading for the airport may bear away from it by this much and still be
 // believed (the route database says it is going there).
 export const ROUTE_MAX_OFFSET_DEG = 90;
+// An area feed that falls this short of INBOUND_RANGE_NM (its centre is snapped to a grid) is not
+// worth a note.
+export const INBOUND_SNAP_NM = 15;
 
 // Holding: a turn of at least this many degrees in the same direction ...
 export const HOLD_TURN_DEG = 300;
@@ -623,7 +626,7 @@ export class OpsTraffic {
     if (!area && !fastEnough) notes.push('Only the worldwide feed (reports every few minutes) is known to cover this airport, so holding and runway use cannot be detected reliably.');
     else if (area && !areaHolds) notes.push(`The area feed is not centred on this airport (${Math.round(away)} NM away, ${area.nm} NM wide), so holding and runway use may be missed.`);
     else if (gap != null && !fastEnough) notes.push(`Aircraft near the airport are reported only every ${Math.round(gap)} s, too slowly to see holding or landings reliably.`);
-    if (area && inboundNm < INBOUND_RANGE_NM) notes.push(`The area feed covers only ${Math.round(inboundNm)} NM around the airport; inbound traffic further out is seen only from the worldwide feed and may be missing.`);
+    if (area && inboundNm < INBOUND_RANGE_NM - INBOUND_SNAP_NM) notes.push(`The area feed covers only ${Math.round(inboundNm)} NM around the airport; inbound traffic further out is seen only from the worldwide feed and may be missing.`);
     notes.push(
       this.since == null
         ? 'Nothing monitored yet.'

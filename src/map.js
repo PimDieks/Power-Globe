@@ -1138,7 +1138,7 @@ function runwayLabelElement(label, onSelect) {
       ? `wind-label${selected}`
       : label.kind === 'airport'
         ? `airport-label status-${label.status}${label.flag ? ' flagged' : ''}${selected}`
-        : `runway-label status-${label.status}`;
+        : `runway-label status-${label.status}${label.use ? ' in-use' : ''}`;
   el.setAttribute('aria-hidden', 'true');
   el.title = label.title ?? '';
   const span = document.createElement('span');

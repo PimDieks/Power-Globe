@@ -487,6 +487,10 @@ describe('data limits', () => {
     expect(ok.coverage.holdingReliable).toBe(true);
     expect(ok.coverage.inboundNm).toBeLessThan(200);
     expect(ok.coverage.notes.join(' ')).toContain('covers only');
+    // An area of 200 miles snapped to the grid, a few miles off, is as good as centred.
+    const snapped = new OpsTraffic(EHAM);
+    snapped.update([], { now: T0, area: { lat: 52.25, lng: 4.75, nm: 200 } });
+    expect(snapped.report(T0).coverage.notes.join(' ')).not.toContain('covers only');
   });
 });
 

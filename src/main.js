@@ -175,6 +175,9 @@ const state = {
   detail: null,
   // The airport panel's tab, 'details' or 'ops' (see ops.js); remembered per browser.
   detailTab: readTab(),
+  // The airport detail to go back to from an aircraft picked while its Ops tab was open, or null.
+  // The tab keeps watching meanwhile (see opstrafficview.js).
+  opsReturn: null,
   // Whether the wind check is in use: its panel is open, or one of its airports is.
   windCheck: false,
   // Zoomed-in area with finer data: { shape, bounds, data, winds, times, fade }, or null.
@@ -322,6 +325,25 @@ const airportMap = setupAirportMap({
     goToAirport(airport, { stayClose: true });
   },
 });
+
+// What the Ops tab's traffic part reads from the page and asks of it (see opstrafficview.js).
+const opsTraffic = {
+  subscribe: traffic.subscribe,
+  watchArea: traffic.watchArea,
+  aircraft: traffic.aircraft,
+  layerOn: traffic.layerOn,
+  // What to mark on the map: the aircraft and stacks on the globe, the runways in use on the airport map.
+  setOverlay(overlay) {
+    traffic.setOverlay(overlay);
+    airportMap.setRunwayUse(overlay?.runwayUse?.ident, overlay?.runwayUse?.ends);
+  },
+  // Selects an aircraft as tapping it on the map does.
+  select(id) {
+    if (!traffic.has(id)) return false;
+    traffic.select({ kind: 'aircraft', id });
+    return true;
+  },
+};
 
 globe.pointOfView({ lat: 22, lng: -25, altitude: narrowScreen ? 3.6 : 2.4 });
 const controls = globe.controls();
@@ -891,16 +913,20 @@ function openSidePanel({ keepTraffic = false } = {}) {
 function showTraffic(item, title) {
   // Tapping the aircraft that is followed keeps following it.
   if (state.follow && !(item.kind === 'aircraft' && item.id === state.follow.id)) stopFollowing();
+  // An aircraft picked while the Ops tab is open (or from the aircraft picked that way) can go back to the airport.
+  const back = item.kind === 'aircraft' ? (state.detail?.airport && state.detailTab === 'ops' ? state.detail : state.detail?.traffic ? state.opsReturn : null) : null;
   openSidePanel({ keepTraffic: true });
   windCheck.close();
   syncWindCheckButton();
+  state.opsReturn = back;
   state.detail = { traffic: item };
   syncDetailTabs();
   mapFeatures.setMarker(null);
-  airportMap.select(null);
+  airportMap.select(back?.airport ?? null);
   els.details.classList.remove('hidden');
   els.details.classList.add('keep-awake');
-  els.detailsBack.hidden = true;
+  setBackLabel(back ? 'Airport' : 'Wind check');
+  els.detailsBack.hidden = !back;
   els.detailsTitle.textContent = title;
   renderDetails();
   announce(`${item.kind === 'aircraft' ? 'Flight' : 'Satellite'} ${title} selected.`);
@@ -1131,6 +1157,7 @@ async function showDetails(lat, lng, name, pinLabel = name) {
   windCheck.close();
   syncWindCheckButton();
   const detail = { lat, lng, data: null };
+  state.opsReturn = null;
   state.detail = detail;
   syncDetailTabs();
   const title = name ?? coords(lat, lng);
@@ -1193,6 +1220,8 @@ async function showAirport(airport, { fromList = false } = {}) {
   // `observation`: undefined while the METAR loads, null if there is none. `error`: why there is
   // no forecast, once it is known.
   const detail = { airport, hourly: null, fromList, observation: undefined, error: null };
+  state.opsReturn = null;
+  setBackLabel('Wind check');
   state.detail = detail;
   syncDetailTabs();
   // The airport's own label on the map shows it is open (see airportmap.js): no pin of its own.
@@ -1242,6 +1271,7 @@ async function showAirport(airport, { fromList = false } = {}) {
 function closeDetails() {
   const tracked = state.detail?.traffic;
   state.detail = null;
+  state.opsReturn = null;
   syncDetailTabs();
   if (tracked) traffic.deselect();
   els.details.classList.add('hidden');
@@ -1278,6 +1308,26 @@ function closeWindCheck() {
 
 function syncWindCheckButton() {
   els.windCheckOpen.setAttribute('aria-expanded', String(!els.windCheck.panel.classList.contains('hidden')));
+}
+
+// The label of the panel's back button.
+function setBackLabel(text) {
+  els.detailsBack.lastChild.textContent = ` ${text}`;
+}
+
+// Back from an aircraft picked in the Ops tab to the airport, as it was.
+function backToAirport() {
+  const detail = state.opsReturn;
+  if (!detail) return;
+  state.opsReturn = null;
+  state.detail = detail;
+  traffic.deselect();
+  setBackLabel('Wind check');
+  els.detailsBack.hidden = !detail.fromList;
+  els.detailsTitle.textContent = detail.airport.name;
+  airportMap.select(detail.airport);
+  syncDetailTabs();
+  renderDetails();
 }
 
 // Back from an airport to the wind check list, with focus on the airport just shown.
@@ -1379,7 +1429,8 @@ function syncDetailTabs() {
     els.detailsBody.removeAttribute('aria-labelledby');
   }
   if (show && state.detailTab === 'ops') ops.mount();
-  else ops.unmount();
+  // An aircraft picked from the Ops tab leaves it watching, for the way back.
+  else if (!(state.detail?.traffic && state.opsReturn)) ops.unmount();
 }
 
 function selectDetailTab(id) {
@@ -1433,8 +1484,10 @@ const ops = createOpsHost({
 
 // What is known of the open airport, for the airport panel's tabs.
 function airportContext() {
-  const detail = state.detail;
+  // While an aircraft picked from the tab is open, the airport it was picked at.
+  const detail = state.detail?.airport ? state.detail : state.opsReturn;
   return {
+    trafficSource: opsTraffic,
     airport: detail.airport,
     hourly: detail.hourly,
     time: currentTime(),
@@ -1517,7 +1570,7 @@ els.cloudsLoop.addEventListener('click', toggleCloudsLoop);
 els.cloudsLoop.hidden = state.basemap !== 'clouds';
 els.wind.addEventListener('change', invalidate);
 els.detailsClose.addEventListener('click', closeDetails);
-els.detailsBack.addEventListener('click', backToWindCheck);
+els.detailsBack.addEventListener('click', () => (state.detail?.traffic && state.opsReturn ? backToAirport() : backToWindCheck()));
 els.windCheckOpen.addEventListener('click', () => {
   if (els.windCheck.panel.classList.contains('hidden')) openWindCheck();
   else closeWindCheck();

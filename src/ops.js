@@ -16,9 +16,10 @@
 import { escapeHtml } from './airportview.js';
 import { STATUS } from './runways.js';
 import { runwayPart } from './opsrunwayview.js';
+import { trafficPart } from './opstrafficview.js';
 
 // The Ops parts, in the order their sections are shown and their facts are listed.
-export const OPS_PARTS = [runwayPart];
+export const OPS_PARTS = [runwayPart, trafficPart];
 
 export const DETAIL_TABS = [
   { id: 'details', label: 'Details' },
@@ -74,7 +75,7 @@ export function stripHtml(entries) {
   const items = facts
     .map(({ part, fact }) => {
       const status = STATUS[fact.status] ? fact.status : 'unknown';
-      return `<li class="status-${status}"><span class="status-icon" aria-hidden="true">${STATUS[status].icon}</span>` +
+      return `<li class="status-${status}" data-part="${escapeHtml(part.id)}"><span class="status-icon" aria-hidden="true">${STATUS[status].icon}</span>` +
         `<span class="ops-fact-label">${escapeHtml(part.factLabel ?? part.title)}</span> <span class="ops-fact">${escapeHtml(fact.text)}</span>` +
         `<span class="visually-hidden"> (${STATUS[status].label})</span></li>`;
     })

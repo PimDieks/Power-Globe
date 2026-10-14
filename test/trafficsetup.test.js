@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { setupTraffic } from '../src/traffic.js';
+import { setupTraffic, snapArea } from '../src/traffic.js';
 import { clearFlightCaches } from '../src/flightroute.js';
 
 // The lines drawn for the selected aircraft, solid first, then dashed.
-const drawn = vi.hoisted(() => ({ lines: [] }));
+const drawn = vi.hoisted(() => ({ lines: [], clouds: [] }));
 
 // The layers draw with three.js on a globe; these keep the numbers and nothing else.
 vi.mock('../src/trafficlayer.js', async (importOriginal) => {
   const cloud = () => {
     const attrs = { position: new Float32Array(30_000), aColor: new Float32Array(30_000), aScale: new Float32Array(10_000), aHeading: new Float32Array(10_000), aNext: new Float32Array(30_000) };
-    return {
+    const made = {
       capacity: 10_000,
       count: 0,
       points: { visible: true },
@@ -21,13 +21,16 @@ vi.mock('../src/trafficlayer.js', async (importOriginal) => {
       setViewport() {},
       place() {},
     };
+    made.attrs = attrs;
+    drawn.clouds.push(made);
+    return made;
   };
   const line = () => {
-    const made = { visible: false, set() { this.visible = true; }, moveEnd() {}, moveStart() {}, hide() { this.visible = false; }, setViewport() {}, set dash(v) {}, set gap(v) {} };
+    const made = { visible: false, set(flat) { this.flat = flat; this.visible = true; }, moveEnd() {}, moveStart() {}, hide() { this.visible = false; }, setViewport() {}, set dash(v) {}, set gap(v) {} };
     drawn.lines.push(made);
     return made;
   };
-  return { ...(await importOriginal()), aircraftLayer: cloud, satelliteLayer: cloud, selectionRing: cloud, orbitLine: () => ({ show() {}, hide() {} }), flightLine: line };
+  return { ...(await importOriginal()), aircraftLayer: cloud, satelliteLayer: cloud, selectionRing: cloud, markerLayer: cloud, orbitLine: () => ({ show() {}, hide() {} }), flightLine: line };
 });
 
 const START = Date.parse('2026-10-14T12:00:00Z');
@@ -80,6 +83,7 @@ describe('traffic on the globe', () => {
   beforeEach(() => {
     clearFlightCaches();
     drawn.lines.length = 0;
+    drawn.clouds.length = 0;
     vi.useFakeTimers();
     vi.setSystemTime(START);
     vi.stubGlobal('document', { hidden: false, createElement: () => ({ textContent: '' }) });
@@ -286,6 +290,107 @@ describe('traffic on the globe', () => {
       expect(areaRequests).toBe(3);
       await run(500, { ...view, lat: 56 });
       expect(areaRequests).toBe(4);
+    });
+  });
+
+  describe('the area watched for the Ops tab', () => {
+    const EHAM = { lat: 52.3086, lng: 4.7639, nm: 200 };
+    const watched = () => fetch.mock.calls.map((c) => c[0]).filter((u) => /lat=52.25&lon=4.75&nm=200/.test(u));
+
+    it('rounds the area as the API does', () => {
+      expect(snapArea({ lat: 52.3086, lng: 4.7639, nm: 200 })).toEqual({ lat: 52.25, lng: 4.75, nm: 200 });
+      expect(snapArea({ lat: 51.47, lng: -0.46, nm: 120 })).toEqual({ lat: 51.5, lng: -0.5, nm: 125 });
+      expect(snapArea({ lat: 10, lng: 10, nm: 900 }).nm).toBe(250);
+    });
+
+    it('asks for the area at once and every 15 seconds, whatever the view and the layers, and says so to the listener', async () => {
+      stored = { flights: false };
+      start();
+      const heard = [];
+      traffic.subscribe((e) => heard.push(e));
+      expect(traffic.layerOn()).toBe(false);
+      traffic.watchArea(EHAM);
+      await run(300);
+      expect(watched()).toHaveLength(1);
+      expect(heard).toEqual([{ area: { lat: 52.25, lng: 4.75, nm: 200 }, name: 'adsb.lol' }]);
+      // The aircraft are in, though not drawn.
+      expect(traffic.aircraft().map((a) => a.id)).toEqual(['484506']);
+      expect(traffic.has('484506')).toBe(true);
+      await run(30_000, { lat: 0, lng: 0, altitude: 2 });
+      expect(watched()).toHaveLength(3);
+    });
+
+    it('asks nothing for the view while only watching, stops on null, and keeps the same area asked once', async () => {
+      stored = { flights: false };
+      start();
+      traffic.watchArea(EHAM);
+      traffic.watchArea({ ...EHAM, lat: 52.3 });
+      await run(300);
+      expect(areaRequests).toBe(1);
+      traffic.watchArea(null);
+      await run(60_000);
+      expect(areaRequests).toBe(1);
+    });
+
+    it('tells a listener when the feed fails, waits a minute, and stops telling it after unsubscribing', async () => {
+      start();
+      const heard = [];
+      const stop = traffic.subscribe((e) => heard.push(e));
+      respond = () => new Error('Power Globe API: answered 502');
+      traffic.watchArea(EHAM);
+      await run(300);
+      expect(heard).toHaveLength(1);
+      expect(heard[0].error).toContain('502');
+      const before = watched().length;
+      await run(30_000);
+      expect(watched()).toHaveLength(before);
+      stop();
+      await run(40_000);
+      expect(heard).toHaveLength(1);
+    });
+
+    it('tints the inbound aircraft and the holding ones, rings only the holding ones, and takes it all off', async () => {
+      await run(300);
+      const [planes, , , marks] = drawn.clouds;
+      const color = (i) => [...planes.attrs.aColor.slice(3 * i, 3 * i + 3)].map((v) => Math.round(v * 100) / 100);
+      expect(color(0)).toEqual([0.97, 0.95, 0.9]);
+      traffic.setOverlay({ inbound: ['484506'], holding: [], stacks: [] });
+      await run(300);
+      expect(color(0)).toEqual([0.5, 0.82, 1]);
+      expect(marks.count).toBe(0);
+      traffic.setOverlay({ inbound: [], holding: ['484506'], stacks: [{ lat: 52.3, lng: 4.9, radiusNm: 8 }] });
+      await run(300);
+      expect(color(0)).toEqual([1, 0.62, 0.3]);
+      expect(marks.count).toBe(1);
+      // The ring is at the aircraft.
+      expect([...marks.attrs.position.slice(0, 3)]).toEqual([...planes.attrs.position.slice(0, 3)]);
+      // The stack is a closed circle of 49 points on the ground, about 8 miles round the middle.
+      const circle = drawn.lines.at(-1);
+      expect(circle.visible).toBe(true);
+      expect(circle.flat).toHaveLength(49 * 3);
+      expect([...circle.flat.slice(0, 3)]).toEqual([...circle.flat.slice(-3)]);
+      traffic.setOverlay(null);
+      await run(300);
+      expect(color(0)).toEqual([0.97, 0.95, 0.9]);
+      expect(marks.visible).toBe(false);
+      expect(circle.visible).toBe(false);
+    });
+
+    it('draws nothing per frame once the rings are placed (no new buffers)', async () => {
+      await run(300);
+      const [, , , marks] = drawn.clouds;
+      traffic.setOverlay({ inbound: [], holding: ['484506'], stacks: [] });
+      await run(300);
+      const position = marks.attrs.position;
+      let reserved = 0;
+      const reserve = marks.reserve;
+      marks.reserve = (n) => {
+        reserved++;
+        return reserve(n);
+      };
+      await run(500);
+      expect(marks.attrs.position).toBe(position);
+      expect(reserved).toBeGreaterThan(0);
     });
   });
 });

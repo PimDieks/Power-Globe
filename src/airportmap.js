@@ -106,6 +106,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
   const looking = new Set();
   const retryAt = new Map();
   let selected = null;
+  let runwayUse = null;
   // Ident of the selected airport's label while it is shown on its own (see showAlone), if it is.
   let alone = null;
 
@@ -261,9 +262,18 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
         [runway.le, runway.he].forEach((ident, k) => {
           if (!ident) return;
           const status = endStatus.get(ident) ?? 'unknown';
-          const text = `${ident} ${STATUS[status].icon}`;
+          // Seen in use by the Ops tab's traffic (see setRunwayUse): ARR, DEP or both.
+          const use = runwayUse?.ident === airport.ident ? runwayUse.ends[ident] : null;
+          const text = `${ident} ${STATUS[status].icon}${use ? ` ${use.tag}` : ''}`;
           wanted.push({
-            label: { key: `${airport.ident}:${ident}:${status}`, kind: 'runway', status, text, title: `Runway ${ident}: ${STATUS[status].label}` },
+            label: {
+              key: `${airport.ident}:${ident}:${status}:${use?.tag ?? ''}`,
+              kind: 'runway',
+              status,
+              use: Boolean(use),
+              text,
+              title: `Runway ${ident}: ${STATUS[status].label}${use ? `. ${use.title}` : ''}`,
+            },
             anchor: k ? b : a,
             direction: k ? along : { x: -along.x, y: -along.y },
             // Estimated size of the label on screen (12 px bold text, padding and border).
@@ -345,6 +355,15 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     mapFeatures.setRunwayLabels(labels, onSelect);
   }
 
+  // The runway ends of airport `ident` that traffic was seen using, to label them: { '27': { tag:
+  // 'ARR', title: 'Arrivals, last seen 3 min ago' } }; null takes the labels off.
+  function setRunwayUse(ident, ends) {
+    const next = ident && ends && Object.keys(ends).length ? { ident, ends } : null;
+    if (JSON.stringify(next) === JSON.stringify(runwayUse)) return;
+    runwayUse = next;
+    refresh();
+  }
+
   // Whether the camera follows an aircraft, which is why it keeps moving (see MOVING_UPDATE_MS).
   function setFollowing(on) {
     following = on;
@@ -353,7 +372,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     moving = null;
   }
 
-  return { view, refresh, select, setFollowing };
+  return { view, refresh, select, setFollowing, setRunwayUse };
 }
 
 // The distinctive part of an airport's name: "Amsterdam Airport Schiphol" → "Schiphol".

@@ -248,8 +248,8 @@ export function satelliteLayer(globe) {
   return cloud;
 }
 
-export function selectionRing(globe) {
-  const material = new THREE.ShaderMaterial({
+const ringMaterial = (globe) =>
+  new THREE.ShaderMaterial({
     uniforms: { uSize: { value: 30 }, uHideRadiusSq: hideUniform(globe) },
     vertexShader: RING_VERTEX,
     fragmentShader: RING_FRAGMENT,
@@ -257,7 +257,16 @@ export function selectionRing(globe) {
     depthTest: false,
     depthWrite: false,
   });
-  const cloud = new PointCloud(globe, material, { aColor: 3, aScale: 1 }, 11);
+
+// Rings around several aircraft at once (the ones the Ops tab marks), under the selection ring.
+export function markerLayer(globe) {
+  const cloud = new PointCloud(globe, ringMaterial(globe), { aColor: 3, aScale: 1 }, 10.8);
+  cloud.visible = false;
+  return cloud;
+}
+
+export function selectionRing(globe) {
+  const cloud = new PointCloud(globe, ringMaterial(globe), { aColor: 3, aScale: 1 }, 11);
   const attrs = cloud.reserve(1);
   attrs.aColor.set([0.61, 0.82, 1]);
   attrs.aScale[0] = 1;
