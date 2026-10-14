@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { setupTraffic } from '../src/traffic.js';
+import { setupTraffic, snapArea } from '../src/traffic.js';
 import { clearFlightCaches } from '../src/flightroute.js';
 
 // The lines drawn for the selected aircraft, solid first, then dashed.
-const drawn = vi.hoisted(() => ({ lines: [] }));
+const drawn = vi.hoisted(() => ({ lines: [], clouds: [] }));
 
 // The layers draw with three.js on a globe; these keep the numbers and nothing else.
 vi.mock('../src/trafficlayer.js', async (importOriginal) => {
   const cloud = () => {
     const attrs = { position: new Float32Array(30_000), aColor: new Float32Array(30_000), aScale: new Float32Array(10_000), aHeading: new Float32Array(10_000), aNext: new Float32Array(30_000) };
-    return {
+    const made = {
       capacity: 10_000,
       count: 0,
       points: { visible: true },
@@ -21,13 +21,16 @@ vi.mock('../src/trafficlayer.js', async (importOriginal) => {
       setViewport() {},
       place() {},
     };
+    made.attrs = attrs;
+    drawn.clouds.push(made);
+    return made;
   };
   const line = () => {
-    const made = { visible: false, set() { this.visible = true; }, moveEnd() {}, moveStart() {}, hide() { this.visible = false; }, setViewport() {}, set dash(v) {}, set gap(v) {} };
+    const made = { visible: false, set(flat) { this.flat = flat; this.visible = true; }, moveEnd() {}, moveStart() {}, hide() { this.visible = false; }, setViewport() {}, set dash(v) {}, set gap(v) {} };
     drawn.lines.push(made);
     return made;
   };
-  return { ...(await importOriginal()), aircraftLayer: cloud, satelliteLayer: cloud, selectionRing: cloud, orbitLine: () => ({ show() {}, hide() {} }), flightLine: line };
+  return { ...(await importOriginal()), aircraftLayer: cloud, satelliteLayer: cloud, selectionRing: cloud, markerLayer: cloud, orbitLine: () => ({ show() {}, hide() {} }), flightLine: line };
 });
 
 const START = Date.parse('2026-10-14T12:00:00Z');
@@ -80,6 +83,7 @@ describe('traffic on the globe', () => {
   beforeEach(() => {
     clearFlightCaches();
     drawn.lines.length = 0;
+    drawn.clouds.length = 0;
     vi.useFakeTimers();
     vi.setSystemTime(START);
     vi.stubGlobal('document', { hidden: false, createElement: () => ({ textContent: '' }) });
@@ -286,6 +290,186 @@ describe('traffic on the globe', () => {
       expect(areaRequests).toBe(3);
       await run(500, { ...view, lat: 56 });
       expect(areaRequests).toBe(4);
+    });
+  });
+
+  describe('the area watched for the Ops tab', () => {
+    const EHAM = { lat: 52.3086, lng: 4.7639, nm: 200 };
+    const watched = () => fetch.mock.calls.map((c) => c[0]).filter((u) => /lat=52.25&lon=4.75&nm=200/.test(u));
+
+    it('rounds the area as the API does', () => {
+      expect(snapArea({ lat: 52.3086, lng: 4.7639, nm: 200 })).toEqual({ lat: 52.25, lng: 4.75, nm: 200 });
+      expect(snapArea({ lat: 51.47, lng: -0.46, nm: 120 })).toEqual({ lat: 51.5, lng: -0.5, nm: 125 });
+      expect(snapArea({ lat: 10, lng: 10, nm: 900 }).nm).toBe(250);
+    });
+
+    it('asks for the area at once and every 15 seconds, whatever the view and the layers, and says so to the listener', async () => {
+      stored = { flights: false };
+      start();
+      const heard = [];
+      traffic.subscribe((e) => heard.push(e));
+      expect(traffic.layerOn()).toBe(false);
+      traffic.watchArea(EHAM);
+      await run(300);
+      expect(watched()).toHaveLength(1);
+      expect(heard).toEqual([{ area: { lat: 52.25, lng: 4.75, nm: 200 }, name: 'adsb.lol' }]);
+      // The aircraft are in, though not drawn.
+      expect(traffic.aircraft().map((a) => a.id)).toEqual(['484506']);
+      expect(traffic.has('484506')).toBe(true);
+      await run(30_000, { lat: 0, lng: 0, altitude: 2 });
+      expect(watched()).toHaveLength(3);
+    });
+
+    it('asks nothing for the view while only watching, stops on null, and keeps the same area asked once', async () => {
+      stored = { flights: false };
+      start();
+      traffic.watchArea(EHAM);
+      traffic.watchArea({ ...EHAM, lat: 52.3 });
+      await run(300);
+      expect(areaRequests).toBe(1);
+      traffic.watchArea(null);
+      await run(60_000);
+      expect(areaRequests).toBe(1);
+    });
+
+    it('tells a listener when the feed fails, waits a minute, and stops telling it after unsubscribing', async () => {
+      start();
+      const heard = [];
+      const stop = traffic.subscribe((e) => heard.push(e));
+      respond = () => new Error('Power Globe API: answered 502');
+      traffic.watchArea(EHAM);
+      await run(300);
+      expect(heard).toHaveLength(1);
+      expect(heard[0].error).toContain('502');
+      const before = watched().length;
+      await run(30_000);
+      expect(watched()).toHaveLength(before);
+      stop();
+      await run(40_000);
+      expect(heard).toHaveLength(1);
+    });
+
+    it('does not report an answer for an area that is no longer watched (the stale-answer guard)', async () => {
+      stored = { flights: false };
+      start();
+      const heard = [];
+      traffic.subscribe((e) => heard.push(e));
+      let moved = false;
+      fetch.mockImplementation(async (url) => {
+        // The watch is pointed elsewhere while its first request is under way.
+        if (!moved && /lat=52.25&lon=4.75&nm=200/.test(url)) {
+          moved = true;
+          traffic.watchArea({ lat: 40, lng: -3, nm: 100 });
+        }
+        return { ok: true, json: async () => feed([klm()]) };
+      });
+      traffic.watchArea(EHAM);
+      await run(300);
+      expect(moved).toBe(true);
+      expect(heard.map((e) => e.area?.lat)).not.toContain(52.25);
+      expect(heard.map((e) => e.area?.lat)).toContain(40);
+    });
+
+    it('does not take a listener that throws for a failure of the feed, nor stop the others', async () => {
+      stored = { flights: false };
+      start();
+      const heard = [];
+      traffic.subscribe(() => {
+        throw new Error('a bug in a listener');
+      });
+      traffic.subscribe((e) => heard.push(e));
+      traffic.watchArea(EHAM);
+      await run(300);
+      expect(heard).toHaveLength(1);
+      expect(heard[0].error).toBeUndefined();
+      expect(heard[0].area).toEqual({ lat: 52.25, lng: 4.75, nm: 200 });
+      // And it was asked for again in 15 seconds, not after the minute of a failure.
+      await run(16_000);
+      expect(heard).toHaveLength(2);
+      expect(console.error).toHaveBeenCalledWith(expect.objectContaining({ message: 'a bug in a listener' }));
+    });
+
+    it('asks nothing of its own while the area around the view, answered lately, covers it, and passes that answer on', async () => {
+      const heard = [];
+      const pov = { lat: 52.3, lng: 4.76, altitude: 0.05 };
+      traffic.subscribe((e) => heard.push(e));
+      await run(300, pov);
+      // The view's area (150 NM after the API's rounding) holds the watch's 125.
+      traffic.watchArea({ lat: 52.3086, lng: 4.7639, nm: 125 });
+      await run(40_000, pov);
+      const urls = fetch.mock.calls.map((c) => c[0]);
+      expect(urls.some((u) => /nm=125/.test(u))).toBe(false);
+      expect(heard.length).toBeGreaterThanOrEqual(2);
+      expect(heard[0].area).toEqual({ lat: 52.25, lng: 4.75, nm: 150 });
+    });
+
+    it('asks for itself again once the view stops answering, or no longer covers the area', async () => {
+      const pov = { lat: 52.3, lng: 4.76, altitude: 0.05 };
+      await run(300, pov);
+      traffic.watchArea({ lat: 52.3086, lng: 4.7639, nm: 125 });
+      respond = () => new Error('Power Globe API: answered 502');
+      await run(40_000, pov);
+      expect(fetch.mock.calls.some((c) => /nm=125/.test(c[0]))).toBe(true);
+    });
+
+    it('adds at most one direct call to a provider a minute when the API will not answer', async () => {
+      stored = { flights: false };
+      start();
+      const direct = [];
+      fetch.mockImplementation(async (url) => {
+        if (/power-globe-api/.test(url)) return { ok: false, status: 429, json: async () => ({ error: 'cooling off' }) };
+        direct.push(Date.now());
+        return { ok: true, json: async () => feed([klm()]) };
+      });
+      traffic.watchArea(EHAM);
+      await run(3 * 60_000);
+      expect(direct.length).toBeGreaterThanOrEqual(2);
+      expect(direct.length).toBeLessThanOrEqual(4);
+      for (let i = 1; i < direct.length; i++) expect(direct[i] - direct[i - 1]).toBeGreaterThanOrEqual(60_000);
+    });
+
+    it('tints the inbound aircraft and the holding ones, rings only the holding ones, and takes it all off', async () => {
+      await run(300);
+      const [planes, , , marks] = drawn.clouds;
+      const color = (i) => [...planes.attrs.aColor.slice(3 * i, 3 * i + 3)].map((v) => Math.round(v * 100) / 100);
+      expect(color(0)).toEqual([0.97, 0.95, 0.9]);
+      traffic.setOverlay({ inbound: ['484506'], holding: [], stacks: [] });
+      await run(300);
+      expect(color(0)).toEqual([0.5, 0.82, 1]);
+      expect(marks.count).toBe(0);
+      traffic.setOverlay({ inbound: [], holding: ['484506'], stacks: [{ lat: 52.3, lng: 4.9, radiusNm: 8 }] });
+      await run(300);
+      expect(color(0)).toEqual([1, 0.62, 0.3]);
+      expect(marks.count).toBe(1);
+      // The ring is at the aircraft.
+      expect([...marks.attrs.position.slice(0, 3)]).toEqual([...planes.attrs.position.slice(0, 3)]);
+      // The stack is a closed circle of 49 points on the ground, about 8 miles round the middle.
+      const circle = drawn.lines.at(-1);
+      expect(circle.visible).toBe(true);
+      expect(circle.flat).toHaveLength(49 * 3);
+      expect([...circle.flat.slice(0, 3)]).toEqual([...circle.flat.slice(-3)]);
+      traffic.setOverlay(null);
+      await run(300);
+      expect(color(0)).toEqual([0.97, 0.95, 0.9]);
+      expect(marks.visible).toBe(false);
+      expect(circle.visible).toBe(false);
+    });
+
+    it('draws nothing per frame once the rings are placed (no new buffers)', async () => {
+      await run(300);
+      const [, , , marks] = drawn.clouds;
+      traffic.setOverlay({ inbound: [], holding: ['484506'], stacks: [] });
+      await run(300);
+      const position = marks.attrs.position;
+      let reserved = 0;
+      const reserve = marks.reserve;
+      marks.reserve = (n) => {
+        reserved++;
+        return reserve(n);
+      };
+      await run(500);
+      expect(marks.attrs.position).toBe(position);
+      expect(reserved).toBeGreaterThan(0);
     });
   });
 });

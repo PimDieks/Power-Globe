@@ -540,7 +540,7 @@ describe('the part in the Ops tab', () => {
   afterEach(() => unbind());
 
   it('is registered after the runway and visibility parts, with a section and a status fact', () => {
-    expect(OPS_PARTS.map((p) => p.id)).toEqual(['runway', 'visibility', 'lightning']);
+    expect(OPS_PARTS.map((p) => p.id).slice(0, 3)).toEqual(['runway', 'visibility', 'lightning']);
     const ctx = { airport: TOKYO, hourly: stormy(), now: NOW, zone: 'CEST', limits: {}, limitsLabel: '', time: '', formatClock: () => '', formatClockShort: () => '', formatTick: () => '' };
     const html = opsPanelHtml([lightningPart], ctx);
     expect(html).toContain('<li class="status-nogo" data-part="lightning">');

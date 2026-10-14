@@ -2154,3 +2154,234 @@ body:not(.idle) #caption {
     transition: none;
   }
 }
+
+/* The Ops tab's traffic part: inbound list, holding stacks, runways in use and movements per hour. */
+.ops-traffic h4 {
+  margin: 14px 0 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.side-panel p.ops-summary {
+  margin: 0 0 4px;
+  color: var(--text);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.side-panel p.ops-empty,
+.side-panel p.ops-more {
+  margin: 0 0 6px;
+  font-size: 0.8rem;
+}
+
+.side-panel p.ops-counts {
+  display: flex;
+  gap: 14px;
+  margin: 0 0 6px;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.ops-counts b {
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.ops-counts .ops-unknown b {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.ops-flights {
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.ops-flight {
+  display: grid;
+  grid-template-columns: 7em 2.4em 3.2em 3.8em 1fr;
+  gap: 4px;
+  white-space: nowrap;
+  width: 100%;
+  min-height: 0;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font-size: 0.74rem;
+  line-height: 1.3;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+
+.ops-flight:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* The callsign is shown whole; on a narrow panel the type goes instead. */
+.ops-flight-call {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ops-traffic {
+  container-type: inline-size;
+}
+
+@container (max-width: 300px) {
+  .ops-flight {
+    grid-template-columns: 7em 3.2em 3.8em 1fr;
+  }
+
+  .ops-flight > :nth-child(2) {
+    display: none;
+  }
+
+  .ops-traffic .ops-flights-holding .ops-flight {
+    grid-template-columns: 7em 3.8em 1fr;
+  }
+}
+
+.ops-flight-eta {
+  text-align: right;
+  color: var(--accent);
+}
+
+.ops-flights-holding .ops-flight {
+  grid-template-columns: 7em 2.4em 3.8em 1fr;
+}
+
+.ops-stacks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ops-stacks > li {
+  margin-bottom: 6px;
+  padding-left: 8px;
+  border-left: 3px solid #ff9e4d;
+}
+
+.side-panel p.ops-stack {
+  margin: 0 0 2px;
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.ops-runways {
+  grid-template-columns: auto 1fr;
+  font-size: 0.8rem;
+}
+
+.side-panel .ops-runways dd {
+  text-align: left;
+}
+
+.ops-rwy {
+  display: inline-block;
+  margin-right: 8px;
+  color: var(--muted);
+}
+
+.ops-rwy b {
+  color: var(--text);
+}
+
+.ops-rwy-active b {
+  padding: 0 5px;
+  border-radius: 4px;
+  color: #0a0e18;
+  background: var(--accent);
+}
+
+.ops-hourbars {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 64px;
+  margin-bottom: 4px;
+}
+
+.ops-hourbar {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  max-width: 44px;
+}
+
+.ops-bars {
+  display: flex;
+  flex: 1;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.ops-bar {
+  display: block;
+  flex: 1;
+  min-height: 1px;
+  border-radius: 2px 2px 0 0;
+}
+
+.ops-bar-arr {
+  background: var(--accent);
+}
+
+.ops-bar-dep {
+  background: #ffb86b;
+}
+
+.ops-partial .ops-bar {
+  background-image: repeating-linear-gradient(45deg, transparent 0 2px, rgba(10, 14, 24, 0.55) 2px 4px);
+}
+
+.ops-barlabel {
+  overflow: hidden;
+  font-size: 0.6rem;
+  line-height: 1.4;
+  text-align: center;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.side-panel p.ops-legend {
+  margin: 0 0 4px;
+  font-size: 0.72rem;
+}
+
+.ops-legend i {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin: 0 2px 0 6px;
+  border-radius: 2px;
+}
+
+.ops-legend i:first-child {
+  margin-left: 0;
+}
+
+.ops-notes {
+  margin: 12px 0 0;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.ops-notes li + li {
+  margin-top: 4px;
+}
+
+/* A runway end the traffic was seen using, on the airport map. */
+.runway-label.in-use span {
+  box-shadow:
+    0 0 0 1.5px rgba(0, 0, 0, 0.7),
+    0 0 0 3.5px var(--accent);
+}

@@ -18,10 +18,11 @@ import { escapeHtml } from './airportview.js';
 import { runwayPart } from './opsrunwayview.js';
 import { visibilityPart } from './opsvisview.js';
 import { lightningPart } from './opslightningview.js';
+import { trafficPart } from './opstrafficview.js';
 import { factItemHtml } from './opsfact.js';
 
 // The Ops parts, in the order their sections are shown and their facts are listed.
-export const OPS_PARTS = [runwayPart, visibilityPart, lightningPart];
+export const OPS_PARTS = [runwayPart, visibilityPart, lightningPart, trafficPart];
 
 export const DETAIL_TABS = [
   { id: 'details', label: 'Details' },

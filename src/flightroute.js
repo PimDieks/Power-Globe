@@ -234,7 +234,7 @@ export function loadRoute(callsign, { fetchFn = fetch, now = Date.now } = {}) {
   if (!url) return Promise.resolve(null);
   const hit = caches.routes.get(url);
   if (hit && (hit.failedAt === null || now() - hit.failedAt < ROUTE_RETRY_MS)) return hit.promise;
-  const entry = { promise: null, failedAt: null };
+  const entry = { promise: null, failedAt: null, value: undefined };
   entry.promise = (async () => {
     try {
       const res = await fetchFn(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
@@ -246,8 +246,18 @@ export function loadRoute(callsign, { fetchFn = fetch, now = Date.now } = {}) {
       return null;
     }
   })();
+  entry.promise.then((route) => {
+    entry.value = route;
+  });
   caches.routes.set(url, entry);
   return entry.promise;
+}
+
+// The route of a callsign if it has already been looked up (and found), else null. Asks nothing: for
+// the aircraft whose route is known anyway.
+export function knownRoute(callsign) {
+  const url = routeUrl(callsign);
+  return (url && caches.routes.get(url)?.value) || null;
 }
 
 export const clearFlightCaches = () => {

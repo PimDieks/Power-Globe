@@ -6,7 +6,8 @@
 // same. Between reports each aircraft moves along its track at its ground speed. Satellites
 // follow CelesTrak's orbital elements, computed in a worker.
 import { AircraftStore, drawnAltitude, estimatePosition, fromAdsb, fromOpenSky, hiddenByLayers } from './aircraft.js';
-import { aircraftLayer, behindGlobe, orbitLine, satelliteLayer, selectionRing } from './trafficlayer.js';
+import { aircraftLayer, behindGlobe, flightLine, markerLayer, orbitLine, satelliteLayer, selectionRing } from './trafficlayer.js';
+import { destination } from './runwaymap.js';
 import { EARTH_RADIUS_KM, orbitClass, orbitPath, parseTle, periodMinutes, satellitePosition, toGeodetic, toSatrec, tleEpoch } from './orbits.js';
 import { aircraftDetailsHtml, aircraftName, satelliteDetailsHtml } from './trafficview.js';
 import { PROXY_URL, explain } from './api.js';
@@ -75,6 +76,9 @@ const COLORS = {
   ground: [0.62, 0.66, 0.72],
   military: [0.43, 0.95, 0.76],
   emergency: [1, 0.42, 0.38],
+  // Aircraft the Ops tab marks for an airport (see setOverlay): arriving soon, and holding.
+  inbound: [0.5, 0.82, 1],
+  holding: [1, 0.62, 0.3],
   leo: [0.66, 0.85, 1],
   meo: [1, 0.84, 0.48],
   geo: [1, 0.62, 0.8],
@@ -114,6 +118,33 @@ const fetchJson = async (url) => (await fetchChecked(url)).json();
 export function areaRadiusNm(altitude) {
   const halfLatSpan = Math.min(100, 70 * altitude + 0.2) / 2;
   return Math.max(10, Math.min(MAX_AREA_NM, Math.round(halfLatSpan * 1.3 * 60)));
+}
+
+// The area the Power Globe API actually covers when asked for `area` ({ lat, lng, nm }): it snaps
+// the centre to a quarter of a degree and the radius up to a multiple of 25 NM (api/worker.js).
+export function snapArea({ lat, lng, nm }) {
+  return { lat: Math.round(lat * 4) / 4, lng: Math.round(lng * 4) / 4, nm: Math.min(MAX_AREA_NM, Math.max(25, Math.ceil(nm / 25) * 25)) };
+}
+
+// The area around the view counts as the watched area's answer if it answered this lately.
+const VIEW_COVERS_MS = 20_000;
+// The watch asks a provider directly (when the API will not do) once a minute at most.
+const DIRECT_SPARING_MS = 60_000;
+
+// Whether circle `outer` ({ lat, lng, nm }) holds circle `inner`.
+export const areaCovers = (outer, inner) => greatCircleNm(outer, inner) + inner.nm <= outer.nm;
+
+// Stack areas drawn at most (the Ops tab's holding stacks), and how many points a circle has.
+const MAX_STACK_CIRCLES = 4;
+const CIRCLE_POINTS = 48;
+// A circle of `radiusNm` around `centre`, flat x, y, z in scene units, a little above the ground.
+export function circlePoints(centre, radiusNm, scenePoint) {
+  const flat = new Float32Array((CIRCLE_POINTS + 1) * 3);
+  for (let i = 0; i <= CIRCLE_POINTS; i++) {
+    const p = destination(centre, (360 * i) / CIRCLE_POINTS, radiusNm * KM_PER_NM * 1000);
+    scenePoint(p.lat, p.lng, 0.0006, flat, i);
+  }
+  return flat;
 }
 
 const greatCircleNm = (a, b) => {
@@ -261,6 +292,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
   const planes = aircraftLayer(globe);
   const sats = satelliteLayer(globe);
   const ring = selectionRing(globe);
+  const marks = markerLayer(globe);
   const orbit = orbitLine(globe);
   const lines = setupFlightLines({ globe, scenePoint, onLabels: onFlightEnds, loadAirports, loadTrack, loadRoute });
 
@@ -280,6 +312,17 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
   // Whether the last request for the area failed. Its retry waits FEED_RETRY_MS whatever the view does.
   let areaFailed = false;
   const inFlight = new Set();
+  // An area kept up to date for the Ops tab (see watchArea), and who wants to hear of its answers.
+  const watch = { area: null, next: 0 };
+  // The last answer for the area around the view ({ at, area (snapped), name }), and when the
+  // browser last asked a provider directly (any feed), for the watch to go easy on that.
+  let viewAnswer = null;
+  let lastDirectAt = 0;
+  const listeners = new Set();
+  // What the Ops tab marks (see setOverlay): ids of aircraft arriving soon and of those holding,
+  // the holding ones again as a list to put a ring around, and the circles of the stacks.
+  const overlay = { inbound: new Set(), holding: new Set(), rings: [] };
+  const stackLines = [];
   let shown = [];
   // Bumped when new aircraft data arrives or the toggles change, to rebuild the shown list.
   let version = 0;
@@ -294,7 +337,10 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
   let worker = null;
 
   // ADS-B Exchange style feeds: the one that worked last, else the next.
-  async function fromProviders(urlFor, proxyPath) {
+  // `sparing`: for a feed that is only extra (the Ops watch): it asks the browser's own way (straight
+  // from the providers) once a minute at most, counting the calls of every feed, and then of one
+  // provider, so it adds little when the API is in a cool-off for the flight feeds.
+  async function fromProviders(urlFor, proxyPath, { sparing = false } = {}) {
     // The Power Globe API asks the feeds server-side; most feeds do not answer web pages.
     let proxyError = null;
     if (PROXY_URL) {
@@ -306,9 +352,13 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
         proxyError = err;
       }
     }
+    if (sparing && Date.now() - lastDirectAt < DIRECT_SPARING_MS) {
+      throw new Error(proxyError ? `Power Globe API: ${proxyError.message}` : 'asking the feeds directly is paused for now');
+    }
     const failures = [];
-    for (let k = 0; k < ADSB_PROVIDERS.length; k++) {
+    for (let k = 0; k < (sparing ? 1 : ADSB_PROVIDERS.length); k++) {
       const i = (provider + k) % ADSB_PROVIDERS.length;
+      lastDirectAt = Date.now();
       try {
         const data = await fetchJson(urlFor(ADSB_PROVIDERS[i]));
         provider = i;
@@ -395,12 +445,55 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
         areaFailed = false;
         status.area = `In view from ${name}, ${timeText()}`;
         nextArea = Date.now() + AREA_MS;
+        viewAnswer = { at: Date.now(), area: snapArea({ ...center, nm }), name };
+        // An answer that covers the watched area is the watch's answer too.
+        if (watch.area && areaCovers(viewAnswer.area, watch.area)) notify({ area: viewAnswer.area, name });
       } catch (err) {
         console.error(err);
         areaFailed = true;
         status.area = `Flights in view unavailable (${explain(err)})`;
         nextArea = Date.now() + FEED_RETRY_MS;
       }
+    });
+  }
+
+  // Tells the listeners of the watched area (see subscribe); one that throws does not stop the others,
+  // and is not taken for a failure of the feed.
+  function notify(event) {
+    for (const fn of listeners) {
+      try {
+        fn(event);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+  }
+
+  // Whether the area asked for the view answered lately and covers the watched one, which then
+  // needs no request of its own.
+  function viewCoversWatch(wall) {
+    return Boolean(viewAnswer && wall - viewAnswer.at < VIEW_COVERS_MS && watch.area && areaCovers(viewAnswer.area, watch.area));
+  }
+
+  // The area watched for the Ops tab, apart from the one around the middle of the view.
+  function loadWatch() {
+    const area = watch.area;
+    return once('watch', async () => {
+      let event;
+      try {
+        const { data, name } = await fromProviders((p) => p.area(area.lat, area.lng, area.nm), `/flights/area?lat=${area.lat}&lon=${area.lng}&nm=${area.nm}`, { sparing: true });
+        addAircraft(fromAdsb(data), name);
+        // The area watched has changed since: this answer is for another.
+        if (watch.area !== area) return;
+        watch.next = Date.now() + AREA_MS;
+        event = { area, name };
+      } catch (err) {
+        console.error(err);
+        if (watch.area !== area) return;
+        watch.next = Date.now() + FEED_RETRY_MS;
+        event = { error: explain(err) };
+      }
+      notify(event);
     });
   }
 
@@ -529,7 +622,17 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
       shownVersion = version;
       shown = store.list({ civil: settings.flights, military: settings.military });
       shown.forEach((ac, i) => {
-        const color = EMERGENCY.has(ac.squawk) ? COLORS.emergency : ac.military ? COLORS.military : ac.onGround ? COLORS.ground : COLORS.civil;
+        const color = EMERGENCY.has(ac.squawk)
+          ? COLORS.emergency
+          : overlay.holding.has(ac.id)
+            ? COLORS.holding
+            : overlay.inbound.has(ac.id)
+              ? COLORS.inbound
+              : ac.military
+                ? COLORS.military
+                : ac.onGround
+                  ? COLORS.ground
+                  : COLORS.civil;
         attrs.aColor[3 * i] = color[0];
         attrs.aColor[3 * i + 1] = color[1];
         attrs.aColor[3 * i + 2] = color[2];
@@ -613,6 +716,8 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
     lines.setSprite(planePx * 0.44);
     sats.size = Math.max(2.5, Math.min(5, 4 * (1.2 / Math.max(altitude, 0.05)) ** 0.25)) * dpr;
     ring.size = 34 * dpr;
+    marks.size = 26 * dpr;
+    for (const line of stackLines) line.setViewport(window.innerWidth, window.innerHeight);
     planes.setViewport(window.innerWidth, window.innerHeight);
     lines.setViewport(window.innerWidth, window.innerHeight);
   }
@@ -629,15 +734,66 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
         const moved = lastArea && !areaFailed && greatCircleNm(lastArea, pov) > lastArea.nm / 2;
         if (wall >= nextArea || moved) loadArea(pov);
       }
+      if (watch.area && wall >= watch.next && !viewCoversWatch(wall)) loadWatch();
     }
     resize(pov.altitude);
     drawAircraft(Date.now());
     drawSatellites(Date.now());
+    placeRings();
     ring.place(selectedPosition());
     if (selected?.kind === 'aircraft') {
       const ac = store.byId.get(selected.id);
       lines.frame(ac, ac?.estimate, pov.altitude);
     }
+  }
+
+  // A ring around each aircraft the Ops tab marks as holding, where it is drawn now. Writes into
+  // the layer's own buffers, so a frame allocates nothing.
+  function placeRings() {
+    const ids = overlay.rings;
+    let n = 0;
+    if (ids.length && planes.points.visible) {
+      const attrs = marks.reserve(ids.length);
+      const color = COLORS.holding;
+      for (let i = 0; i < ids.length; i++) {
+        const ac = store.byId.get(ids[i]);
+        if (!ac?.estimate) continue;
+        scenePoint(ac.estimate.lat, ac.estimate.lng, drawnAltitude(ac), attrs.position, n);
+        attrs.aColor[3 * n] = color[0];
+        attrs.aColor[3 * n + 1] = color[1];
+        attrs.aColor[3 * n + 2] = color[2];
+        attrs.aScale[n] = 1;
+        n++;
+      }
+    }
+    if (n || marks.points.visible) {
+      marks.visible = n > 0;
+      if (n) marks.commit(n);
+    }
+  }
+
+  // What the Ops tab marks on the map, or null to take it all off: { inbound: [id], holding: [id],
+  // stacks: [{ lat, lng, radiusNm }] }. Inbound aircraft are tinted, holding ones tinted and ringed,
+  // and each stack gets a circle.
+  function setOverlay(next) {
+    overlay.inbound = new Set(next?.inbound);
+    overlay.holding = new Set(next?.holding);
+    overlay.rings = [...overlay.holding];
+    const stacks = next?.stacks ?? [];
+    for (let i = 0; i < MAX_STACK_CIRCLES; i++) {
+      const stack = stacks[i];
+      if (!stack) {
+        stackLines[i]?.hide();
+        continue;
+      }
+      if (!stackLines[i]) {
+        stackLines[i] = flightLine(globe, { color: COLORS.holding, width: 3, alpha: 0.85 });
+        stackLines[i].setViewport(window.innerWidth, window.innerHeight);
+      }
+      stackLines[i].set(circlePoints(stack, stack.radiusNm, scenePoint));
+    }
+    version++;
+    lastAircraftFrame = 0;
   }
 
   // Scene position of the selected aircraft or satellite, or null.
@@ -774,7 +930,46 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
 
   applySettings();
 
-  return { frame, pick, select, deselect, detailsHtml, title, selectedAircraft, flightInfo: lines.info, get selected() { return selected; } };
+  // Keep the flights in `area` ({ lat, lng, nm }, snapped as the API does, see snapArea) up to date
+  // every AREA_MS, whatever the view and the layers are, or stop with null. Costs one more request
+  // to the API every 15 seconds (the answer is cached at its edge for 10).
+  function watchArea(area) {
+    const next = area ? snapArea(area) : null;
+    const same = next && watch.area && next.lat === watch.area.lat && next.lng === watch.area.lng && next.nm === watch.area.nm;
+    if (same) return watch.area;
+    watch.area = next;
+    watch.next = 0;
+    return next;
+  }
+
+  // Calls `fn({ area, name })` after each answer for the watched area, or `fn({ error })` when it
+  // fails; returns the function that stops it.
+  function subscribe(fn) {
+    listeners.add(fn);
+    return () => listeners.delete(fn);
+  }
+
+  return {
+    frame,
+    pick,
+    select,
+    deselect,
+    detailsHtml,
+    title,
+    selectedAircraft,
+    flightInfo: lines.info,
+    watchArea,
+    subscribe,
+    setOverlay,
+    // Every aircraft heard from, the latest report of each (see aircraft.js).
+    aircraft: () => store.list(),
+    has: (id) => store.byId.has(id),
+    // Whether the flights are drawn on the map.
+    layerOn: () => settings.flights || settings.military,
+    get selected() {
+      return selected;
+    },
+  };
 }
 
 // Normalised device coordinates of a point, or null if it is behind the camera.
