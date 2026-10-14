@@ -71,7 +71,7 @@ export function fromOpenSky(data) {
     });
 }
 
-// ADS-B Exchange v2 style feeds (adsb.lol, airplanes.live, adsb.fi): { now, ac: [{ hex, flight,
+// ADS-B Exchange v2 style feeds (adsb.lol, adsb.fi): { now, ac: [{ hex, flight,
 // r, t, desc, ownOp, dbFlags, alt_baro, gs, track, baro_rate, squawk, lat, lon, seen_pos }] },
 // in feet and knots. dbFlags bit 1 marks military aircraft.
 export function fromAdsb(data, { military = false } = {}) {

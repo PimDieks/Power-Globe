@@ -26,7 +26,7 @@ import { promisify } from 'node:util';
 import { gzip } from 'node:zlib';
 
 // The same hosts as RELAYED_HOSTS in api/worker.js.
-export const RELAYED_HOSTS = ['opensky-network.org', 'auth.opensky-network.org', 'api.adsb.lol', 'api.airplanes.live', 'opendata.adsb.fi'];
+export const RELAYED_HOSTS = ['opensky-network.org', 'auth.opensky-network.org', 'api.adsb.lol', 'opendata.adsb.fi'];
 const POST_HOSTS = ['auth.opensky-network.org'];
 const FORWARDED_HEADERS = ['accept', 'authorization', 'content-type', 'user-agent'];
 const RETURNED_HEADERS = ['content-type', 'retry-after'];
