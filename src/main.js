@@ -12,12 +12,13 @@ import {
   loadRegion,
   cloudTimes,
   parseTime,
+  seriesHours,
   startIndex,
 } from './weather.js';
 import { FieldOverlay, covers, fillPoleRows, padPoles, sampleGrid } from './field.js';
 import { WindFlow, windGrids } from './flow.js';
 import { ScreenFlow } from './screenflow.js';
-import { HAZARDS, hazardRings } from './patterns.js';
+import { HAZARDS, hazardRings, reuseRings } from './patterns.js';
 import { DETAIL_ALTITUDE, needsNewRegion, regionFor, viewBounds } from './detail.js';
 import { BASEMAPS, setupBasemap, setupMapFeatures } from './map.js';
 import { setupSearch } from './search.js';
@@ -32,12 +33,11 @@ import { CARD_REFRESH_MS, cardText, focusTarget, followLayout, freeArea, spokenD
 import { latestObservation } from './metar.js';
 import { explain } from './api.js';
 
-// Timeline playback speed, in forecast steps (an hour each) per second: three hours of forecast a
-// second.
-const STEPS_PER_SECOND = 3;
-// While the timeline plays, the moving clouds load the images for this many steps ahead (see
+// Timeline playback speed: three hours of forecast a second, whatever the forecast's step.
+const PLAY_HOURS_PER_SECOND = 3;
+// While the timeline plays, the moving clouds load the images for this many hours ahead (see
 // cloudTimes), two seconds' worth.
-const CLOUD_LOOKAHEAD_STEPS = 2 * STEPS_PER_SECOND;
+const CLOUD_LOOKAHEAD_HOURS = 2 * PLAY_HOURS_PER_SECOND;
 // Seconds for the colour field to fade in after switching layers.
 const LAYER_FADE = 0.9;
 // Controls fade away after this long without interaction, leaving just the globe.
@@ -152,6 +152,10 @@ const state = {
   playing: false,
   // Step whose discrete layers (the storm rings) are currently drawn.
   drawnStep: -1,
+  // The storm rings the globe shows, kept so that unchanged ones are not given to it again.
+  rings: [],
+  // Hours between the forecast's steps: 1, or 3 for an older copy of the site's data.
+  stepHours: 1,
   dirty: true,
   // 0..1 progress of the colour field fading in after a layer change.
   fieldFade: 0,
@@ -400,19 +404,32 @@ function invalidate() {
   renderControls();
 }
 
+// The moving clouds for the timeline at `step`: which images they show differs while it plays.
+function syncClouds(step = Math.round(state.t)) {
+  const { times } = state.forecast;
+  const lookahead = Math.ceil(CLOUD_LOOKAHEAD_HOURS / state.stepHours);
+  const clouds = cloudTimes(times, step, { playing: state.playing, lookahead });
+  basemap.setTime(clouds.time, clouds.ahead);
+}
+
 // Discrete layers only change when the timeline reaches a new step.
 function drawStep(step) {
   const { points, values, times } = state.forecast;
 
-  globe.ringsData(
+  // The globe restarts the pulse of every ring it is given, so it only hears of changes.
+  const rings = reuseRings(
+    state.rings,
     els.hazards.checked ? hazardRings(points, values.weather_code[step], values.precipitation[step]) : [],
   );
+  if (rings !== state.rings) {
+    state.rings = rings;
+    globe.ringsData(rings);
+  }
 
   els.slider.value = String(step);
   els.slider.setAttribute('aria-valuetext', formatTime(times[step]));
   els.timeLabel.textContent = formatTime(times[step]);
-  const clouds = cloudTimes(times, step, { playing: state.playing, lookahead: CLOUD_LOOKAHEAD_STEPS });
-  basemap.setTime(clouds.time, clouds.ahead);
+  syncClouds(step);
   renderCaption();
   renderDetails();
   windCheck.update();
@@ -509,7 +526,7 @@ function tick(now) {
   if (state.forecast) {
     const last = state.forecast.times.length - 1;
     if (state.playing) {
-      state.t += dt * STEPS_PER_SECOND;
+      state.t += (dt * PLAY_HOURS_PER_SECOND) / state.stepHours;
       if (state.t >= last) state.t = 0;
       state.dirty = true;
     }
@@ -549,8 +566,7 @@ function tick(now) {
 function setPlaying(playing) {
   state.playing = playing;
   // The moving clouds follow the timeline differently while it plays (see cloudTimes).
-  state.drawnStep = -1;
-  state.dirty = true;
+  if (state.forecast) syncClouds();
   els.playIcon.textContent = playing ? '❚❚' : '▶';
   els.playText.textContent = playing ? 'Pause forecast' : 'Play forecast';
 }
@@ -574,6 +590,7 @@ async function refresh(force = false) {
     });
     state.winds = windGrids(state.forecast.values.wind_speed_10m, state.forecast.values.wind_direction_10m);
     const { times } = state.forecast;
+    state.stepHours = seriesHours(times);
     els.slider.max = String(times.length - 1);
     for (const el of [els.play, els.slider, els.now]) el.disabled = false;
     state.drawnStep = -1;

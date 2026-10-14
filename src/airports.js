@@ -1,7 +1,7 @@
 // Airports and their runways (from OurAirports, see scripts/build-airports.mjs), airport search,
 // and hourly ground conditions at airports from Open-Meteo.
 import { AIRPORT_VARIABLES, fetchAirportHourly, openMeteoOpen, parseTime } from './weather.js';
-import { SNAPSHOT_FRESH_MS, SNAPSHOT_TIMEOUT_MS, fetchSnapshot, withTimeout } from './api.js';
+import { LARGE_SNAPSHOT_TIMEOUT_MS, SNAPSHOT_FRESH_MS, SNAPSHOT_TIMEOUT_MS, fetchSnapshot, withTimeout } from './api.js';
 
 // Case- and accent-insensitive form for matching, so "sao" finds "São Paulo".
 export const fold = (text) =>
@@ -86,17 +86,20 @@ export function searchAirports(airports, query, limit = 8) {
 export const majorAirports = (airports) => airports.filter((a) => a.large && a.scheduled);
 
 // Conditions at an airport at a GMT time ("2026-10-13T15:00"), or null if outside the data.
-// Series every few hours (the site's own data) give the latest entry up to three hours before.
+// Series every few hours (older copies of the site's own data) give the latest entry for up to three
+// hours after it; the last entry of such a series holds for as long as one step of it, so a series
+// ending at 21:00 still answers until 23:00 and no later, and an hourly one for the hour after its last.
 export function conditionsAt(hourly, time) {
   const times = hourly?.time;
   if (!times) return null;
   let i = times.indexOf(time);
   if (i < 0) {
     const t = Date.parse(`${time}Z`);
+    const step = times.length > 1 ? Date.parse(`${times.at(-1)}Z`) - Date.parse(`${times.at(-2)}Z`) : 0;
     for (let k = times.length - 1; k >= 0; k--) {
       const tk = Date.parse(`${times[k]}Z`);
       if (tk <= t) {
-        if (t - tk < 3 * 3_600_000 && k < times.length - 1) i = k;
+        if (t - tk < Math.min(3 * 3_600_000, k < times.length - 1 ? Infinity : step)) i = k;
         break;
       }
     }
@@ -116,7 +119,8 @@ export function conditionsAt(hourly, time) {
 const CACHE_MS = 60 * 60 * 1000;
 const weatherCache = new Map();
 
-// The site's own airport weather (major airports, every three hours, see build-data.mjs):
+// The site's own airport weather (major airports, every hour, see build-data.mjs; copies built
+// earlier have a step every three hours):
 // { built, end, get(ident) → series like Open-Meteo's hourly }, or null. A series says when the
 // copy was built (`builtAt`, in ms), so that what is shown can say how old it is.
 export function snapshotSeries(snapshot) {
@@ -143,7 +147,7 @@ let snapshotMissedAt = -Infinity;
 function airportSnapshot() {
   if (!snapshotPromise) {
     if (Date.now() - snapshotMissedAt < SNAPSHOT_MISS_MS) return Promise.resolve(null);
-    snapshotPromise = fetchSnapshot('api/airport-weather.json')
+    snapshotPromise = fetchSnapshot('api/airport-weather.json', LARGE_SNAPSHOT_TIMEOUT_MS)
       .then(snapshotSeries)
       .then((snapshot) => {
         if (!snapshot) {

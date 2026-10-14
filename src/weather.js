@@ -1,5 +1,5 @@
 import { VARIABLES } from './layers.js';
-import { PROXY_URL, SNAPSHOT_FRESH_MS, fetchSnapshot } from './api.js';
+import { LARGE_SNAPSHOT_TIMEOUT_MS, PROXY_URL, SNAPSHOT_FRESH_MS, fetchSnapshot } from './api.js';
 
 const API_URL = 'https://api.open-meteo.com/v1/forecast';
 // Open-Meteo accepts many coordinates per request; keep URLs and responses a sensible size.
@@ -13,8 +13,8 @@ const CACHE_PREFIX = 'power-globe:forecast:';
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 export const FORECAST_DAYS = 5;
-// The global timeline has a step for every hour of the forecast. The grid of 390 locations keeps
-// the browser's copy near 1.2 MB, well within the 5 MB a site may store.
+// The global timeline has a step for every hour of the forecast. The grid of 390 locations makes
+// the browser's copy 1.1 MB, well within the 5 MB a site may store.
 export const STEP_HOURS = 1;
 // 12° spacing gives 390 locations: under the free API's 600 locations per minute, while the
 // bicubic field and wind particles keep the result smooth.
@@ -263,8 +263,9 @@ export function buildAirportUrl(airports) {
 
 // Locations kept free for tapping on the map while a long airport list loads.
 export const AIRPORT_RESERVE = 20;
-// Hourly airport conditions every this many hours in the site's own data.
-export const AIRPORT_SNAPSHOT_STEP = 3;
+// Airport conditions every this many hours in the site's own data: every hour, as on the timeline,
+// so that the wind check and the airport panels agree at every step.
+export const AIRPORT_SNAPSHOT_STEP = 1;
 const BUDGET_POLL_MS = 2000;
 
 // Whether Open-Meteo may be asked at all for `count` airports, which are sent a part at a time. It
@@ -309,7 +310,7 @@ const round1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
 
 // Hours between consecutive entries of a series: 1 for hourly data, more when the data was
 // aggregated to longer steps.
-const seriesHours = (times) => (times.length > 1 ? (parseTime(times[1]) - parseTime(times[0])) / 3_600_000 : 1);
+export const seriesHours = (times) => (times.length > 1 ? (parseTime(times[1]) - parseTime(times[0])) / 3_600_000 : 1);
 
 // Indices of the times falling on a multiple of `stepHours` (00:00, 03:00, ... GMT), or all
 // of them when the API already aggregated the series to that step.
@@ -412,30 +413,36 @@ function writeCache(key, data) {
   }
 }
 
-// The global forecast from the site's own data API, with `built` (ms), if it is there, has this
-// grid and a step every hour (a copy built with 3-hour steps does not say `hours`), and still
-// reaches the present.
-async function forecastSnapshot(step) {
-  const snapshot = await fetchSnapshot('api/forecast.json');
-  const data = snapshot?.data;
-  if (!data?.times?.length || snapshot.step !== step || snapshot.hours !== STEP_HOURS) return null;
-  if (parseTime(data.times.at(-1)) < Date.now()) return null;
-  return { ...data, built: Date.parse(snapshot.built) };
+// The file the site's own data API holds for the global forecast (see build-data.mjs): the grid
+// spacing, the hours between steps and the forecast itself.
+export const forecastCopyOf = (points, hourly) => ({ step: GRID_STEP, hours: STEP_HOURS, data: toForecast(points, hourly) });
+
+// What a file from the data API (`file`) gives: { data, hours } with `built` (ms) in the data, if it
+// has this grid and still reaches the present. `hours` is the time between its steps, which a copy
+// built when the timeline had 3-hour steps does not say, so it is worked out from the times.
+export function usableForecastCopy(file, step, now = Date.now()) {
+  const data = file?.data;
+  if (!data?.times?.length || file.step !== step || parseTime(data.times.at(-1)) < now) return null;
+  return { data: { ...data, built: Date.parse(file.built) }, hours: file.hours ?? seriesHours(data.times) };
 }
+
+const forecastCopy = async (step) => usableForecastCopy(await fetchSnapshot('api/forecast.json', LARGE_SNAPSHOT_TIMEOUT_MS), step);
 
 // Global forecast grid: cached locally, else the site's own copy while it is recent (so
 // visitors share one download instead of each spending the free API's allowance), else
-// Open-Meteo, else the site's copy however old. `force` asks Open-Meteo first.
+// Open-Meteo, else the site's copy however old, even one built with 3-hour steps (the timeline
+// goes by the steps the forecast has). Only hourly data is kept in the browser. `force` asks
+// Open-Meteo first.
 export async function loadForecast({ step = GRID_STEP, force = false, onProgress } = {}) {
   const key = `${CACHE_KEY}:${step}`;
-  let snapshot = null;
+  let copy;
   if (!force) {
     const cached = readCache(key);
     if (cached) return cached;
-    snapshot = await forecastSnapshot(step);
-    if (snapshot && Date.now() - snapshot.built < SNAPSHOT_FRESH_MS) {
-      writeCache(key, snapshot);
-      return snapshot;
+    copy = await forecastCopy(step);
+    if (copy?.hours === STEP_HOURS && Date.now() - copy.data.built < SNAPSHOT_FRESH_MS) {
+      writeCache(key, copy.data);
+      return copy.data;
     }
   }
   try {
@@ -444,8 +451,8 @@ export async function loadForecast({ step = GRID_STEP, force = false, onProgress
     writeCache(key, data);
     return data;
   } catch (err) {
-    snapshot ??= await forecastSnapshot(step);
-    if (snapshot) return snapshot;
+    if (copy === undefined) copy = await forecastCopy(step);
+    if (copy) return copy.data;
     throw err;
   }
 }

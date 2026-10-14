@@ -16,10 +16,15 @@ export const SNAPSHOT_FRESH_MS = 6.5 * 3_600_000;
 // can wait for ever.
 export const SNAPSHOT_TIMEOUT_MS = 10_000;
 
-// A JSON file from the static data API, or null if it is not there or does not come in time.
-export async function fetchSnapshot(path) {
+// The copies of the global forecast and the airport weather are over a megabyte even compressed
+// (see build-data.mjs), so a slow phone gets longer for them: giving up would send it to Open-Meteo
+// for hundreds of locations.
+export const LARGE_SNAPSHOT_TIMEOUT_MS = 30_000;
+
+// A JSON file from the static data API, or null if it is not there or does not come in `timeoutMs`.
+export async function fetchSnapshot(path, timeoutMs = SNAPSHOT_TIMEOUT_MS) {
   try {
-    const res = await fetch(`${DATA_URL}${path}`, { signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS) });
+    const res = await fetch(`${DATA_URL}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
     return res.ok ? await res.json() : null;
   } catch {
     return null;

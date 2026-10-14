@@ -20,3 +20,13 @@ export function hazardRings(points, codes, precipitation) {
     return kind ? [{ lat: p.lat, lng: p.lng, kind }] : [];
   });
 }
+
+// `next` (a list from hazardRings) in place of `previous`, the list the globe already shows: the
+// very same list when nothing changed, so the globe is not given it again, and otherwise a list that
+// keeps the objects of the rings that stay, so that their pulses carry on rather than start afresh.
+export function reuseRings(previous, next) {
+  const key = (r) => `${r.lat},${r.lng},${r.kind}`;
+  const known = new Map(previous.map((r) => [key(r), r]));
+  const merged = next.map((r) => known.get(key(r)) ?? r);
+  return merged.length === previous.length && merged.every((r, i) => r === previous[i]) ? previous : merged;
+}

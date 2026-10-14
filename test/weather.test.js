@@ -5,12 +5,14 @@ import {
   buildUrl,
   chunk,
   cloudTimes,
+  forecastCopyOf,
   fetchHourly,
   gridShape,
   loadForecast,
   parseTime,
   precipitationRate,
   resetApiBudget,
+  seriesHours,
   shapePoints,
   startIndex,
   STEP_HOURS,
@@ -354,15 +356,62 @@ describe('the forecast kept in the browser', () => {
     expect([...local.items.keys()].sort()).toEqual(['power-globe:forecast:v3:12', 'power-globe:open-meteo-today']);
   });
 
-  it('leaves out a site copy built with 3-hour steps', async () => {
+  // A copy built when the timeline had 3-hour steps: no `hours`, a time every third hour.
+  const threeHourly = () => ({
+    ...snapshotOf(undefined),
+    data: { times: hourlyTimes.filter((_, i) => i % 3 === 0), points: [], values: {} },
+  });
+
+  it('asks Open-Meteo before using a site copy built with 3-hour steps, and does not keep it', async () => {
+    vi.useFakeTimers({ now: NOW, toFake: ['Date'] });
+    const local = storage();
+    vi.stubGlobal('localStorage', local);
+    const asked = [];
+    vi.stubGlobal('fetch', async (url) => {
+      if (String(url).includes('forecast.json')) return { ok: true, json: async () => threeHourly() };
+      asked.push(String(url));
+      throw new TypeError('Failed to fetch');
+    });
+    const forecast = await loadForecast();
+    expect(asked.length).toBeGreaterThan(0);
+    expect(forecast.times).toHaveLength(40);
+    expect(seriesHours(forecast.times)).toBe(3);
+    expect([...local.items.keys()].filter((k) => k.includes('forecast'))).toEqual([]);
+  });
+
+  it('fails only when there is no copy at all and Open-Meteo cannot be reached', async () => {
     vi.useFakeTimers({ now: NOW, toFake: ['Date'] });
     vi.stubGlobal('localStorage', storage());
-    // Open-Meteo cannot be reached either, so nothing is left to show.
-    vi.stubGlobal('fetch', async (url) => {
-      if (String(url).includes('forecast.json')) return { ok: true, json: async () => snapshotOf(undefined) };
+    vi.stubGlobal('fetch', async () => {
       throw new TypeError('Failed to fetch');
     });
     await expect(loadForecast()).rejects.toThrow();
+  });
+
+  it('gives the big site copy 30 seconds to arrive', async () => {
+    vi.useFakeTimers({ now: NOW, toFake: ['Date'] });
+    vi.stubGlobal('localStorage', storage());
+    serve(snapshotOf(1));
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    await loadForecast();
+    expect(timeout).toHaveBeenCalledWith(30_000);
+    timeout.mockRestore();
+  });
+
+  it('accepts the file the build script writes', async () => {
+    vi.useFakeTimers({ now: NOW, toFake: ['Date'] });
+    const local = storage();
+    vi.stubGlobal('localStorage', local);
+    const points = buildGrid();
+    const hourly = points.map(() => ({ time: hourlyTimes, ...Object.fromEntries(VARIABLES.map((v) => [v, hourlyTimes.map((_, i) => i)])) }));
+    const file = { built: new Date(NOW - 3_600_000).toISOString(), source: 'test', ...forecastCopyOf(points, hourly) };
+    expect(file).toMatchObject({ step: 12, hours: 1 });
+    serve(JSON.parse(JSON.stringify(file)));
+    const forecast = await loadForecast();
+    expect(forecast.times).toHaveLength(120);
+    expect(forecast.points).toHaveLength(390);
+    // It was taken from the copy, not asked of Open-Meteo, and kept for next time.
+    expect([...local.items.keys()]).toEqual(['power-globe:forecast:v3:12']);
   });
 
   it('still works when storage is full or blocked', async () => {
