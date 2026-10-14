@@ -21,7 +21,8 @@
 //
 // Nothing upstream is ever asked more than its cache allows: every answer is cached at the edge
 // and shared by all visitors, a backup of it is kept for 6 hours and served if the service
-// fails or limits us (rather than asking again), and each visitor may make at most
+// fails or limits us (rather than asking again; not for tracks, METARs or TAFs, which are only
+// useful while current), and each visitor may make at most
 // RATE_LIMIT requests a minute. A flight feed that refuses or limits us is also remembered in the
 // edge cache and left alone for a while (6 hours for a refusal, a minute or as long as it asks for
 // a limit; separately when asked direct and through the relay), so the other feeds answer
@@ -279,9 +280,14 @@ async function takeTrackTurn(cache, origin, env) {
 // request carries (the case of the address, other parameters), so that none of those can ask
 // OpenSky again for the same aircraft.
 function cacheUrl(url) {
-  if (url.pathname.replace(/\/+$/, '') === '/track') {
+  const path = url.pathname.replace(/\/+$/, '');
+  if (path === '/track') {
     const icao24 = (url.searchParams.get('icao24') ?? '').toLowerCase();
     if (/^[0-9a-f]{6}$/.test(icao24)) return `${url.origin}/track?icao24=${icao24}`;
+  }
+  // The same goes for METARs and TAFs: only the airports count, not their case or other parameters.
+  if (path === '/metar' || path === '/taf') {
+    return `${url.origin}${path}?ids=${(url.searchParams.get('ids') ?? '').toUpperCase()}`;
   }
   return url.toString();
 }
@@ -414,8 +420,9 @@ export default {
     const key = new Request(cacheUrl(url), { method: 'GET' });
     const backupKey = new Request(`${url.origin}/__backup${url.pathname}${url.search}`, { method: 'GET' });
     const isTrack = url.pathname.replace(/\/+$/, '') === '/track';
-    // An old track would draw a flight that is long over, so tracks have no backup copy.
-    const backedUp = !isTrack;
+    // An old track would draw a flight that is long over, and an old METAR or TAF would pass for the
+    // current one (a TAF that has been replaced most of all), so these have no backup copy.
+    const backedUp = !isTrack && !['/metar', '/taf'].includes(url.pathname.replace(/\/+$/, ''));
     let res = await cache?.match(key);
     if (!res) {
       const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';

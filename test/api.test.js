@@ -490,6 +490,60 @@ describe('leaving a flight feed alone after it refuses or limits the API', () =>
   });
 });
 
+describe('METARs and TAFs in the edge cache', () => {
+  const fakeCache = () => {
+    const entries = new Map();
+    return { entries, match: async (request) => entries.get(request.url)?.clone(), put: async (request, response) => void entries.set(request.url, response) };
+  };
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('keeps one answer per set of airports, whatever the case or the other parameters', async () => {
+    for (const feed of ['metar', 'taf']) {
+      const cache = fakeCache();
+      const fetchFn = vi.fn(async () => reply('[{"icaoId":"EHAM"}]'));
+      vi.stubGlobal('caches', { default: cache });
+      vi.stubGlobal('fetch', fetchFn);
+      const pending = [];
+      const ctx = { waitUntil: (p) => pending.push(p) };
+      for (const query of ['ids=EHAM', 'ids=eham', 'ids=EHAM&x=1', 'x=2&ids=eham&_=77']) {
+        expect((await worker.fetch(new Request(`https://api.example/${feed}?${query}`), {}, ctx)).status).toBe(200);
+        await Promise.all(pending);
+      }
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+      expect([...cache.entries.keys()].filter((k) => !k.includes('__backup'))).toEqual([`https://api.example/${feed}?ids=EHAM`]);
+    }
+  });
+
+  it('has no backup copy to serve when the source fails: an old report must not pass for the current one', async () => {
+    for (const feed of ['metar', 'taf']) {
+      const cache = fakeCache();
+      vi.stubGlobal('caches', { default: cache });
+      const pending = [];
+      const ctx = { waitUntil: (p) => pending.push(p) };
+      vi.stubGlobal('fetch', vi.fn(async () => reply('[{"icaoId":"EHAM"}]')));
+      await worker.fetch(new Request(`https://api.example/${feed}?ids=EHAM`), {}, ctx);
+      await Promise.all(pending);
+      expect([...cache.entries.keys()].some((k) => k.includes('__backup'))).toBe(false);
+      // The short-lived answer is gone, the source is down.
+      cache.entries.clear();
+      vi.stubGlobal('fetch', vi.fn(async () => reply('down', { status: 503 })));
+      const res = await worker.fetch(new Request(`https://api.example/${feed}?ids=EHAM`), {}, ctx);
+      expect(res.status).toBe(502);
+      expect(res.headers.get('X-Power-Globe-Backup')).toBeNull();
+    }
+  });
+
+  it('still keeps a backup of what is not a report that goes out of date, such as a forecast', async () => {
+    const cache = fakeCache();
+    vi.stubGlobal('caches', { default: cache });
+    vi.stubGlobal('fetch', vi.fn(async () => reply('{"hourly":{}}')));
+    const pending = [];
+    await worker.fetch(new Request('https://api.example/forecast?latitude=52&longitude=4&hourly=visibility'), {}, { waitUntil: (p) => pending.push(p) });
+    await Promise.all(pending);
+    expect([...cache.entries.keys()].some((k) => k.includes('__backup'))).toBe(true);
+  });
+});
+
 describe('aircraft tracks', () => {
   const TRACK = new URL('https://api.example/track?icao24=486898');
   const RELAY = { FLIGHT_RELAY_URL: 'https://relay.example/', FLIGHT_RELAY_KEY: 'relay-secret-123456' };
