@@ -26,7 +26,7 @@ import { setupWindCheck } from './windcheck.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
-import { dragged, followStep, startFollow, stopReason, shiftedLat, visibleShift } from './follow.js';
+import { DragTracker, dragged, followStep, startFollow, stopReason, shiftedLat, visibleShift } from './follow.js';
 import { latestObservation } from './metar.js';
 import { explain } from './api.js';
 
@@ -753,13 +753,22 @@ function startFollowing() {
   controls.autoRotate = false;
   // Momentum left in the camera controls would carry the view off the aircraft.
   stopCameraDrift();
+  // Zooming toward the cursor would move the view off the aircraft for a frame at each step.
+  zoomToCursor = controls.zoomToCursor;
+  controls.zoomToCursor = false;
+  basemap.setFollowing(true);
+  airportMap.setFollowing(true);
   state.follow = startFollow(report, globe.pointOfView(), Date.now(), { reduced: reducedMotion });
   announce(`Following ${els.detailsTitle.textContent}.`);
 }
 
+let zoomToCursor = true;
 function stopFollowing(message) {
   if (!state.follow) return;
   state.follow = null;
+  controls.zoomToCursor = zoomToCursor;
+  basemap.setFollowing(false);
+  airportMap.setFollowing(false);
   if (message) announce(message);
 }
 
@@ -804,43 +813,21 @@ function syncFollowButton() {
   followButtonState = key;
   els.detailsFollow.hidden = !aircraft;
   els.detailsFollow.textContent = following ? 'Stop following' : 'Follow';
-  els.detailsFollow.setAttribute('aria-pressed', String(following));
   els.detailsFollow.disabled = !following && !received;
+  // A disabled button cannot keep focus: the panel's close button is the next stop.
+  if (els.detailsFollow.disabled && document.activeElement === els.detailsFollow) els.detailsClose.focus();
 }
 els.detailsFollow.addEventListener('click', () => (state.follow ? stopFollowing('Stopped following.') : startFollowing()));
 
 // Dragging the map ends following. Zooming does not: the wheel is no drag, and neither is a
 // gesture with more than one finger down.
 {
-  const down = new Map();
-  let several = false;
-  els.globe.addEventListener(
-    'pointerdown',
-    (event) => {
-      if (event.isPrimary) {
-        down.clear();
-        several = false;
-      }
-      if (event.button !== 0) return;
-      down.set(event.pointerId, { x: event.clientX, y: event.clientY });
-      if (down.size > 1) several = true;
-    },
-    { capture: true, passive: true },
-  );
-  els.globe.addEventListener(
-    'pointermove',
-    (event) => {
-      const start = down.get(event.pointerId);
-      if (start && !several && state.follow && dragged(start, { x: event.clientX, y: event.clientY })) stopFollowing();
-    },
-    { capture: true, passive: true },
-  );
-  const lift = (event) => {
-    down.delete(event.pointerId);
-    if (!down.size) several = false;
-  };
-  els.globe.addEventListener('pointerup', lift, { capture: true, passive: true });
-  els.globe.addEventListener('pointercancel', lift, { capture: true, passive: true });
+  const tracker = new DragTracker();
+  const point = (event) => ({ id: event.pointerId, x: event.clientX, y: event.clientY });
+  const options = { capture: true, passive: true };
+  els.globe.addEventListener('pointerdown', (event) => tracker.down({ ...point(event), primary: event.isPrimary, button: event.button }), options);
+  els.globe.addEventListener('pointermove', (event) => tracker.move(point(event)) && state.follow && stopFollowing(), options);
+  for (const type of ['pointerup', 'pointercancel']) els.globe.addEventListener(type, (event) => tracker.up(event.pointerId), options);
 }
 
 // `name` titles the panel, e.g. a searched place (tapped spots show coordinates); `pinLabel`
@@ -1197,3 +1184,4 @@ renderControls();
 wake();
 refresh();
 requestAnimationFrame(tick);
+

@@ -368,8 +368,7 @@ input:focus-visible {
   outline-offset: 2px;
 }
 
-button[aria-checked='true'],
-button[aria-pressed='true'] {
+button[aria-checked='true'] {
   background: rgba(155, 209, 255, 0.24);
   border-color: var(--accent);
   color: #fff;

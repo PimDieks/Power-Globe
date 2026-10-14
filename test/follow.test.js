@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { estimatePosition } from '../src/aircraft.js';
 import {
   CLEARANCE,
+  DragTracker,
   FOLLOW_ALTITUDE,
   GLIDE_MS,
   RECENTRE_MS,
@@ -255,5 +256,55 @@ describe('followStep', () => {
     const f = startFollow(balloon, { lat: 52, lng: 4, altitude: 0.0025 }, 0);
     const pose = followStep(f, { report: balloon, pov: { lat: 52, lng: 4, altitude: 0.0025 }, now: GLIDE_MS });
     expect(pose.altitude).toBeGreaterThan(30_480 / 6_371_000);
+  });
+});
+
+describe('DragTracker', () => {
+  const down = (id, x, y, primary = id === 1) => ({ id, x, y, primary, button: 0 });
+
+  it('calls one pointer that goes far enough a drag, and a small move a tap', () => {
+    const t = new DragTracker();
+    t.down(down(1, 100, 100));
+    expect(t.move({ id: 1, x: 103, y: 102 })).toBe(false);
+    expect(t.move({ id: 1, x: 110, y: 100 })).toBe(true);
+  });
+
+  it('does not take a pinch for a drag', () => {
+    const t = new DragTracker();
+    t.down(down(1, 100, 100));
+    t.down(down(2, 200, 100));
+    expect(t.move({ id: 1, x: 140, y: 100 })).toBe(false);
+    expect(t.move({ id: 2, x: 260, y: 100 })).toBe(false);
+  });
+
+  it('counts a drag with the finger left after a pinch, from where it is then', () => {
+    const t = new DragTracker();
+    t.down(down(1, 100, 100));
+    t.down(down(2, 200, 100));
+    t.move({ id: 2, x: 300, y: 100 });
+    t.up(1);
+    // It has moved a long way since it went down, but only now does it go on its own.
+    expect(t.move({ id: 2, x: 302, y: 100 })).toBe(false);
+    expect(t.move({ id: 2, x: 320, y: 100 })).toBe(true);
+  });
+
+  it('starts afresh with each gesture, and ignores buttons that do not turn the map', () => {
+    const t = new DragTracker();
+    t.down(down(1, 0, 0));
+    t.down(down(2, 50, 0));
+    t.up(2);
+    t.up(1);
+    t.down(down(3, 10, 10, true));
+    expect(t.move({ id: 3, x: 30, y: 10 })).toBe(true);
+    t.down({ id: 4, x: 0, y: 0, primary: true, button: 2 });
+    expect(t.move({ id: 4, x: 50, y: 50 })).toBe(false);
+  });
+
+  it('forgets pointers it was never told were lifted when a new gesture starts', () => {
+    const t = new DragTracker();
+    t.down(down(1, 0, 0));
+    t.down(down(2, 50, 0));
+    t.down(down(7, 10, 10, true));
+    expect(t.move({ id: 7, x: 30, y: 10 })).toBe(true);
   });
 });

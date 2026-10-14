@@ -30,6 +30,44 @@ const wrapLng = (d) => ((((d + 180) % 360) + 360) % 360) - 180;
 // Whether a pointer that went down at `down` and is now at `point` has dragged.
 export const dragged = (down, point) => Math.hypot(point.x - down.x, point.y - down.y) > DRAG_PX;
 
+// Tells a drag of the map from a tap and from zooming, from the pointers' events. One pointer
+// that goes farther than DRAG_PX is a drag; a gesture with more than one pointer down (a pinch)
+// is not, and what remains of it once only one pointer is left starts afresh from where that
+// pointer is, so lifting a finger and dragging with the other does count.
+export class DragTracker {
+  constructor() {
+    this.pointers = new Map();
+    this.several = false;
+  }
+
+  // `primary`: the first pointer of a gesture (see PointerEvent.isPrimary). Only the main button
+  // or a touch counts: others do not turn the map.
+  down({ id, x, y, primary, button }) {
+    if (primary) {
+      this.pointers.clear();
+      this.several = false;
+    }
+    if (button !== 0) return;
+    this.pointers.set(id, { start: { x, y }, at: { x, y } });
+    if (this.pointers.size > 1) this.several = true;
+  }
+
+  // Whether the pointer has dragged the map.
+  move({ id, x, y }) {
+    const pointer = this.pointers.get(id);
+    if (!pointer) return false;
+    pointer.at = { x, y };
+    return !this.several && dragged(pointer.start, pointer.at);
+  }
+
+  up(id) {
+    this.pointers.delete(id);
+    if (this.pointers.size > 1) return;
+    this.several = false;
+    for (const pointer of this.pointers.values()) pointer.start = pointer.at;
+  }
+}
+
 // Moves `value` towards `target` the way the gap to the aircraft fades: `seconds` is the time
 // for two thirds of it to go, `elapsedMs` the time since the last step.
 export function approach(value, target, elapsedMs, seconds) {

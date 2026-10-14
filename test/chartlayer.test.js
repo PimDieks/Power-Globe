@@ -62,18 +62,55 @@ describe('the aviation chart over the map', () => {
     expect(tellsOf()).toBe(1);
   });
 
-  it('keeps asking about once a second while the view never settles, and once more when it stops', async () => {
-    // Ten seconds of a camera that moves every frame, as when following an aircraft.
+  it('waits for the view to settle however long a drag or zoom lasts', async () => {
+    // Ten seconds of gesture, a call every frame.
     for (let t = 0; t < 10_000; t += 16) {
       basemap.setAltitude(0.01);
       await vi.advanceTimersByTimeAsync(16);
     }
-    expect(tellsOf()).toBeGreaterThanOrEqual(7);
-    expect(tellsOf()).toBeLessThanOrEqual(10);
-    const during = tellsOf();
+    expect(tellsOf()).toBe(0);
     await vi.advanceTimersByTimeAsync(300);
-    expect(tellsOf()).toBe(during + 1);
-    await vi.advanceTimersByTimeAsync(5000);
-    expect(tellsOf()).toBe(during + 1);
+    expect(tellsOf()).toBe(1);
+  });
+
+  describe('while the camera follows an aircraft', () => {
+    // The camera controls report a change only after it has moved some distance, so at jet speed
+    // calls come about every 300 ms: each one is inside the 250 ms of the last.
+    const move = async (ms, every) => {
+      for (let t = 0; t < ms; t += every) {
+        basemap.setAltitude(0.01);
+        await vi.advanceTimersByTimeAsync(every);
+      }
+    };
+
+    it('asks about once a second, counted from the last time, and goes quiet when it stops', async () => {
+      basemap.setFollowing(true);
+      await move(10_000, 300);
+      expect(tellsOf()).toBeGreaterThanOrEqual(9);
+      expect(tellsOf()).toBeLessThanOrEqual(11);
+      // The last call is answered too, by the update that was waiting, and then it is quiet.
+      await vi.advanceTimersByTimeAsync(1000);
+      const after = tellsOf();
+      expect(after).toBeLessThanOrEqual(12);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(tellsOf()).toBe(after);
+    });
+
+    it('does the same with a call every frame', async () => {
+      basemap.setFollowing(true);
+      await move(10_000, 16);
+      expect(tellsOf()).toBeGreaterThanOrEqual(9);
+      expect(tellsOf()).toBeLessThanOrEqual(11);
+    });
+
+    it('goes back to waiting for the view to settle once following stops', async () => {
+      basemap.setFollowing(true);
+      await move(3000, 300);
+      basemap.setFollowing(false);
+      await vi.advanceTimersByTimeAsync(2000);
+      const before = tellsOf();
+      await move(5000, 16);
+      expect(tellsOf()).toBe(before);
+    });
   });
 });
