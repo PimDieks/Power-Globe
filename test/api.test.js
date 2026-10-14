@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker, { MAX_TRACK_POINTS, TRACKS_PER_HOUR, TRACKS_PER_HOUR_ANONYMOUS, TRACK_RATE_LIMIT, compactTrack, corsHeaders, route } from '../api/worker.js';
 import { ceilingFt, flightCategory, toObservation, visibilityMiles } from '../src/metar.js';
-import { bearingBetween, destination, placeLabels, runwayEnds, runwayStatus } from '../src/runwaymap.js';
+import { bearingBetween, destination, placeLabels, runwayEnds } from '../src/runwaymap.js';
 import { conditionsAt, snapshotSeries, toAirport } from '../src/airports.js';
 import { assessVariable, observationHtml } from '../src/airportview.js';
 import { airportsInView, metresPerPixel } from '../src/airportmap.js';
@@ -164,13 +164,6 @@ describe('runways on the map', () => {
     const p = destination({ lat: 0, lng: 0 }, 90, 111_195);
     expect(p.lat).toBeCloseTo(0, 6);
     expect(p.lng).toBeCloseTo(1, 3);
-  });
-
-  it('colours a runway by its better direction', () => {
-    const rw = SCHIPHOL.runways[1];
-    expect(runwayStatus(rw, new Map([['09', 'nogo'], ['27', 'ok']]))).toBe('ok');
-    expect(runwayStatus(rw, new Map([['09', 'nogo'], ['27', 'caution']]))).toBe('caution');
-    expect(runwayStatus(rw, new Map())).toBe('unknown');
   });
 
   it('finds the airports in view, nearest first', () => {

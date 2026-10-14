@@ -1,5 +1,6 @@
 // Runways drawn on the map when zoomed in to airports, coloured by whether they can be used in
-// the wind: green within limits, amber marginal, red out of limits, white without data.
+// the wind: green within limits, amber marginal, red out of limits, white without data. A runway
+// takes the status of its better end (see runwayCall in opsrunway.js).
 import * as THREE from 'three';
 
 const RAD = Math.PI / 180;
@@ -30,14 +31,6 @@ export function runwayEnds(airport, runway) {
   const half = (Math.max(runway.lengthFt, 1500) * FT) / 2;
   const center = { lat: airport.lat, lng: airport.lng };
   return [destination(center, runway.leHeading + 180, half), destination(center, runway.leHeading, half)];
-}
-
-// The better of a runway's two directions: one usable direction is enough to use the runway.
-const RANK = { unknown: -1, ok: 0, caution: 1, nogo: 2 };
-export function runwayStatus(runway, endStatus) {
-  const statuses = [endStatus.get(runway.le), runway.he ? endStatus.get(runway.he) : undefined].filter(Boolean);
-  if (!statuses.length) return 'unknown';
-  return statuses.reduce((best, s) => (RANK[s] < RANK[best] ? s : best));
 }
 
 // Runway shapes as one mesh: a dark outline under a coloured strip for each runway, at least

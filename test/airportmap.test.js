@@ -86,6 +86,29 @@ describe('weather for the airports in view', () => {
     expect(airportWeather).toHaveBeenCalledTimes(1);
   });
 
+  it('colours a runway by its better end and marks the downwind end as neutral, as the panel does', async () => {
+    // 15 kt from 270: a headwind on 27, a tailwind over the limit of 10 on 09.
+    const hourly = { time: ['2026-10-13T12:00'], wind_direction_10m: [270], wind_speed_10m: [15], wind_gusts_10m: [15] };
+    airportWeather.mockImplementation(async (list, { onData }) => {
+      const answer = new Map(list.map((a) => [a.ident, hourly]));
+      onData(answer);
+      return answer;
+    });
+    drawStrips.mockClear();
+    const { map, settle, setRunwayLabels } = await setup([FIELD]);
+    await settle({ ...view, altitude: 0.005 });
+    const ends = () => Object.fromEntries(setRunwayLabels.mock.lastCall[0].filter((l) => l.kind === 'runway').map((l) => [l.text.split(' ')[0], l]));
+    expect(drawStrips.mock.lastCall[0].map((r) => r.status)).toEqual(['ok']);
+    expect(ends()['27']).toMatchObject({ status: 'ok', text: '27 ✓' });
+    expect(ends()['09']).toMatchObject({ status: 'neutral', text: '09 tailwind' });
+    // The Traffic tab draws the runways plain.
+    map.select(FIELD);
+    map.setProfile(MAP_PROFILES.traffic);
+    expect(drawStrips.mock.lastCall[0].map((r) => r.status)).toEqual(['unknown']);
+    expect(ends()['09'].text).toBe('09');
+    expect(ends()['27']).toMatchObject({ status: 'unknown', text: '27' });
+  });
+
   it('waits for the camera to settle however long a drag or zoom lasts', async () => {
     airportWeather.mockResolvedValue(new Map());
     const { map, setRunwayLabels } = await setup([FIELD]);
@@ -305,7 +328,7 @@ describe('what the map shows around the open airport for the tab shown (its map 
     const { strips, labels, runwayTexts } = await open();
     expect(strips().map((s) => s.status)).toEqual(['ok']);
     expect(labels().some((l) => l.kind === 'wind')).toBe(true);
-    expect(runwayTexts()).toEqual(['09 ✓', '27 ✓']);
+    expect(runwayTexts()).toEqual(['09 tailwind', '27 ✓']);
   });
 
   it('draws plain runways, bare runway names and no wind label in the Traffic and Access tabs, the airport label plain too', async () => {
@@ -329,7 +352,7 @@ describe('what the map shows around the open airport for the tab shown (its map 
       map.setProfile(profile);
       expect(strips().map((s) => s.status)).toEqual(['ok']);
       expect(labels().some((l) => l.kind === 'wind')).toBe(true);
-      expect(runwayTexts()).toEqual(['09 ✓', '27 ✓']);
+      expect(runwayTexts()).toEqual(['09 tailwind', '27 ✓']);
     }
   });
 
@@ -337,7 +360,7 @@ describe('what the map shows around the open airport for the tab shown (its map 
     const { map, runwayTexts } = await open();
     map.setRunwayUse('XPRO', use);
     // No profile: as before the tabs, the label says it with the status.
-    expect(runwayTexts()).toEqual(['09 ✓', '27 ✓ ARR']);
+    expect(runwayTexts()).toEqual(['09 tailwind', '27 ✓ ARR']);
     map.setProfile(MAP_PROFILES.traffic);
     expect(runwayTexts()).toEqual(['09', '27 ARR']);
     for (const profile of [MAP_PROFILES.weather, MAP_PROFILES.details, MAP_PROFILES.access]) {
@@ -351,6 +374,6 @@ describe('what the map shows around the open airport for the tab shown (its map 
     map.select(null);
     map.setProfile(MAP_PROFILES.traffic);
     expect(strips().map((s) => s.status)).toEqual(['ok']);
-    expect(runwayTexts()).toEqual(['09 ✓', '27 ✓']);
+    expect(runwayTexts()).toEqual(['09 tailwind', '27 ✓']);
   });
 });
