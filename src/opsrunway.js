@@ -98,6 +98,58 @@ function carryUpTo(ends, hourly, limits, until) {
   return carry;
 }
 
+// Every hour of a forecast judged one after the other, as the outlook does it, so that the
+// favoured ends are the ones the outlook shows. Kept for the last airport and limits asked about
+// per forecast, so that scrubbing the timeline does not judge them again.
+const histories = new WeakMap();
+function hourHistory(airport, hourly, limits) {
+  const key = `${airport.ident}|${limits.crosswind}|${limits.tailwind}`;
+  const kept = histories.get(hourly);
+  if (kept?.key === key) return kept.hours;
+  const ends = runwayEnds(airport);
+  const hours = new Map();
+  const last = Date.parse(`${hourly.time.at(-1)}Z`) + 3 * HOUR_MS;
+  let carry = noCarry();
+  for (let t = Math.floor(Date.parse(`${hourly.time[0]}Z`) / HOUR_MS) * HOUR_MS; t <= last; t += HOUR_MS) {
+    const time = new Date(t).toISOString().slice(0, 16);
+    const hour = { ...assessHour(ends, conditionsAt(hourly, time), limits, carry), time };
+    hours.set(time, hour);
+    carry = nextCarry(carry, hour);
+  }
+  histories.set(hourly, { key, hours });
+  return hours;
+}
+
+// The outlook's judgement of the hour containing `time` ("2026-10-14T15:30"), or null without a
+// forecast. Outside the forecast it is the hour's own judgement, with no hours before it.
+export function hourAt(airport, hourly, time, limits) {
+  if (!hourly?.time?.length) return null;
+  const hourTime = `${time.slice(0, 13)}:00`;
+  return hourHistory(airport, hourly, limits).get(hourTime) ?? { ...assessHour(runwayEnds(airport), conditionsAt(hourly, time), limits), time: hourTime };
+}
+
+// What the map says about one runway in an hour of the outlook, the same as its strip does: the
+// runway takes the status of its better end; that end keeps its own status and the other end is
+// 'neutral' (with a hint when it has a tailwind), unless the whole runway is over limits or the
+// wind is calm, when every end shows its own status. { status, best, ends: { ident: { status,
+// hint } } }; 'unknown' without a judgement of this runway.
+export function runwayCall(runway, hour) {
+  const idents = [runway.le, runway.he].filter(Boolean);
+  const unknown = { status: 'unknown', best: null, ends: Object.fromEntries(idents.map((ident) => [ident, { status: 'unknown', hint: null }])) };
+  const row = hour?.runways.find((r) => r.idents.some((ident) => idents.includes(ident)));
+  if (!row || hour.state === 'missing') return unknown;
+  const shared = row.status === 'nogo' || hour.state === 'calm';
+  const ends = Object.fromEntries(
+    idents.map((ident) => {
+      const end = hour.ends.find((e) => e.ident === ident);
+      if (!end) return [ident, { status: 'unknown', hint: null }];
+      if (shared || ident === row.best) return [ident, { status: end.status, hint: null }];
+      return [ident, { status: 'neutral', hint: end.tailwind >= TIE_KT ? 'tailwind' : null }];
+    }),
+  );
+  return { status: row.status, best: row.best, ends };
+}
+
 // The next hours at an airport. `reason` says why there is nothing to show: 'noRunways' (no
 // runway with a usable heading) or 'noForecast' (no hourly data at all); otherwise `hours` has an
 // entry per hour, with state 'missing' where the forecast has a gap. The favoured end of an hour

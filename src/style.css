@@ -1565,6 +1565,11 @@ input:disabled {
   box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.7);
 }
 
+/* The end of a runway that is not the one in use: no status of its own. */
+.runway-label.status-neutral span {
+  background: #9ba5b3;
+}
+
 .wind-label span {
   color: #fff;
   background: rgba(10, 14, 24, 0.88);
