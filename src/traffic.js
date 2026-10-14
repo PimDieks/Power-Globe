@@ -10,6 +10,9 @@ import { aircraftLayer, behindGlobe, orbitLine, satelliteLayer, selectionRing } 
 import { EARTH_RADIUS_KM, orbitClass, orbitPath, parseTle, periodMinutes, satellitePosition, toGeodetic, toSatrec, tleEpoch } from './orbits.js';
 import { aircraftDetailsHtml, aircraftName, satelliteDetailsHtml } from './trafficview.js';
 import { PROXY_URL, explain } from './api.js';
+import { loadAirports } from './airports.js';
+import { setupFlightLines } from './flightlines.js';
+import { loadRoute, loadTrack } from './flightroute.js';
 
 const OPENSKY_URL = 'https://opensky-network.org/api/states/all?extended=1';
 export const ADSB_PROVIDERS = [
@@ -251,7 +254,7 @@ async function askLive(group) {
   }
 }
 
-export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
+export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, announce }) {
   const R = globe.getGlobeRadius();
   const RAD = Math.PI / 180;
   const store = new AircraftStore();
@@ -259,6 +262,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   const sats = satelliteLayer(globe);
   const ring = selectionRing(globe);
   const orbit = orbitLine(globe);
+  const lines = setupFlightLines({ globe, scenePoint, onLabels: onFlightEnds, loadAirports, loadTrack, loadRoute });
 
   const settings = { flights: false, military: false, satellites: false, group: 'active', ...readSettings() };
   els.flights.checked = !!settings.flights;
@@ -607,6 +611,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     sats.size = Math.max(2.5, Math.min(5, 4 * (1.2 / Math.max(altitude, 0.05)) ** 0.25)) * dpr;
     ring.size = 34 * dpr;
     planes.setViewport(window.innerWidth, window.innerHeight);
+    lines.setViewport(window.innerWidth, window.innerHeight);
   }
 
   // Called every frame with the camera's point of view.
@@ -626,6 +631,10 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     drawAircraft(Date.now());
     drawSatellites(Date.now());
     ring.place(selectedPosition());
+    if (selected?.kind === 'aircraft') {
+      const ac = store.byId.get(selected.id);
+      lines.frame(ac, ac?.estimate, pov.altitude);
+    }
   }
 
   // Scene position of the selected aircraft or satellite, or null.
@@ -694,6 +703,8 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   function select(item) {
     selected = item;
     orbit.hide();
+    if (item.kind === 'aircraft') lines.start(item.id);
+    else lines.stop();
     if (item.kind === 'satellite') {
       const tle = satellites.tles[item.index];
       item.satrec = toSatrec(tle);
@@ -714,6 +725,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     if (!selected) return;
     selected = null;
     orbit.hide();
+    lines.stop();
     ring.place(null);
     onDeselect?.();
   }
@@ -738,7 +750,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     if (selected?.kind === 'aircraft') {
       const ac = store.byId.get(selected.id);
       if (!ac) return '<p>No longer received.</p>';
-      return aircraftDetailsHtml(ac, { position: ac.estimate ?? ac, now });
+      return aircraftDetailsHtml(ac, { position: ac.estimate ?? ac, now, flight: lines.info() });
     }
     if (selected?.kind === 'satellite' && selected.satrec) {
       // Keep the drawn orbit ahead of the satellite.
@@ -759,7 +771,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
 
   applySettings();
 
-  return { frame, pick, select, deselect, detailsHtml, title, selectedAircraft, get selected() { return selected; } };
+  return { frame, pick, select, deselect, detailsHtml, title, selectedAircraft, flightInfo: lines.info, get selected() { return selected; } };
 }
 
 // Normalised device coordinates of a point, or null if it is behind the camera.

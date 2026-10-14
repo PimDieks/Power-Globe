@@ -244,6 +244,22 @@ describe('live traffic', () => {
     expect(html).toContain('AE1234');
   });
 
+  it('says where an aircraft came from and is going, and when its track is not available', () => {
+    const ac = { id: 'ae1234', callsign: 'KLM66A', altitudeFt: 28000, seen: 0 };
+    const ask = (flight) => aircraftDetailsHtml(ac, { position: { lat: 51.5, lng: -1.2 }, now: 0, locale: 'en-US', flight });
+    const both = ask({ trackState: 'ok', from: { code: 'LHR', name: 'London Heathrow Airport' }, to: { code: 'AMS', name: 'Amsterdam Airport Schiphol' } });
+    expect(both).toContain('<dt>From</dt><dd>London Heathrow Airport (LHR)</dd>');
+    expect(both).toContain('<dt>To</dt><dd>Amsterdam Airport Schiphol (AMS)</dd>');
+    expect(both).not.toContain('Track not available');
+    const lost = ask({ trackState: 'none', from: null, to: null });
+    expect(lost).toContain('Track not available');
+    expect(lost).not.toContain('<dt>From</dt>');
+    expect(lost).not.toContain('<dt>To</dt>');
+    expect(ask({ trackState: 'loading', from: null, to: { code: 'EHAM', name: '' } })).toContain('<dd>EHAM</dd>');
+    expect(ask(null)).not.toContain('<dt>From</dt>');
+    expect(ask(undefined)).not.toContain('Track not available');
+  });
+
   it('describes a satellite', () => {
     const [tle] = parseTle(ISS);
     const html = satelliteDetailsHtml(tle, {

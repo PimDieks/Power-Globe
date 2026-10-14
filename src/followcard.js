@@ -19,13 +19,14 @@ export function followLayout({ following, narrow, expanded }) {
 }
 
 // What the card says about an aircraft, from its latest report: { name, line }. Parts the
-// report does not have are left out.
-export function cardText(ac, { locale } = {}) {
+// report does not have are left out. `to` is the code of the airport it is going to, if known.
+export function cardText(ac, { locale, to } = {}) {
   const parts = [];
   if (ac.onGround) parts.push('On the ground');
   else if (known(ac.altitudeFt)) parts.push(`${round(ac.altitudeFt, 25).toLocaleString(locale)} ft`);
   if (known(ac.speedKt)) parts.push(`${Math.round(ac.speedKt)} kt`);
   if (known(ac.track)) parts.push(`${String(Math.round(ac.track) % 360).padStart(3, '0')}°`);
+  if (to) parts.push(`to ${to}`);
   return { name: aircraftName(ac), line: parts.join(' · ') };
 }
 

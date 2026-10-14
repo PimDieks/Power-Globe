@@ -296,3 +296,167 @@ export function orbitLine(globe) {
     },
   };
 }
+
+// A line drawn as a ribbon a few pixels wide, since WebGL draws no thicker lines: a bright core
+// with a dark edge, so it reads over any map or weather. Like the aircraft it is drawn after the
+// weather layers without depth testing, and hidden behind the globe by the same test. It goes over
+// the other aircraft (under the selection ring), which would otherwise hide most of it among dense
+// traffic. Each segment is a quad of its own (a square end covers the joints), so a changed end
+// can be rewritten without touching the rest. `dashed` lines break into dashes of `dash` scene
+// units.
+const LINE_VERTEX = /* glsl */ `
+  attribute vec3 aOther;
+  attribute float aSide;
+  attribute float aEnd;
+  attribute float aDist;
+  uniform vec2 uViewport;
+  uniform float uWidth;
+  varying vec3 vWorld;
+  varying float vSide;
+  varying float vDist;
+  void main() {
+    vec4 here = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    vec4 there = projectionMatrix * modelViewMatrix * vec4(aOther, 1.0);
+    vWorld = position;
+    vSide = aSide;
+    vDist = aDist;
+    if (here.w <= 0.0 || there.w <= 0.0) {
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      return;
+    }
+    vec2 toOther = (there.xy / there.w - here.xy / here.w) * uViewport * 0.5;
+    // The segment's direction on screen, from its first end to its second.
+    vec2 dir = length(toOther) > 1e-4 ? normalize(toOther) * aEnd : vec2(1.0, 0.0);
+    vec2 normal = vec2(-dir.y, dir.x);
+    float hw = uWidth * 0.5;
+    vec2 offset = (normal * aSide - dir * aEnd) * hw / (uViewport * 0.5);
+    gl_Position = vec4(here.xy + offset * here.w, here.z, here.w);
+  }
+`;
+
+const LINE_FRAGMENT = /* glsl */ `
+  ${BEHIND_GLOBE}
+  uniform vec3 uColor;
+  uniform float uAlpha;
+  uniform float uDash;
+  varying vec3 vWorld;
+  varying float vSide;
+  varying float vDist;
+  void main() {
+    if (behindGlobe(vWorld)) discard;
+    if (uDash > 0.0 && mod(vDist, uDash * 1.8) > uDash) discard;
+    float edge = smoothstep(0.5, 0.66, abs(vSide));
+    float soft = 1.0 - smoothstep(0.88, 1.0, abs(vSide));
+    gl_FragColor = vec4(mix(uColor, vec3(0.04, 0.05, 0.09), edge * 0.85), uAlpha * soft);
+  }
+`;
+
+export function flightLine(globe, { color, dashed = false, width = 5, alpha = 0.95, renderOrder = 10.5 }) {
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      uViewport: { value: new THREE.Vector2(1, 1) },
+      uWidth: { value: width },
+      uColor: { value: new THREE.Color(...color) },
+      uAlpha: { value: alpha },
+      uDash: { value: 0 },
+      uHideRadiusSq: hideUniform(globe),
+    },
+    vertexShader: LINE_VERTEX,
+    fragmentShader: LINE_FRAGMENT,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const geometry = new THREE.BufferGeometry();
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = renderOrder;
+  mesh.raycast = () => {};
+  mesh.visible = false;
+  globe.scene().add(mesh);
+
+  const sizes = { position: 3, aOther: 3, aSide: 1, aEnd: 1, aDist: 1 };
+  let capacity = 0;
+  let segments = 0;
+  let points = new Float32Array(0);
+
+  function reserve(n) {
+    if (n <= capacity) return;
+    capacity = Math.max(n, Math.ceil(capacity * 1.5), 64);
+    for (const [name, size] of Object.entries(sizes)) {
+      const attribute = new THREE.BufferAttribute(new Float32Array(capacity * 4 * size), size);
+      attribute.setUsage(THREE.DynamicDrawUsage);
+      geometry.setAttribute(name, attribute);
+    }
+    const index = new Uint32Array(capacity * 6);
+    for (let k = 0; k < capacity; k++) index.set([4 * k, 4 * k + 1, 4 * k + 2, 4 * k + 2, 4 * k + 1, 4 * k + 3], 6 * k);
+    geometry.setIndex(new THREE.BufferAttribute(index, 1));
+  }
+
+  // Writes segment k, from point k to point k + 1 of `points`, whose distance along the line at
+  // its start is `dist`; returns the distance at its end.
+  function writeSegment(k, dist) {
+    const a = 3 * k;
+    const b = a + 3;
+    const length = Math.hypot(points[b] - points[a], points[b + 1] - points[a + 1], points[b + 2] - points[a + 2]);
+    const { position, aOther, aSide, aEnd, aDist } = geometry.attributes;
+    for (let v = 0; v < 4; v++) {
+      const startVertex = v < 2;
+      const own = startVertex ? a : b;
+      const other = startVertex ? b : a;
+      const i = 4 * k + v;
+      position.array.set([points[own], points[own + 1], points[own + 2]], 3 * i);
+      aOther.array.set([points[other], points[other + 1], points[other + 2]], 3 * i);
+      aSide.array[i] = v % 2 ? 1 : -1;
+      aEnd.array[i] = startVertex ? 1 : -1;
+      aDist.array[i] = startVertex ? dist : dist + length;
+    }
+    return dist + length;
+  }
+
+  const touch = (names) => names.forEach((name) => (geometry.attributes[name].needsUpdate = true));
+
+  return {
+    mesh,
+    // The line through `flat` (x, y, z of each point, in scene units).
+    set(flat) {
+      const n = Math.floor(flat.length / 3);
+      if (n < 2) {
+        segments = 0;
+        mesh.visible = false;
+        return;
+      }
+      reserve(n - 1);
+      points = Float32Array.from(flat);
+      segments = n - 1;
+      let dist = 0;
+      for (let k = 0; k < segments; k++) dist = writeSegment(k, dist);
+      geometry.setDrawRange(0, segments * 6);
+      touch(Object.keys(sizes));
+      mesh.visible = true;
+    },
+    // Moves the last point, e.g. to where the aircraft is now, without touching the rest.
+    moveEnd(x, y, z) {
+      if (!segments) return;
+      const last = 3 * segments;
+      points[last] = x;
+      points[last + 1] = y;
+      points[last + 2] = z;
+      const { aDist } = geometry.attributes;
+      writeSegment(segments - 1, aDist.array[4 * (segments - 1)]);
+      touch(['position', 'aOther', 'aDist']);
+    },
+    hide() {
+      segments = 0;
+      mesh.visible = false;
+    },
+    setViewport(w, h) {
+      material.uniforms.uViewport.value.set(w, h);
+    },
+    // Dash length in scene units (dashed lines only), kept at about the same size on screen.
+    set dash(units) {
+      if (dashed) material.uniforms.uDash.value = units;
+    },
+  };
+}

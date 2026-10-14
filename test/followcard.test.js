@@ -34,6 +34,12 @@ describe('cardText', () => {
     expect(cardText(ac(), { locale: 'en-US' })).toEqual({ name: 'KLM123', line: '36,000 ft · 450 kt · 270°' });
   });
 
+  it('adds where the aircraft is going when that is known', () => {
+    expect(cardText(ac(), { locale: 'en-US', to: 'AMS' }).line).toBe('36,000 ft · 450 kt · 270° · to AMS');
+    expect(cardText(ac({ onGround: true, speedKt: null, track: null }), { to: 'AMS' }).line).toBe('On the ground · to AMS');
+    expect(cardText(ac(), { locale: 'en-US', to: undefined }).line).toBe('36,000 ft · 450 kt · 270°');
+  });
+
   it('pads the track and wraps 360 to 000', () => {
     expect(cardText(ac({ track: 5 })).line).toContain('005°');
     expect(cardText(ac({ track: 359.8 })).line).toContain('000°');

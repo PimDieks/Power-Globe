@@ -746,6 +746,19 @@ function airportElement(airport, status, onClick) {
   return el;
 }
 
+// The code of an airport at the end of an aircraft's line. Hidden from screen readers: the aircraft's
+// panel says the same.
+function flightEndElement(end) {
+  const el = document.createElement('div');
+  el.className = `flight-end ${end.kind}`;
+  el.setAttribute('aria-hidden', 'true');
+  el.title = end.title ?? '';
+  const label = document.createElement('span');
+  label.textContent = end.text;
+  el.append(label);
+  return el;
+}
+
 // A label at a runway end ("27 ✓"), the wind at an airport with an arrow pointing downwind, or
 // where an airfield is ("✈ AMS Schiphol", coloured by its wind status once known). The airport
 // open in the panel has its label `selected` (see airportmap.js). Hidden from screen readers: the
@@ -819,6 +832,8 @@ export function setupMapFeatures(globe) {
   // keeps an object on screen as long as the same datum is passed in).
   let airportMarkers = new Map();
   let runwayLabels = [];
+  // The airports at the ends of the selected aircraft's lines (see flightlines.js).
+  let flightEnds = [];
   let borders = null;
   let bordersShown = false;
 
@@ -827,7 +842,7 @@ export function setupMapFeatures(globe) {
     // An airport with a label of its own on the map (see airportmap.js) needs no marker.
     const labelled = new Set(runwayLabels.map((l) => l.ident).filter(Boolean));
     const shown = airports.filter((a) => !labelled.has(a.ident) && !(marker && a.lat === marker.lat && a.lng === marker.lng));
-    globe.htmlElementsData([...cities, ...runwayLabels, ...shown, ...(marker ? [marker] : [])]);
+    globe.htmlElementsData([...cities, ...runwayLabels, ...shown, ...flightEnds, ...(marker ? [marker] : [])]);
   }
 
   async function loadBorders() {
@@ -867,6 +882,14 @@ export function setupMapFeatures(globe) {
     refreshLabels();
   }
 
+  // Labels for the airports a selected aircraft left from and is going to: [{ lat, lng, text,
+  // title, kind }], or [] to remove them.
+  function setFlightEnds(ends) {
+    if (!ends.length && !flightEnds.length) return;
+    flightEnds = ends.map((end) => ({ lat: end.lat, lng: end.lng, el: flightEndElement(end) }));
+    refreshLabels();
+  }
+
   function update(altitude) {
     // Airport codes would pile up on top of each other on the whole globe; dots are enough there.
     document.body.classList.toggle('globe-far', altitude >= MAP_ALTITUDE);
@@ -892,5 +915,5 @@ export function setupMapFeatures(globe) {
     });
   }
 
-  return { update, setMarker, setAirports, setRunwayLabels };
+  return { update, setMarker, setAirports, setRunwayLabels, setFlightEnds };
 }
