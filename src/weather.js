@@ -253,6 +253,14 @@ export const AIRPORT_VARIABLES = [
 // are the same number and the copy compresses to almost the size it had without visibility.
 export const AIRPORT_VISIBILITY_CAP = 10_000;
 export const roundVisibility = (metres) => (metres == null ? null : Math.min(AIRPORT_VISIBILITY_CAP, Math.round(metres / 100) * 100));
+
+// One value of an airport series as the site's copy keeps it: temperatures and dew points to a
+// tenth, visibility as above, everything else to a whole number.
+export function airportValue(variable, value) {
+  if (variable === 'visibility') return roundVisibility(value);
+  if (value == null) return null;
+  return Number(value.toFixed(variable === 'temperature_2m' || variable === 'dew_point_2m' ? 1 : 0));
+}
 const FEET = 0.3048;
 
 // The airport's own elevation lets Open-Meteo correct the temperature for its height.

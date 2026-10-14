@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AIRPORT_VARIABLES,
+  airportValue,
   apiBudget,
   buildGrid,
   buildUrl,
@@ -485,5 +486,18 @@ describe('airport visibility', () => {
     expect(roundVisibility(0)).toBe(0);
     expect(roundVisibility(null)).toBeNull();
     expect(roundVisibility(undefined)).toBeNull();
+  });
+
+  it('keeps each variable of the site copy as it should be: tenths for temperature, whole numbers for wind, rounded visibility', () => {
+    expect(airportValue('temperature_2m', 12.34)).toBe(12.3);
+    expect(airportValue('dew_point_2m', -0.06)).toBe(-0.1);
+    expect(airportValue('wind_speed_10m', 7.6)).toBe(8);
+    expect(airportValue('wind_gusts_10m', 14.4)).toBe(14);
+    expect(airportValue('wind_direction_10m', 359.6)).toBe(360);
+    expect(airportValue('visibility', 24_140)).toBe(10_000);
+    expect(airportValue('visibility', 830)).toBe(800);
+    expect(airportValue('visibility', null)).toBeNull();
+    expect(airportValue('wind_speed_10m', undefined)).toBeNull();
+    expect(AIRPORT_VARIABLES.map((v) => airportValue(v, 1.26))).toEqual([1.3, 1.3, 1, 1, 1, 0]);
   });
 });
