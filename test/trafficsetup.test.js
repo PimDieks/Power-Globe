@@ -26,12 +26,17 @@ const START = Date.parse('2026-10-14T12:00:00Z');
 const feed = (aircraft) => ({ source: 'adsb.lol', data: { now: Date.now(), ac: aircraft } });
 const klm = (overrides = {}) => ({ hex: '484506', flight: 'KLM42', lat: 52.3, lon: 4.76, alt_baro: 30000, gs: 450, track: 90, seen_pos: 1, ...overrides });
 
-const element = () => ({ checked: false, value: '', hidden: false, addEventListener() {}, replaceChildren() {}, textContent: '' });
+const element = () => ({ checked: false, value: '', hidden: false, addEventListener(type, fn) {
+    this.listener = fn;
+  }, replaceChildren() {}, textContent: '' });
 
 describe('traffic on the globe', () => {
   let respond;
   let areaRequests;
   let traffic;
+  let els;
+  let deselected;
+  let stored;
   const view = { lat: 52, lng: 4, altitude: 0.05 };
   const elsFor = () => ({
     flights: element(),
@@ -51,13 +56,26 @@ describe('traffic on the globe', () => {
     }
   }
 
+  // Sets up the traffic module with the layers saved in `stored`.
+  function start() {
+    els = elsFor();
+    deselected = 0;
+    traffic = setupTraffic({ globe: { getGlobeRadius: () => 100 }, els, onSelect() {}, onDeselect: () => deselected++ });
+  }
+  // Switches a layer toggle, as a visitor does.
+  function toggle(name, checked) {
+    els[name].checked = checked;
+    els[name].listener();
+  }
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(START);
     vi.stubGlobal('document', { hidden: false, createElement: () => ({ textContent: '' }) });
     vi.stubGlobal('window', { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 });
     // Flights are switched on.
-    vi.stubGlobal('localStorage', { getItem: () => JSON.stringify({ flights: true }), setItem() {} });
+    stored = { flights: true };
+    vi.stubGlobal('localStorage', { getItem: () => JSON.stringify(stored), setItem() {} });
     vi.stubGlobal('Option', function Option(label, value) {
       Object.assign(this, { label, value });
     });
@@ -75,7 +93,7 @@ describe('traffic on the globe', () => {
         return { ok: true, json: async () => answer };
       }),
     );
-    traffic = setupTraffic({ globe: { getGlobeRadius: () => 100 }, els: elsFor(), onSelect() {}, onDeselect() {} });
+    start();
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -113,6 +131,38 @@ describe('traffic on the globe', () => {
       expect(traffic.selected).toMatchObject({ kind: 'aircraft', id: '484506' });
       expect(traffic.selectedAircraft()).toBeNull();
       expect(traffic.detailsHtml()).toContain('No longer received.');
+    });
+  });
+
+  describe('the layers an aircraft belongs to', () => {
+    const mil = { hex: 'ae1234', flight: 'RCH123', lat: 52.4, lon: 4.8, alt_baro: 28000, gs: 420, track: 85, seen_pos: 1, dbFlags: 1 };
+
+    it('drops the selected civil aircraft when Flights is switched off, though Military flights is on', async () => {
+      stored = { flights: true, military: true };
+      start();
+      await run(300);
+      traffic.select({ kind: 'aircraft', id: '484506' });
+      toggle('military', false);
+      expect(deselected).toBe(0);
+      toggle('military', true);
+      toggle('flights', false);
+      expect(deselected).toBe(1);
+      expect(traffic.selected).toBeNull();
+    });
+
+    it('drops the selected military aircraft when Military flights is switched off, though Flights is on', async () => {
+      stored = { flights: true, military: true };
+      respond = () => feed([klm(), mil]);
+      start();
+      await run(300);
+      traffic.select({ kind: 'aircraft', id: 'ae1234' });
+      expect(traffic.selectedAircraft()).toMatchObject({ military: true });
+      toggle('flights', false);
+      expect(deselected).toBe(0);
+      toggle('flights', true);
+      toggle('military', false);
+      expect(deselected).toBe(1);
+      expect(traffic.selected).toBeNull();
     });
   });
 

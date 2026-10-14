@@ -5,7 +5,7 @@
 // few seconds, which also marks military aircraft, and a worldwide military feed comes from the
 // same. Between reports each aircraft moves along its track at its ground speed. Satellites
 // follow CelesTrak's orbital elements, computed in a worker.
-import { AircraftStore, drawnAltitude, estimatePosition, fromAdsb, fromOpenSky } from './aircraft.js';
+import { AircraftStore, drawnAltitude, estimatePosition, fromAdsb, fromOpenSky, hiddenByLayers } from './aircraft.js';
 import { aircraftLayer, behindGlobe, orbitLine, satelliteLayer, selectionRing } from './trafficlayer.js';
 import { EARTH_RADIUS_KM, orbitClass, orbitPath, parseTle, periodMinutes, satellitePosition, toGeodetic, toSatrec, tleEpoch } from './orbits.js';
 import { aircraftDetailsHtml, aircraftName, satelliteDetailsHtml } from './trafficview.js';
@@ -499,7 +499,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     saveSettings(settings);
     planes.visible = settings.flights || settings.military;
     sats.visible = settings.satellites;
-    if (selected?.kind === 'aircraft' && !(settings.flights || settings.military)) deselect();
+    if (selected?.kind === 'aircraft' && hiddenByLayers(store.byId.get(selected.id), settings)) deselect();
     if (selected?.kind === 'satellite' && (!settings.satellites || selected.group !== settings.group)) deselect();
     if (settings.satellites) loadSatellites(settings.group);
     version++;

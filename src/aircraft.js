@@ -127,6 +127,13 @@ export function drawnAltitude(ac) {
   return (Math.max(0, ac.altitudeFt) * M_PER_FT) / EARTH_RADIUS_M;
 }
 
+// Whether the layers that are on leave `ac` out: civil aircraft show with Flights, military ones
+// with Military flights. An aircraft that is gone is hidden only when both are off.
+export function hiddenByLayers(ac, { flights, military }) {
+  if (!ac) return !(flights || military);
+  return !(ac.military ? military : flights);
+}
+
 // Every aircraft heard from any feed, by ICAO 24-bit address. Each report replaces an older one;
 // details only one feed has (registration, type) are kept.
 export class AircraftStore {
