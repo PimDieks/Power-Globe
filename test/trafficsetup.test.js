@@ -23,7 +23,7 @@ vi.mock('../src/trafficlayer.js', async (importOriginal) => {
     };
   };
   const line = () => {
-    const made = { visible: false, set() { this.visible = true; }, moveEnd() {}, hide() { this.visible = false; }, setViewport() {}, set dash(v) {} };
+    const made = { visible: false, set() { this.visible = true; }, moveEnd() {}, moveStart() {}, hide() { this.visible = false; }, setViewport() {}, set dash(v) {}, set gap(v) {} };
     drawn.lines.push(made);
     return made;
   };
@@ -149,9 +149,14 @@ describe('traffic on the globe', () => {
     const KLM66A = { hex: 'aa0001', flight: 'KLM66A', lat: 51.9, lon: 1.2, alt_baro: 24000, gs: 450, track: 60, seen_pos: 1 };
     const route = { airport_codes: 'EGLL-EHAM', _airports: [{ icao: 'EGLL', iata: 'LHR', name: 'London Heathrow Airport', lat: 51.4706, lon: -0.461941 }, { icao: 'EHAM', iata: 'AMS', name: 'Amsterdam Airport Schiphol', lat: 52.3086, lon: 4.76389 }] };
     let asked;
+    // The track of this flight from Heathrow up to a little behind the aircraft, as OpenSky would give it now.
+    const flown = () => {
+      const now = Date.now() / 1000;
+      return { callsign: 'KLM66A', endTime: now - 120, points: [[now - 900, 51.4776, -0.4469, -300, 0], [now - 120, 51.85, 1.0, 15000, 0]] };
+    };
 
     // Answers the feed as the other tests do, and tracks, routes and airports as the services do.
-    function services({ track = { points: [[1, 51.4776, -0.4469, -300, 0], [2, 51.6, 0.4, 15000, 0]] } } = {}) {
+    function services({ track = flown() } = {}) {
       const feedFetch = globalThis.fetch;
       asked = [];
       vi.stubGlobal(

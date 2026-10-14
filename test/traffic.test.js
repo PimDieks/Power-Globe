@@ -62,6 +62,13 @@ describe('fromAdsb', () => {
     expect(fromAdsb({ now: 1760000000500, ac: [data.ac[1]] })[0].seen).toBe(inSeconds[0].seen);
   });
 
+  it('marks an address that is not an ICAO one (a "~" in front), which OpenSky has no track for', () => {
+    const [mil, klm] = fromAdsb(data);
+    expect([mil.nonIcao, klm.nonIcao]).toEqual([false, false]);
+    const [other] = fromAdsb({ now: 1760000000000, ac: [{ hex: '~2A0001', lat: 52, lon: 4 }] });
+    expect(other).toMatchObject({ id: '2a0001', nonIcao: true });
+  });
+
   it('treats everything in the military feed as military', () => {
     expect(fromAdsb({ ac: [data.ac[1]] }, { military: true })[0].military).toBe(true);
   });

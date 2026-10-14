@@ -607,7 +607,10 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
   // Pixel sizes for the zoom: small when looking at the whole globe, bigger zoomed in.
   function resize(altitude) {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    planes.size = Math.max(6, Math.min(20, 20 * (0.12 / Math.max(altitude, 0.01)) ** 0.35)) * dpr;
+    const planePx = Math.max(6, Math.min(20, 20 * (0.12 / Math.max(altitude, 0.01)) ** 0.35));
+    planes.size = planePx * dpr;
+    // The plane drawn in the sprite reaches about 0.44 of its width from the middle.
+    lines.setSprite(planePx * 0.44);
     sats.size = Math.max(2.5, Math.min(5, 4 * (1.2 / Math.max(altitude, 0.05)) ** 0.25)) * dpr;
     ring.size = 34 * dpr;
     planes.setViewport(window.innerWidth, window.innerHeight);
@@ -703,7 +706,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
   function select(item) {
     selected = item;
     orbit.hide();
-    if (item.kind === 'aircraft') lines.start(item.id);
+    if (item.kind === 'aircraft') lines.start(item.id, store.byId.get(item.id));
     else lines.stop();
     if (item.kind === 'satellite') {
       const tle = satellites.tles[item.index];

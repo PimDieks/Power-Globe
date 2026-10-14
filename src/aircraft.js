@@ -84,6 +84,8 @@ export function fromAdsb(data, { military = false } = {}) {
       const altitude = onGround ? 0 : (a.alt_baro ?? a.alt_geom);
       return {
         id: String(a.hex).replace(/^~/, '').toLowerCase(),
+        // A "~" in front marks an address that is not an ICAO one (relayed TIS-B targets).
+        nonIcao: String(a.hex).startsWith('~'),
         callsign: (a.flight ?? '').trim(),
         registration: a.r ?? '',
         type: a.t ?? '',

@@ -841,8 +841,11 @@ export function setupMapFeatures(globe) {
     const cities = CITIES.filter((city) => city.tier <= tier && !(marker && city.name === marker.name));
     // An airport with a label of its own on the map (see airportmap.js) needs no marker.
     const labelled = new Set(runwayLabels.map((l) => l.ident).filter(Boolean));
-    const shown = airports.filter((a) => !labelled.has(a.ident) && !(marker && a.lat === marker.lat && a.lng === marker.lng));
-    globe.htmlElementsData([...cities, ...runwayLabels, ...shown, ...flightEnds, ...(marker ? [marker] : [])]);
+    // An airport at the end of a flight line has that label instead of its own, so it has just one.
+    const ends = new Set(flightEnds.map((e) => e.ident).filter(Boolean));
+    const shown = airports.filter((a) => !labelled.has(a.ident) && !ends.has(a.ident) && !(marker && a.lat === marker.lat && a.lng === marker.lng));
+    const named = runwayLabels.filter((l) => !(l.kind === 'airport' && ends.has(l.ident)));
+    globe.htmlElementsData([...cities, ...named, ...shown, ...flightEnds, ...(marker ? [marker] : [])]);
   }
 
   async function loadBorders() {
@@ -878,15 +881,16 @@ export function setupMapFeatures(globe) {
   // can never be left at a previous layout's position.
   function setRunwayLabels(labels, onSelect) {
     if (!labels.length && !runwayLabels.length) return;
-    runwayLabels = labels.map((label) => ({ lat: label.lat, lng: label.lng, ident: label.airport?.ident, el: runwayLabelElement(label, onSelect) }));
+    runwayLabels = labels.map((label) => ({ lat: label.lat, lng: label.lng, ident: label.airport?.ident, kind: label.kind, el: runwayLabelElement(label, onSelect) }));
     refreshLabels();
   }
 
   // Labels for the airports a selected aircraft left from and is going to: [{ lat, lng, text,
-  // title, kind }], or [] to remove them.
+  // title, ident, kind }] (`ident` is the airport's ICAO code, whose own label is then left out), or
+  // [] to remove them.
   function setFlightEnds(ends) {
     if (!ends.length && !flightEnds.length) return;
-    flightEnds = ends.map((end) => ({ lat: end.lat, lng: end.lng, el: flightEndElement(end) }));
+    flightEnds = ends.map((end) => ({ lat: end.lat, lng: end.lng, ident: end.ident, el: flightEndElement(end) }));
     refreshLabels();
   }
 

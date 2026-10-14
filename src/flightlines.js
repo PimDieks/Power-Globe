@@ -4,7 +4,7 @@
 // flightroute.js for the logic; traffic.js calls this for the aircraft it has selected.
 import { drawnAltitude } from './aircraft.js';
 import { flightLine } from './trafficlayer.js';
-import { ARRIVED_KM, acceptRoute, airportCode, departureAirport, distanceKm, greatCircle, joinPath, routeUrl } from './flightroute.js';
+import { ARRIVED_KM, NO_TRACK, acceptRoute, airportCode, departureAirport, distanceKm, greatCircle, joinPath, lowStart, routeUrl, trackFits } from './flightroute.js';
 
 // An amber that shows on the satellite imagery, the light maps and the weather layers.
 const COLOR = [1, 0.76, 0.28];
@@ -14,26 +14,32 @@ const MAX_TRAIL = 3000;
 // The dashes are about this many pixels long, whatever the zoom.
 const DASH_PX = 9;
 const KM_PER_STEP = 100;
+// An aircraft that takes off again has a new flight, but not twice within this long.
+const RESTART_MIN_MS = 60_000;
+const ICAO_ADDRESS = /^[0-9a-f]{6}$/;
 
-export function setupFlightLines({ globe, scenePoint, onLabels, loadAirports, loadTrack, loadRoute }) {
+export function setupFlightLines({ globe, scenePoint, onLabels, loadAirports, loadTrack, loadRoute, now = Date.now }) {
   const R = globe.getGlobeRadius();
-  const past = flightLine(globe, { color: COLOR });
-  const ahead = flightLine(globe, { color: COLOR, dashed: true, alpha: 0.9 });
+  // The solid line stops short of the aircraft and the dashed one starts short of it, by about the
+  // radius of its sprite (see setSprite), so the sprite shows.
+  const past = flightLine(globe, { color: COLOR, tip: 'end' });
+  const ahead = flightLine(globe, { color: COLOR, dashed: true, alpha: 0.9, tip: 'start' });
   // The selected aircraft's lines and what is known about its flight, or null.
   let state = null;
 
   function labels() {
     const list = [];
-    const add = (airport, kind) => airport && list.push({ lat: airport.lat, lng: airport.lng, text: airportCode(airport), title: airport.name, kind });
-    add(state?.departure, 'from');
-    add(state?.leg?.to, 'to');
+    const add = (airport, ident, kind) => airport && list.push({ lat: airport.lat, lng: airport.lng, text: airportCode(airport), title: airport.name, ident, kind });
+    add(state?.departure, state?.departure?.ident, 'from');
+    add(state?.leg?.to, state?.leg?.to?.icao, 'to');
     onLabels?.(list);
   }
 
+  // The airport the track began at, once the track and the airport list are both in.
   function airportReady() {
     if (!state || state.departureDone || state.trackState !== 'ok' || !state.airports) return;
     state.departureDone = true;
-    state.departure = departureAirport(state.track[0], state.airports);
+    state.departure = departureAirport(state.track, state.airports);
     if (state.departure) labels();
   }
 
@@ -48,18 +54,41 @@ export function setupFlightLines({ globe, scenePoint, onLabels, loadAirports, lo
     past.set(flat);
   }
 
-  // The dashed line, from the last report to the destination, sinking to the ground there.
+  // The dashed line, from the aircraft to the destination, sinking to the ground there.
   function drawAhead() {
     const to = state?.leg?.to;
     if (!to || !state.report || distanceKm(state.report, to) < ARRIVED_KM) {
       ahead.hide();
       return;
     }
-    const steps = Math.min(120, Math.max(4, Math.ceil(distanceKm(state.report, to) / KM_PER_STEP)));
-    const points = greatCircle(state.report, to, steps);
+    const start = state.head ?? state.report;
+    const steps = Math.min(120, Math.max(4, Math.ceil(distanceKm(start, to) / KM_PER_STEP)));
+    const points = greatCircle(start, to, steps);
     const flat = new Float32Array(points.length * 3);
     points.forEach((p, i) => scenePoint(p.lat, p.lng, state.report.altitude * (1 - p.f), flat, i));
     ahead.set(flat);
+  }
+
+  // The track is used once it and the aircraft's report are both known: only if it is this
+  // aircraft's flight now (see trackFits).
+  function settleTrack() {
+    if (!state || state.trackState !== 'loading' || !state.loaded || !state.latest) return;
+    const fits = trackFits(state.loaded, state.latest);
+    state.track = fits ? state.loaded.points : [];
+    state.trackState = fits ? 'ok' : 'none';
+    // The airports are only needed to name where a track began, so only a track that began low asks.
+    if (fits && lowStart(state.track[0])) {
+      const mine = state;
+      loadAirports()
+        .then((airports) => {
+          if (state !== mine) return;
+          mine.airports = airports;
+          airportReady();
+        })
+        .catch(() => {});
+    }
+    drawPast();
+    decide();
   }
 
   // Whether the route fits the aircraft is judged once, when the track, the route and the
@@ -68,22 +97,30 @@ export function setupFlightLines({ globe, scenePoint, onLabels, loadAirports, lo
     if (!state || state.decided || state.trackState === 'loading' || state.routeState !== 'done' || !state.report) return;
     state.decided = true;
     const position = state.head ?? state.report;
-    state.leg = state.route ? acceptRoute(state.route, { position, trackStart: state.trackState === 'ok' ? state.track[0] : null }) : null;
+    state.leg = state.route
+      ? acceptRoute(state.route, { position, trackStart: state.trackState === 'ok' ? state.track[0] : null, heading: state.heading })
+      : null;
     labels();
     drawAhead();
   }
 
-  function start(id) {
-    if (state?.id === id) return;
-    stop();
+  // Starts afresh for an aircraft: its track (`fresh` for a new flight, not the cached one), then
+  // what is known of its route once its callsign is.
+  function begin(id, ac, { fresh = false } = {}) {
     const mine = {
       id,
+      begun: now(),
       track: [],
       trackState: 'loading',
+      loaded: null,
       trail: [],
       lastSeen: 0,
+      latest: null,
       report: null,
       head: null,
+      heading: null,
+      onGround: null,
+      callsign: null,
       airports: null,
       departure: null,
       departureDone: false,
@@ -93,21 +130,21 @@ export function setupFlightLines({ globe, scenePoint, onLabels, loadAirports, lo
       decided: false,
     };
     state = mine;
-    loadTrack(id).then((points) => {
-      if (state !== mine) return;
-      mine.track = points;
-      mine.trackState = points.length ? 'ok' : 'none';
-      airportReady();
-      drawPast();
-      decide();
-    });
-    loadAirports()
-      .then((airports) => {
+    // Tracks are only asked for aircraft with an ICAO address (OpenSky has no others).
+    if (ac?.nonIcao || !ICAO_ADDRESS.test(id)) mine.loaded = NO_TRACK;
+    else {
+      loadTrack(id, { fresh }).then((track) => {
         if (state !== mine) return;
-        mine.airports = airports;
-        airportReady();
-      })
-      .catch(() => {});
+        mine.loaded = track;
+        settleTrack();
+      });
+    }
+  }
+
+  function start(id, ac) {
+    if (state?.id === id) return;
+    stop();
+    begin(id, ac);
   }
 
   function stop() {
@@ -118,38 +155,74 @@ export function setupFlightLines({ globe, scenePoint, onLabels, loadAirports, lo
     onLabels?.([]);
   }
 
+  // Called when a report shows the flight is not the one being drawn: a new callsign, or take-off
+  // after being on the ground. Everything is asked for afresh.
+  function restart(ac) {
+    past.hide();
+    ahead.hide();
+    begin(state.id, ac, { fresh: true });
+    labels();
+  }
+
+  // The aircraft's route is looked up, when it has a callsign that can have one.
+  function lookUpRoute(ac) {
+    const mine = state;
+    mine.callsign = ac.callsign || '';
+    mine.routeState = 'idle';
+    mine.route = null;
+    mine.leg = null;
+    mine.decided = false;
+    if (routeUrl(ac.callsign)) {
+      mine.routeState = 'loading';
+      loadRoute(ac.callsign).then((route) => {
+        if (state !== mine || mine.callsign !== (ac.callsign || '')) return;
+        mine.route = route;
+        mine.routeState = 'done';
+        decide();
+      });
+    } else {
+      // An aircraft with no callsign, or one that cannot have a route, has none to look up.
+      mine.routeState = 'done';
+    }
+  }
+
+  // The altitude to draw a report at: a missing one is the last known, not the ground.
+  function altitudeOf(ac) {
+    const last = joinPath(state.track, state.trail).at(-1);
+    const altitudeFt = ac.altitudeFt ?? (ac.onGround ? null : (last?.altitudeFt ?? null));
+    return { altitudeFt, altitude: drawnAltitude({ onGround: ac.onGround, altitudeFt }) };
+  }
+
   // Called every frame with the selected aircraft's latest report and where it is drawn now.
-  // Geometry changes only when a report comes in, apart from the aircraft's end of the solid line.
+  // Geometry changes only when a report comes in, apart from the aircraft's end of the lines.
   function frame(ac, estimate, altitude) {
     if (!state) return;
-    const scale = (DASH_PX * 2 * Math.tan((25 * Math.PI) / 180) * Math.max(altitude, 0.002) * R) / window.innerHeight;
-    ahead.dash = scale;
+    ahead.dash = (DASH_PX * 2 * Math.tan((25 * Math.PI) / 180) * Math.max(altitude, 0.002) * R) / window.innerHeight;
     if (!ac) return;
-    if (state.routeState === 'idle') {
-      // An aircraft with no callsign, or one that cannot have a route, has none to look up.
-      if (routeUrl(ac.callsign)) {
-        state.routeState = 'loading';
-        const mine = state;
-        loadRoute(ac.callsign).then((route) => {
-          if (state !== mine) return;
-          mine.route = route;
-          mine.routeState = 'done';
-          decide();
-        });
-      } else {
-        state.routeState = 'done';
-      }
-    }
     if (ac.seen > state.lastSeen) {
+      // A report of another flight: a callsign that changed, or take-off after being on the ground.
+      const callsign = ac.callsign || '';
+      const changed = state.callsign !== null && state.callsign !== '' && callsign !== state.callsign;
+      const tookOff = state.onGround === true && ac.onGround === false && now() - state.begun >= RESTART_MIN_MS;
+      if (changed || tookOff) {
+        restart(ac);
+        return frame(ac, estimate, altitude);
+      }
+      // The first callsign, or one that arrived late, is the one to look up.
+      if (state.callsign === null || (state.callsign === '' && callsign !== '')) lookUpRoute(ac);
       state.lastSeen = ac.seen;
-      const altitudeScene = drawnAltitude(ac);
-      state.report = { lat: ac.lat, lng: ac.lng, altitude: altitudeScene };
+      state.latest = ac;
+      state.onGround = ac.onGround;
+      state.heading = ac.onGround || ac.track == null ? null : ac.track;
+      const { altitudeFt, altitude: sceneAltitude } = altitudeOf(ac);
+      state.report = { lat: ac.lat, lng: ac.lng, altitude: sceneAltitude };
       const last = joinPath(state.track, state.trail).at(-1);
       if (!last || distanceKm(last, ac) > MIN_STEP_KM || last.onGround !== ac.onGround) {
-        state.trail.push({ t: ac.seen / 1000, lat: ac.lat, lng: ac.lng, altitudeFt: ac.altitudeFt, onGround: ac.onGround });
+        state.trail.push({ t: ac.seen / 1000, lat: ac.lat, lng: ac.lng, altitudeFt, onGround: ac.onGround });
         if (state.trail.length > MAX_TRAIL) state.trail.shift();
       }
       state.head = null;
+      settleTrack();
       drawPast();
       drawAhead();
       decide();
@@ -160,6 +233,7 @@ export function setupFlightLines({ globe, scenePoint, onLabels, loadAirports, lo
       const out = [0, 0, 0];
       scenePoint(at.lat, at.lng, state.head.altitude, out, 0);
       past.moveEnd(out[0], out[1], out[2]);
+      ahead.moveStart(out[0], out[1], out[2]);
     }
   }
 
@@ -178,5 +252,11 @@ export function setupFlightLines({ globe, scenePoint, onLabels, loadAirports, lo
     ahead.setViewport(w, h);
   }
 
-  return { start, stop, frame, info, setViewport };
+  // The radius in pixels of the selected aircraft's sprite, which the lines stay clear of.
+  function setSprite(radius) {
+    past.gap = radius;
+    ahead.gap = radius;
+  }
+
+  return { start, stop, frame, info, setViewport, setSprite };
 }
