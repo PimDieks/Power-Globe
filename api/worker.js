@@ -18,6 +18,13 @@
 //                                 flight relay, which is too much for a Worker), cached 1 min; a
 //                                 backup up to 10 min old is marked stale; says so when the
 //                                 relay is off or its road job (NDW=1) is not switched on
+//   GET /access/trains?airport=EHAM  the next trains from the airport's station and the disruptions
+//                                 through it (NS Reisinformatie API; needs NS_API_KEY, else says so
+//                                 without asking NS), cached 1 min (disruptions 2 min); a backup up
+//                                 to 5 min old is marked stale
+//   GET /access/buses?airport=EHAM  the buses due at the terminal stops in the next hour (OVapi, the
+//                                 open real-time feed of the Dutch bus operators), with delays and
+//                                 the cancellations the feed reports, cached 1 min; stale backup as above
 //
 // The flight feeds limit or refuse Cloudflare's servers, whose addresses many sites share. With
 // a flight relay (relay/api-relay.mjs) running on a machine of one's own, such as a Raspberry Pi at
@@ -35,6 +42,7 @@
 // Settings (wrangler.toml [vars] or secrets): ALLOWED_ORIGINS, a comma-separated list of sites
 // allowed to use it ("*" for any); OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET (optional) for an
 // OpenSky account's larger allowance; OPENAIP_API_KEY (optional) for the aeronautical chart;
+// NS_API_KEY (optional) for the train times (a key from apiportal.ns.nl);
 // FLIGHT_RELAY_URL and FLIGHT_RELAY_KEY (optional) for the flight relay: its public address and
 // the secret it was started with.
 
@@ -62,9 +70,33 @@ const BACKUP_SECONDS = 6 * 3600;
 // Road traffic is only worth showing while it is recent.
 export const ACCESS_BACKUP_SECONDS = 600;
 const ACCESS_SECONDS = 60;
+// Train and bus times are worth even less once old.
+export const ACCESS_TRANSIT_BACKUP_SECONDS = 300;
+const DISRUPTIONS_SECONDS = 120;
 // The airports the relay reads road traffic for (the Dutch ones with scheduled flights, as in
 // public/data/ndw-sites.json); asking for any other is refused here, not passed on.
 export const ACCESS_AIRPORTS = ['EHAM', 'EHEH', 'EHRD', 'EHBK', 'EHGG'];
+// The stations the train times are asked for: a Dutch airport with a railway station of its own.
+// Schiphol is the only one (Eindhoven, Rotterdam The Hague, Maastricht Aachen and Groningen Airport
+// Eelde have none). `uic` is the station's UIC code, as the disruptions name their stations.
+export const TRAIN_STATIONS = { EHAM: { code: 'ASB', uic: '8400058', name: 'Schiphol Airport' } };
+// The bus stops OVapi is asked about, per airport: stop areas (/stopareacode) and single stops
+// (/tpc, by timing point code). The stop area "schns" (Schiphol, Airport) holds only one stop, 57330760,
+// which has no passes; the terminal's bus bays are separate stops that belong to no stop area, so they
+// are asked for by code (checked on 2026-10-14): the "Schiphol, Airport" bays 57330221, 57330222,
+// 57330224, 57330620, 57330630, 57330730 and 57332107, and the "Schiphol Airport/Plaza" stops
+// 57330740 and 57332108. The stop areas of Uiverweg (schuvw), Marechaussee (schjkm) and Anchoragelaan
+// (schang) are offices and car parks away from the terminal, so they are left out, and so is the
+// car park shuttle at "Schiphol, Plaza" (57339004).
+export const BUS_STOPS = {
+  EHAM: { areas: [], stops: ['57330760', '57330221', '57330222', '57330224', '57330620', '57330630', '57330730', '57330740', '57332107', '57332108'] },
+};
+export const BUS_WINDOW_MINUTES = 60;
+const MAX_BUS_PASSES = 60;
+const MAX_TRAINS = 12;
+const MAX_DISRUPTIONS = 6;
+const OVAPI = 'http://v0.ovapi.nl';
+const NS_API = 'https://gateway.apiportal.ns.nl/reisinformatie-api/api';
 // Give up on a service after this long, and remember a failure for a while so that neither the
 // service nor visitors are kept waiting on it again straight away.
 const UPSTREAM_TIMEOUT_MS = 10_000;
@@ -327,13 +359,247 @@ async function accessRoads(url, fetchFn, env) {
   throw new HttpError(502, `The relay answered ${res.status}${body.error ? ` (${body.error})` : ''}`);
 }
 
-// A backup of the road answer as a stale answer with its age, or undefined once it is older than
-// the road data is worth. Done on the text: parsing it would cost more than the free plan allows.
-async function staleAccess(backup, now = Date.now()) {
+// ---- Trains and buses ----
+
+const airportOf = (url, table, what) => {
+  const airport = (url.searchParams.get('airport') ?? '').toUpperCase();
+  if (!/^[A-Z]{4}$/.test(airport)) throw new HttpError(400, 'airport: a 4-letter ICAO code');
+  if (!Object.hasOwn(table, airport)) throw new HttpError(404, `No ${what} data for ${airport}`);
+  return airport;
+};
+
+// Daylight saving time in the Netherlands runs from the last Sunday of March to the last Sunday of
+// October, both at 01:00 UTC.
+const HOUR = 3_600_000;
+const lastSundayUtc = (year, month) => {
+  const d = new Date(Date.UTC(year, month + 1, 0, 1));
+  d.setUTCDate(d.getUTCDate() - d.getUTCDay());
+  return d.getTime();
+};
+const amsterdamOffset = (utcMs) => {
+  const year = new Date(utcMs).getUTCFullYear();
+  return utcMs >= lastSundayUtc(year, 2) && utcMs < lastSundayUtc(year, 9) ? 2 * HOUR : HOUR;
+};
+
+// A time as the Dutch bus feed writes it, local time without a zone ("2026-10-14T21:52:00"), in ms
+// since 1970, or null.
+export function amsterdamMs(text) {
+  const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d))?/.exec(text ?? '');
+  if (!m) return null;
+  const wall = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] ?? 0));
+  const summer = wall - 2 * HOUR;
+  return amsterdamOffset(summer) === 2 * HOUR ? summer : wall - HOUR;
+}
+
+// A time with a zone offset, as NS writes it ("2026-10-14T22:05:00+0200"), in ms, or null.
+const zonedMs = (text) => {
+  const ms = Date.parse(String(text ?? '').replace(/([+-]\d\d)(\d\d)$/, '$1:$2'));
+  return Number.isFinite(ms) ? ms : null;
+};
+
+// Keeps what matters of NS's departures: { planned, actual, delayMin, destination, track,
+// plannedTrack, cancelled, kind } in time order. Written for the documented shape
+// ({ payload: { departures: [...] } }) and tolerant of what it lacks. Null when the body has no list.
+export function compactDepartures(body, now = Date.now()) {
+  const list = body?.payload?.departures ?? body?.departures;
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  for (const d of list) {
+    const planned = zonedMs(d?.plannedDateTime);
+    if (planned == null) continue;
+    const actual = zonedMs(d.actualDateTime) ?? planned;
+    const cancelled = d.cancelled === true;
+    // A train that left more than a minute ago is no longer a departure.
+    if (!cancelled && Math.max(planned, actual) < now - 60_000) continue;
+    out.push({
+      planned,
+      actual,
+      delayMin: cancelled ? 0 : Math.max(0, Math.round((actual - planned) / 60_000)),
+      destination: String(d.direction ?? '').slice(0, 60) || null,
+      track: d.actualTrack ?? d.plannedTrack ?? null,
+      plannedTrack: d.plannedTrack ?? null,
+      cancelled,
+      kind: d.product?.shortCategoryName ?? d.product?.categoryCode ?? null,
+    });
+  }
+  out.sort((a, b) => a.planned - b.planned);
+  return out.slice(0, MAX_TRAINS);
+}
+
+// The current disruptions that touch `station` ({ code, uic, name }): { id, kind, title, start, end,
+// cause } with kind 'disruption' or 'maintenance'. One touches it when a station of one of its
+// sections is the station (by station code or UIC code) or its title names the station. Null when
+// the body is not a list of disruptions.
+export function compactDisruptions(body, station) {
+  const list = Array.isArray(body) ? body : body?.payload?.disruptions ?? body?.payload ?? body?.disruptions;
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  for (const d of list) {
+    if (!d || d.isActive === false) continue;
+    const stations = (d.publicationSections ?? []).flatMap((p) => [...(p?.section?.stations ?? []), ...(p?.consequence?.section?.stations ?? [])]);
+    const touches =
+      stations.some((x) => String(x?.stationCode ?? '').toUpperCase() === station.code || String(x?.uicCode ?? '') === station.uic) ||
+      String(d.title ?? '').toLowerCase().includes(station.name.toLowerCase());
+    if (!touches) continue;
+    out.push({
+      id: String(d.id ?? ''),
+      kind: d.type === 'MAINTENANCE' ? 'maintenance' : 'disruption',
+      title: String(d.title ?? d.topic ?? 'Disruption').slice(0, 120),
+      start: zonedMs(d.start),
+      end: zonedMs(d.end),
+      cause: d.timespans?.[0]?.cause?.label ?? null,
+    });
+  }
+  out.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'disruption' ? -1 : 1));
+  return out.slice(0, MAX_DISRUPTIONS);
+}
+
+// Disruptions change slowly, so they are kept for two minutes in the edge cache, apart from the
+// departures. Null when they cannot be had (the departures are still of use).
+async function disruptionsFor(station, fetchFn, env, cache, origin) {
+  const key = new Request(`${origin}/__feeds/ns/disruptions/${station.code}`);
+  try {
+    const kept = await cache?.match(key);
+    if (kept) return (await kept.json()).list ?? null;
+  } catch {
+    // Not kept, or unreadable: ask again.
+  }
+  let list;
+  try {
+    const res = await upstream(fetchFn, `${NS_API}/v3/disruptions?isActive=true`, { headers: { 'Ocp-Apim-Subscription-Key': env.NS_API_KEY } });
+    list = compactDisruptions(await res.json(), station);
+  } catch (err) {
+    console.error('NS disruptions failed', err.message);
+    return null;
+  }
+  if (list) {
+    try {
+      await cache?.put(key, new Response(JSON.stringify({ list }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${DISRUPTIONS_SECONDS}` } }));
+    } catch (err) {
+      console.error('Could not keep the disruptions', err);
+    }
+  }
+  return list;
+}
+
+// The next trains from an airport's station, and the disruptions through it. Without NS_API_KEY it
+// says so and asks nobody.
+async function accessTrains(url, fetchFn, env, cache) {
+  const airport = airportOf(url, TRAIN_STATIONS, 'train');
+  if (!env.NS_API_KEY) return unavailable(airport, 'needs an NS API key');
+  const station = TRAIN_STATIONS[airport];
+  const [res, disruptions] = await Promise.all([
+    upstream(fetchFn, `${NS_API}/v2/departures?station=${station.code}&maxJourneys=${MAX_TRAINS + 6}&lang=en`, { headers: { 'Ocp-Apim-Subscription-Key': env.NS_API_KEY } }),
+    disruptionsFor(station, fetchFn, env, cache, url.origin),
+  ]);
+  const now = Date.now();
+  const departures = compactDepartures(await res.json().catch(() => null), now);
+  if (!departures) throw new HttpError(502, 'NS answered without departures');
+  return new Response(JSON.stringify({ available: true, airport, source: 'NS', station: station.name, fetched: now, departures, disruptions }), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${ACCESS_SECONDS}` },
+  });
+}
+
+// Every stop of an OVapi answer, whether it came from /tpc ({ code: { Stop, Passes } }) or from
+// /stopareacode ({ area: { code: { Stop, Passes } } }).
+function* ovapiStops(body) {
+  for (const value of Object.values(body ?? {})) {
+    if (!value || typeof value !== 'object') continue;
+    if (value.Passes && typeof value.Passes === 'object') yield value;
+    else yield* ovapiStops(value);
+  }
+}
+
+const RUNNING = new Set(['DRIVING', 'ARRIVED', 'PASSED']);
+
+// The buses due in the next `windowMinutes` at the stops of one or more OVapi answers, merged:
+// { line, destination, operator, stop, planned, expected, delayMin, status, cancelled, contradicted }
+// by expected time. The delay is expected against scheduled in minutes, never below 0 (a bus ahead of
+// time is on time). A pass the feed marks CANCEL is a cancellation only when its trip is not also
+// reported DRIVING, ARRIVED or PASSED at any stop (the feed keeps CANCEL on trips that run); one that
+// is contradicted that way is `contradicted` and not `cancelled`. Buses that end their trip at the
+// stop are arrivals and are left out.
+export function mergeBusPasses(bodies, now = Date.now(), windowMinutes = BUS_WINDOW_MINUTES) {
+  const found = [];
+  const seen = new Set();
+  const running = new Set();
+  const tripOf = (p) => [p.DataOwnerCode, p.LinePlanningNumber ?? p.LinePublicNumber, p.OperationDate ?? p.LocalServiceLevelCode, p.JourneyNumber].join(':');
+  for (const body of bodies) {
+    for (const stop of ovapiStops(body)) {
+      for (const p of Object.values(stop.Passes)) {
+        const trip = tripOf(p);
+        if (RUNNING.has(p.TripStopStatus)) running.add(trip);
+        // Arrivals that end the trip here, and buses that are gone, are not departures.
+        if (p.JourneyStopType === 'LAST' || p.TripStopStatus === 'PASSED') continue;
+        const planned = amsterdamMs(p.TargetDepartureTime ?? p.TargetArrivalTime);
+        if (planned == null) continue;
+        const expected = amsterdamMs(p.ExpectedDepartureTime ?? p.ExpectedArrivalTime) ?? planned;
+        const stopCode = p.UserStopCode ?? p.TimingPointCode ?? stop.Stop?.TimingPointCode;
+        const id = `${trip}@${stopCode}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        found.push({ p, trip, planned, expected, stopName: stop.Stop?.TimingPointName ?? p.TimingPointName ?? null });
+      }
+    }
+  }
+  const until = now + windowMinutes * 60_000;
+  return found
+    .filter((x) => x.expected >= now - 60_000 && Math.min(x.planned, x.expected) <= until)
+    .sort((a, b) => a.expected - b.expected || a.planned - b.planned)
+    .slice(0, MAX_BUS_PASSES)
+    .map(({ p, trip, planned, expected, stopName }) => {
+      const flagged = p.TripStopStatus === 'CANCEL';
+      return {
+        line: String(p.LinePublicNumber ?? ''),
+        destination: String(p.DestinationName50 ?? '').slice(0, 50) || null,
+        operator: p.OperatorCode ?? p.DataOwnerCode ?? null,
+        stop: stopName,
+        planned,
+        expected,
+        delayMin: flagged ? 0 : Math.max(0, Math.round((expected - planned) / 60_000)),
+        status: p.TripStopStatus ?? 'UNKNOWN',
+        cancelled: flagged && !running.has(trip),
+        contradicted: flagged && running.has(trip),
+      };
+    });
+}
+
+// Buses at the terminal stops of an airport in the next hour (OVapi): one request for the single
+// stops and one for each stop area, asked together. The answer fails (so that a backup is served)
+// only when none of them answered.
+async function accessBuses(url, fetchFn) {
+  const airport = airportOf(url, BUS_STOPS, 'bus');
+  const { areas, stops } = BUS_STOPS[airport];
+  const urls = [...(stops.length ? [`${OVAPI}/tpc/${stops.join(',')}`] : []), ...areas.map((a) => `${OVAPI}/stopareacode/${a}`)];
+  const settled = await Promise.allSettled(urls.map((u) => upstream(fetchFn, u, { headers: { Accept: 'application/json', 'Accept-Encoding': 'gzip' } }).then((r) => r.json())));
+  const bodies = settled.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+  if (!bodies.length) throw new HttpError(502, settled.find((r) => r.status === 'rejected')?.reason?.message ?? 'OVapi answered without stops');
+  const now = Date.now();
+  const passes = mergeBusPasses(bodies, now);
+  return new Response(
+    JSON.stringify({
+      available: true,
+      airport,
+      source: 'OVapi',
+      fetched: now,
+      windowMinutes: BUS_WINDOW_MINUTES,
+      partial: bodies.length < urls.length,
+      // The feed's cancellations are often wrong: they are reported, not known.
+      cancellations: 'reported',
+      cancellationsReported: passes.filter((x) => x.cancelled).length,
+      passes,
+    }),
+    { headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${ACCESS_SECONDS}` } },
+  );
+}
+
+// A backup of an access answer as a stale answer with its age, or undefined once it is older than
+// `maxSeconds`. Done on the text: parsing it would cost more than the free plan allows.
+async function staleAccess(backup, now = Date.now(), maxSeconds = ACCESS_BACKUP_SECONDS) {
   if (!backup) return undefined;
   const text = await backup.text();
   const age = now - Number(/"fetched":(\d+)/.exec(text)?.[1]);
-  if (!(age >= 0) || age > ACCESS_BACKUP_SECONDS * 1000 || !text.startsWith('{')) return undefined;
+  if (!(age >= 0) || age > maxSeconds * 1000 || !text.startsWith('{')) return undefined;
   return new Response(`{"stale":true,"ageSeconds":${Math.round(age / 1000)},${text.slice(1)}`, {
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=30', 'X-Power-Globe-Backup': '1' },
   });
@@ -342,6 +608,8 @@ async function staleAccess(backup, now = Date.now()) {
 // Where an answer is kept in the edge cache. A track is kept per aircraft, whatever else the
 // request carries (the case of the address, other parameters), so that none of those can ask
 // OpenSky again for the same aircraft.
+const accessKind = (path) => ({ '/access/roads': 'roads', '/access/trains': 'trains', '/access/buses': 'buses' })[path.replace(/\/+$/, '')] ?? null;
+
 function cacheUrl(url) {
   const path = url.pathname.replace(/\/+$/, '');
   if (path === '/track') {
@@ -352,7 +620,7 @@ function cacheUrl(url) {
   if (path === '/metar' || path === '/taf') {
     return `${url.origin}${path}?ids=${(url.searchParams.get('ids') ?? '').toUpperCase()}`;
   }
-  if (path === '/access/roads') return `${url.origin}${path}?airport=${(url.searchParams.get('airport') ?? '').toUpperCase()}`;
+  if (accessKind(path)) return `${url.origin}${path}?airport=${(url.searchParams.get('airport') ?? '').toUpperCase()}`;
   return url.toString();
 }
 
@@ -373,15 +641,18 @@ export async function route(url, env = {}, fetchFn = fetch, cache) {
     return json(
       {
         name: 'Power Globe API',
-        routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/track?icao24=', '/metar?ids=', '/taf?ids=', '/access/roads?airport=', '/satellites/<group>', '/forecast?', '/tiles/openaip/<z>/<x>/<y>.png'],
+        routes: ['/flights/global', '/flights/area?lat=&lon=&nm=', '/flights/military', '/track?icao24=', '/metar?ids=', '/taf?ids=', '/access/roads?airport=', '/access/trains?airport=', '/access/buses?airport=', '/satellites/<group>', '/forecast?', '/tiles/openaip/<z>/<x>/<y>.png'],
         opensky: openskyAccount(env) ? 'account' : 'anonymous',
         chart: env.OPENAIP_API_KEY ? 'openAIP' : 'no key',
         relay: relayOn(env) ? 'on' : 'off',
+        trains: env.NS_API_KEY ? 'NS key set' : 'no key',
       },
       300,
     );
   }
   if (path === '/access/roads') return accessRoads(url, fetchFn, env);
+  if (path === '/access/trains') return accessTrains(url, fetchFn, env, cache);
+  if (path === '/access/buses') return accessBuses(url, fetchFn);
   if (path === '/flights/global') {
     const res = await upstream(fetchFn, 'https://opensky-network.org/api/states/all?extended=1', { headers: await openskyHeaders(fetchFn, env) }, env);
     // Passed on unread: reading and rewriting the worldwide answer (over 1 MB) takes longer than
@@ -483,8 +754,10 @@ export default {
     const url = new URL(request.url);
     const cache = globalThis.caches?.default;
     const key = new Request(cacheUrl(url), { method: 'GET' });
-    const isAccess = url.pathname.replace(/\/+$/, '') === '/access/roads';
-    const backupKey = new Request(isAccess ? `${new URL(cacheUrl(url)).origin}/__backup/access/roads${new URL(cacheUrl(url)).search}` : `${url.origin}/__backup${url.pathname}${url.search}`, { method: 'GET' });
+    const kind = accessKind(url.pathname);
+    const isAccess = kind !== null;
+    const accessBackupSeconds = kind === 'roads' ? ACCESS_BACKUP_SECONDS : ACCESS_TRANSIT_BACKUP_SECONDS;
+    const backupKey = new Request(isAccess ? `${new URL(cacheUrl(url)).origin}/__backup/access/${kind}${new URL(cacheUrl(url)).search}` : `${url.origin}/__backup${url.pathname}${url.search}`, { method: 'GET' });
     const isTrack = url.pathname.replace(/\/+$/, '') === '/track';
     // An old track would draw a flight that is long over, and an old METAR or TAF would pass for the
     // current one (a TAF that has been replaced most of all), so these have no backup copy.
@@ -509,13 +782,13 @@ export default {
           ctx?.waitUntil(cache.put(key, res.clone()));
         } else if (cache) {
           const backup = new Response(res.clone().body, res);
-          backup.headers.set('Cache-Control', `public, max-age=${isAccess ? ACCESS_BACKUP_SECONDS : BACKUP_SECONDS}`);
+          backup.headers.set('Cache-Control', `public, max-age=${isAccess ? accessBackupSeconds : BACKUP_SECONDS}`);
           ctx?.waitUntil(Promise.all([cache.put(key, res.clone()), cache.put(backupKey, backup)]));
         }
       } catch (err) {
         // Serve the last good answer rather than asking a failing or limiting service again.
         // Road traffic is marked stale with its age, and not served at all once it is too old.
-        res = isAccess ? await staleAccess(await cache?.match(backupKey)) : backedUp ? await cache?.match(backupKey) : undefined;
+        res = isAccess ? await staleAccess(await cache?.match(backupKey), Date.now(), accessBackupSeconds) : backedUp ? await cache?.match(backupKey) : undefined;
         if (res && !isAccess) {
           res = new Response(res.body, res);
           res.headers.set('X-Power-Globe-Backup', '1');

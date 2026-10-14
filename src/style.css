@@ -2475,11 +2475,25 @@ body:not(.idle) #caption {
 }
 
 /* The Ops access part: jams and incidents, slow stretches, and the key to the dots on the map. */
-.ops-access h4 {
+.ops-access h5 {
   margin: 14px 0 6px;
   font-size: 0.75rem;
   font-weight: 600;
   color: var(--text);
+}
+
+/* The sub-sections (roads, trains, buses) each have a heading, with a rule between them. */
+.ops-access h4.access-title {
+  margin: 0 0 4px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.access-sub + .access-sub {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--panel-border);
 }
 
 .access-list {
@@ -2571,4 +2585,38 @@ body:not(.idle) #caption {
   margin: 0 0 6px;
   color: var(--caution);
   font-size: 0.8rem;
+}
+
+/* Trains and buses: the time (or the line) in the first column, the rest beside it. */
+.access-trains li,
+.access-buses li {
+  font-variant-numeric: tabular-nums;
+}
+
+.access-time {
+  font-weight: 600;
+}
+
+.access-cancelled .access-what {
+  color: var(--muted);
+}
+
+.access-late {
+  color: var(--caution);
+  font-weight: 700;
+}
+
+.access-live {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.access-sched {
+  color: var(--muted);
+}
+
+.access-line {
+  min-width: 2.4rem;
+  text-align: center;
+  color: var(--accent);
 }

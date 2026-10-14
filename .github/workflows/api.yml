@@ -9,6 +9,9 @@ name: Deploy the Power Globe API
 #   OPENSKY_CLIENT_SECRET  its clientSecret
 # and for the Aviation map, an openAIP API key (https://www.openaip.net, free account):
 #   OPENAIP_API_KEY
+# and for the train times in the Access tab, an NS API subscription key for the Reisinformatie API
+# (https://apiportal.ns.nl, free account):
+#   NS_API_KEY
 # and, when a flight relay runs (relay/api-relay.mjs, see "Flight relay for the API" in the README):
 #   FLIGHT_RELAY_URL       its public address, like https://pi.example.ts.net
 #   FLIGHT_RELAY_KEY       the RELAY_KEY it was started with
@@ -50,10 +53,11 @@ jobs:
           OPENSKY_CLIENT_ID: ${{ secrets.OPENSKY_CLIENT_ID }}
           OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
           OPENAIP_API_KEY: ${{ secrets.OPENAIP_API_KEY }}
+          NS_API_KEY: ${{ secrets.NS_API_KEY }}
           FLIGHT_RELAY_URL: ${{ secrets.FLIGHT_RELAY_URL }}
           FLIGHT_RELAY_KEY: ${{ secrets.FLIGHT_RELAY_KEY }}
         run: |
-          for name in OPENSKY_CLIENT_ID OPENSKY_CLIENT_SECRET OPENAIP_API_KEY FLIGHT_RELAY_URL FLIGHT_RELAY_KEY; do
+          for name in OPENSKY_CLIENT_ID OPENSKY_CLIENT_SECRET OPENAIP_API_KEY NS_API_KEY FLIGHT_RELAY_URL FLIGHT_RELAY_KEY; do
             if [ -z "${!name}" ]; then
               echo "::notice::No $name secret; the API works without it."
               continue
