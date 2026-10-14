@@ -40,3 +40,15 @@ export function samePlace(t, previous, next) {
   const index = next.times.indexOf(previous.times[step]);
   return index < 0 ? null : Math.max(0, index + (t - step));
 }
+
+// The step of `times` closest to `time` (both GMT, "2026-10-14T15:00"), or -1 when there are none.
+export function stepNearest(times, time) {
+  const exact = times.indexOf(time);
+  if (exact >= 0) return exact;
+  const t = parseTime(time);
+  let best = -1;
+  times.forEach((candidate, i) => {
+    if (best < 0 || Math.abs(parseTime(candidate) - t) < Math.abs(parseTime(times[best]) - t)) best = i;
+  });
+  return best;
+}
