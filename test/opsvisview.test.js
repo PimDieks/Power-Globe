@@ -44,7 +44,7 @@ const count = (text, re) => (text.match(re) ?? []).length;
 
 describe('the low visibility part is one of the Ops parts', () => {
   it('follows the runway part and has the hooks and needs the host expects', () => {
-    expect(OPS_PARTS.map((p) => p.id)).toEqual(['runway', 'visibility']);
+    expect(OPS_PARTS.map((p) => p.id)).toEqual(['runway', 'visibility', 'lightning']);
     expect(typeof visibilityPart.bind).toBe('function');
     expect(typeof visibilityPart.unbind).toBe('function');
     for (const name of ['hourly', 'observation', 'taf', 'formatTick', 'zone']) expect(visibilityPart.needs).toContain(name);

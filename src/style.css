@@ -841,6 +841,111 @@ input:disabled {
   font-size: 0.75rem;
 }
 
+/* The Ops lightning part: a compass of the nearest lightning beside the words, and a table. */
+.lightning-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
+.lightning-compass {
+  flex: 0 0 auto;
+  width: 188px;
+  max-width: 100%;
+  color: var(--status, var(--muted));
+}
+
+.lightning-compass .lc-ring,
+.lightning-compass .lc-axis {
+  fill: none;
+  stroke: var(--muted);
+  stroke-opacity: 0.45;
+  stroke-width: 0.8;
+}
+
+.lightning-compass .lc-axis {
+  stroke-opacity: 0.25;
+}
+
+.lightning-compass .lc-label,
+.lightning-compass .lc-compass {
+  fill: var(--muted);
+  font-size: 7.5px;
+}
+
+.lightning-compass .lc-compass {
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.lightning-compass .lc-cell {
+  fill: var(--status, var(--muted));
+  fill-opacity: 0.28;
+}
+
+.lightning-compass .lc-near {
+  fill: var(--status, var(--muted));
+  stroke: #05080f;
+  stroke-width: 0.8;
+}
+
+.lightning-compass .lc-arrow {
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+
+.lightning-compass .lc-airport {
+  fill: #fff;
+  stroke: #05080f;
+  stroke-width: 1;
+}
+
+.lightning-text {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.side-panel .lightning-text p {
+  margin: 0 0 6px;
+}
+
+.side-panel .lightning-text p.lightning-head {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.lightning-rings {
+  width: 100%;
+  margin: 8px 0;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.lightning-rings caption {
+  padding-bottom: 3px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.lightning-rings th,
+.lightning-rings td {
+  padding: 2px 6px 2px 0;
+  text-align: left;
+  font-weight: 400;
+}
+
+.lightning-rings thead th {
+  color: var(--muted);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.side-panel p.lightning-risk {
+  margin: 6px 0;
+  font-size: 0.85rem;
+}
+
 .ops-lines {
   margin: 0 0 12px;
   padding: 0;

@@ -498,6 +498,6 @@ describe('airport visibility', () => {
     expect(airportValue('visibility', 830)).toBe(800);
     expect(airportValue('visibility', null)).toBeNull();
     expect(airportValue('wind_speed_10m', undefined)).toBeNull();
-    expect(AIRPORT_VARIABLES.map((v) => airportValue(v, 1.26))).toEqual([1.3, 1.3, 1, 1, 1, 0]);
+    expect(AIRPORT_VARIABLES.map((v) => airportValue(v, 1.26))).toEqual([1.3, 1.3, 1, 1, 1, 1, 1, 0]);
   });
 });
