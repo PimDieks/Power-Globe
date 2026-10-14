@@ -17,8 +17,10 @@
 //
 // Settings (environment): RELAY_KEY, a long random secret, the same as the API's
 // FLIGHT_RELAY_KEY; PORT (default 8788); HOST (default 127.0.0.1, for a tunnel on this
-// machine); NDW=1 to switch on the road traffic job (see below), and NDW_SITES, where its list of
-// measurement sites is (a file or an address; default the one published with the site). Needs
+// machine); NDW=1 to switch on the road traffic job (see below), NDW_SITES, where its list of
+// measurement sites is (a file or an address; default the one published with the site), and
+// NDW_SITES_CACHE, where it keeps a copy of that list for when the download fails (default in the
+// service's state directory, else the temporary directory). Needs
 // Node.js 18 or newer and nothing else. See "Flight relay for the API" in the README.
 //
 // Road traffic: with NDW=1 the relay also reads the open data of NDW (the Dutch road traffic
@@ -28,8 +30,10 @@
 // within 25 km of each airport, and gives that small answer at /ndw/<ICAO>. Source: NDW.
 
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Readable, pipeline } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { pathToFileURL } from 'node:url';
@@ -62,13 +66,27 @@ export const NDW_FILES = { speeds: 'snelheden_en_intensiteiten_meetgegevens.xml.
 export const NDW_SITES_URL = 'https://raw.githubusercontent.com/PimDieks/Power-Globe/main/public/data/ndw-sites.json';
 export const NDW_RADIUS_KM = 25;
 const NDW_INTERVAL_MS = 60_000;
-const NDW_TIMEOUT_MS = 45_000;
+export const NDW_TIMEOUT_MS = 45_000;
 // An element of the XML larger than this is a broken file, not a measurement.
 const NDW_MAX_ELEMENT = 4 * 1024 * 1024;
-const NDW_MAX_SITUATIONS = 80;
+const NDW_MAX_SITUATIONS = 60;
+const NDW_MAX_LIMITS = 40;
 const NDW_LINE_POINTS = 40;
 // A situation takes the road of the nearest measurement site if there is one this near (km).
 const NDW_ROAD_MATCH_KM = 0.6;
+// A lane counts towards the speed of a site when it carries at least this many vehicles an hour:
+// one slow vehicle on an otherwise empty lane is not traffic.
+export const MIN_LANE_FLOW = 120;
+// Fewer of the sites of the list than this share reporting in the speed file means the file or the
+// list is not what it should be, and nothing is published from it.
+const NDW_MIN_MATCH = 0.5;
+// Obstructions older than this are not news; a public event matters this near in time; maintenance
+// that ends within this long is "planned" (a count only).
+const OBSTRUCTION_MAX_AGE_MS = 3 * 3600_000;
+const PUBLIC_EVENT_MS = 24 * 3600_000;
+const PLANNED_MS = 48 * 3600_000;
+// Neighbours further apart than this (km) do not tell which way a road runs.
+const CHAIN_KM = 4;
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 
 const RAD = Math.PI / 180;
@@ -91,13 +109,18 @@ const round = (v, digits) => Math.round(v * 10 ** digits) / 10 ** digits;
 // Calls `onElement(xml)` with each `<tag ...>...</tag>` of the XML in `source` (an iterable of
 // buffers or strings, such as a decompressed download), one at a time, so that only the element
 // being read and the chunk it arrives in are in memory. Elements of this tag must not nest.
-export async function readElements(source, tag, onElement) {
+// `onHead(text)`, if given, gets what comes before the first element.
+export async function readElements(source, tag, onElement, onHead) {
   const decoder = new StringDecoder('utf8');
   const open = `<${tag}`;
   const close = `</${tag}>`;
   let buf = '';
+  let head = '';
+  let headSent = false;
   for await (const chunk of source) {
-    buf += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+    const piece = typeof chunk === 'string' ? chunk : decoder.write(chunk);
+    if (!headSent && head.length < 65_536) head += piece;
+    buf += piece;
     let from = 0;
     for (;;) {
       let start = buf.indexOf(open, from);
@@ -112,6 +135,10 @@ export async function readElements(source, tag, onElement) {
         from = start;
         break;
       }
+      if (!headSent) {
+        headSent = true;
+        onHead?.(head);
+      }
       const stop = end + close.length;
       onElement(buf.slice(start, stop));
       from = stop;
@@ -121,21 +148,27 @@ export async function readElements(source, tag, onElement) {
   }
 }
 
-// The lanes of a site as { speed, flow }: speed is the slowest of the lanes that have traffic
-// (flow above 0, speed reported), flow the vehicles an hour over all lanes. A lane with no
-// vehicles reports no speed (0 km/h or -1), which is an empty lane and not a jam, so speed is
-// null when no lane has traffic, and flow is null when there is no flow data at all.
-// `xml` is the `<roa:siteMeasurements>` element; `lanes` the [speed index, flow index] pairs.
+// The speed and flow of a site from its `<roa:siteMeasurements>` element and its lanes (the
+// [speed index, flow index] pairs): speed is the average of the lanes with at least MIN_LANE_FLOW
+// vehicles an hour, weighted by their flow, and flow the vehicles an hour over all lanes. A lane
+// with no vehicles reports no speed (0 km/h or -1), which is an empty lane and not a jam, and one
+// with a vehicle or two says nothing of the road, so speed is null where no lane has traffic, and
+// flow is null when there is no flow data at all.
 export function laneSummary(xml, lanes) {
-  let speed = null;
+  let weighted = 0;
+  let weight = 0;
   let flow = null;
   for (const [speedIndex, flowIndex] of lanes) {
     const f = quantity(xml, flowIndex, 'com:vehicleFlowRate');
-    const s = quantity(xml, speedIndex, 'com:speed');
     if (f != null && f >= 0) flow = (flow ?? 0) + f;
-    if (f > 0 && s != null && s >= 0) speed = speed == null ? s : Math.min(speed, s);
+    if (!(f >= MIN_LANE_FLOW)) continue;
+    const s = quantity(xml, speedIndex, 'com:speed');
+    if (s != null && s >= 0) {
+      weighted += s * f;
+      weight += f;
+    }
   }
-  return { speed: speed == null ? null : Math.round(speed), flow: flow == null ? null : Math.round(flow) };
+  return { speed: weight > 0 ? Math.round(weighted / weight) : null, flow: flow == null ? null : Math.round(flow) };
 }
 
 function quantity(xml, index, name) {
@@ -148,71 +181,154 @@ function quantity(xml, index, name) {
   return Number.isFinite(value) ? value : null;
 }
 
+// Gives each site on a road with sides its direction of travel in degrees: along the line to its
+// neighbours on the same side of the same road (the hectometre order), reversed on the left side,
+// where traffic runs towards lower numbers. Sites without such neighbours keep no heading.
+export function addHeadings(sites) {
+  const chains = new Map();
+  for (const s of sites) {
+    if (!s.side || s.position == null) continue;
+    const key = `${s.road}${s.side}`;
+    if (!chains.has(key)) chains.set(key, []);
+    chains.get(key).push(s);
+  }
+  for (const chain of chains.values()) {
+    chain.sort((a, b) => a.position - b.position);
+    chain.forEach((s, i) => {
+      // The nearest sites before and after it that are a real step away (sites of one place
+      // report the same position), and not far.
+      const near = (list) => list.find((o) => distanceKm(s.lat, s.lon, o.lat, o.lon) >= 0.05 && distanceKm(s.lat, s.lon, o.lat, o.lon) <= CHAIN_KM);
+      const before = near(chain.slice(0, i).reverse());
+      const after = near(chain.slice(i + 1));
+      if (!before && !after) return;
+      const up = bearingDeg((before ?? s).lat, (before ?? s).lon, (after ?? s).lat, (after ?? s).lon);
+      s.heading = Math.round(s.side === 'r' ? up : (up + 180) % 360);
+    });
+  }
+  return sites;
+}
+
+// One row of the site list as a site, or null when it is not a usable row.
+function siteOf(row, file) {
+  if (!Array.isArray(row) || row.length < 9) return null;
+  const [prefix, rest, lat, lon, road, side, position, version, pattern] = row;
+  const lanes = file.patterns[pattern];
+  if (typeof file.prefixes[prefix] !== 'string' || typeof rest !== 'string' || typeof road !== 'string' || !road) return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  if (!Array.isArray(lanes) || !lanes.length || !lanes.every((l) => Array.isArray(l) && l.length === 2 && l.every(Number.isInteger))) return null;
+  return { id: file.prefixes[prefix] + rest, lat, lon, road, side: side || '', position: Number.isFinite(position) ? position : null, version: String(version), lanes };
+}
+
 // The measurement site list (public/data/ndw-sites.json, see scripts/build-ndw-sites.mjs) made
-// ready: each site with its lanes, and for each airport the sites within the radius.
+// ready: each site with its lanes and direction, and for each airport the sites within the radius.
+// Rows that are not usable are left out; too many of them mean the file is not the right one.
 export function prepareSites(file) {
-  if (file?.version !== 1 || !Array.isArray(file.sites) || !file.airports) throw new Error('The NDW site list is not in a form this relay knows');
-  const sites = file.sites.map(([prefix, rest, lat, lon, road, heading, pattern]) => ({ id: file.prefixes[prefix] + rest, lat, lon, road, heading, lanes: file.patterns[pattern] }));
+  if (file?.version !== 2 || !Array.isArray(file.sites) || !Array.isArray(file.prefixes) || !Array.isArray(file.patterns) || !file.airports) {
+    throw new Error('The NDW site list is not in a form this relay knows');
+  }
+  const sites = file.sites.map((row) => siteOf(row, file)).filter(Boolean);
+  if (!sites.length || sites.length < file.sites.length * 0.9) throw new Error(`The NDW site list has only ${sites.length} usable rows of ${file.sites.length}`);
+  addHeadings(sites);
+  const radiusKm = file.radiusKm ?? NDW_RADIUS_KM;
   const airports = Object.entries(file.airports).map(([icao, [lat, lon]]) => ({
     icao,
     lat,
     lon,
-    sites: sites.filter((s) => distanceKm(lat, lon, s.lat, s.lon) <= (file.radiusKm ?? NDW_RADIUS_KM)),
+    sites: sites.filter((s) => distanceKm(lat, lon, s.lat, s.lon) <= radiusKm),
   }));
-  return { sites, byId: new Map(sites.map((s) => [s.id, s])), airports, radiusKm: file.radiusKm ?? NDW_RADIUS_KM };
+  return { sites, byId: new Map(sites.map((s) => [s.id, s])), airports, radiusKm };
 }
 
 const DELAY_MIN = (seconds) => (Number.isFinite(seconds) ? Math.round(seconds / 60) : null);
-const SITUATION_TYPES = {
-  AbnormalTraffic: 'jam',
-  Accident: 'accident',
-  RoadOrCarriagewayOrLaneManagement: 'closure',
-  GeneralObstruction: 'obstruction',
-  VehicleObstruction: 'obstruction',
-};
 const CLOSURES = new Set(['roadClosed', 'carriagewayClosures', 'laneClosures']);
+// Roadworks: approved, implemented and running for weeks, which would drown everything else.
+const MAINTENANCE = new Set(['roadMaintenance', 'constructionWork']);
+const IN_FORCE = new Set(['implemented', 'beingImplemented']);
 
 const text = (xml, name) => new RegExp(`<${name}>([^<]*)<`).exec(xml)?.[1];
 
-// A situation (`<sit:situation>` element of actueel_beeld) as { id, type, kind, delayMin, lengthM,
-// line: [[lat, lon], ...] } or null when it is none of a jam, accident, closure or obstruction, is
-// not in force at `now` (ms), or has no position. Only the first record and the first location of
-// a situation are read.
+// Each `<sit:situationRecord>` of a situation: one situation holds several, such as a speed limit
+// and the lane closures that go with it.
+function* recordsOf(xml) {
+  const close = '</sit:situationRecord>';
+  for (let at = xml.indexOf('<sit:situationRecord '); at >= 0; at = xml.indexOf('<sit:situationRecord ', at + 1)) {
+    const end = xml.indexOf(close, at);
+    if (end < 0) return;
+    yield xml.slice(at, end + close.length);
+  }
+}
+
+// The records of a situation (`<sit:situation>` element of actueel_beeld) that matter, each as
+// { id, situation, type, kind, cause, status, delayMin, queueM, bearing, from, until, limitKmh, line }:
+//   jam          AbnormalTraffic
+//   accident     an Accident, or a closure whose cause is an accident
+//   closure      a closure of a road, carriageway or lane for another cause than roadworks (and a
+//                public event only within a day of its start)
+//   maintenance  a closure for roadworks that is in force, only to be counted when it ends soon
+//   obstruction  a vehicle or object on the road that started within three hours
+//   limit        a temporary speed limit in force
+// Records not in force at `now` (ms), or approved but not yet implemented, or with no position,
+// are left out.
 export function parseSituation(xml, now = Date.now()) {
-  const recordType = /<sit:situationRecord xsi:type="sit:(\w+)"/.exec(xml)?.[1];
-  const type = SITUATION_TYPES[recordType];
-  if (!type) return null;
-  let kind = text(xml, 'sit:abnormalTrafficType') ?? text(xml, 'sit:accidentType') ?? text(xml, 'sit:vehicleObstructionType') ?? text(xml, 'sit:obstructionType') ?? null;
-  if (type === 'closure') {
-    kind = text(xml, 'sit:roadOrCarriagewayOrLaneManagementType');
-    if (!CLOSURES.has(kind)) return null;
+  const situation = /<sit:situation id="([^"]+)"/.exec(xml)?.[1] ?? null;
+  const found = [];
+  for (const rec of recordsOf(xml)) {
+    const recordType = /xsi:type="sit:(\w+)"/.exec(rec)?.[1];
+    const cause = text(rec, 'sit:causeType') ?? null;
+    const status = text(rec, 'sit:operatorActionStatus') ?? null;
+    const from = Date.parse(text(rec, 'com:overallStartTime'));
+    const until = Date.parse(text(rec, 'com:overallEndTime'));
+    if (from > now + 60_000 || until < now) continue;
+    let type = null;
+    let kind = text(rec, 'sit:abnormalTrafficType') ?? text(rec, 'sit:accidentType') ?? text(rec, 'sit:vehicleObstructionType') ?? text(rec, 'sit:obstructionType') ?? null;
+    let limitKmh = null;
+    if (recordType === 'AbnormalTraffic') type = 'jam';
+    else if (recordType === 'Accident') type = 'accident';
+    else if (recordType === 'RoadOrCarriagewayOrLaneManagement') {
+      kind = text(rec, 'sit:roadOrCarriagewayOrLaneManagementType');
+      if (!CLOSURES.has(kind) || (status && !IN_FORCE.has(status))) continue;
+      if (cause === 'accident') type = 'accident';
+      else if (MAINTENANCE.has(cause)) type = 'maintenance';
+      else if (cause === 'publicEvent' && !(from >= now - PUBLIC_EVENT_MS)) continue;
+      else type = 'closure';
+    } else if (recordType === 'VehicleObstruction' || recordType === 'GeneralObstruction') {
+      if (from < now - OBSTRUCTION_MAX_AGE_MS) continue;
+      type = 'obstruction';
+    } else if (recordType === 'SpeedManagement') {
+      limitKmh = Number(text(rec, 'sit:temporarySpeedLimit'));
+      if (!Number.isFinite(limitKmh) || !IN_FORCE.has(status)) continue;
+      type = 'limit';
+    }
+    if (!type) continue;
+    let line = null;
+    const posList = /<loc:posList>([^<]*)</.exec(rec)?.[1];
+    if (posList) {
+      const numbers = posList.trim().split(/\s+/).map(Number);
+      line = [];
+      for (let i = 0; i + 1 < numbers.length; i += 2) line.push([numbers[i], numbers[i + 1]]);
+    } else if (text(rec, 'loc:latitude') != null) {
+      line = [[Number(text(rec, 'loc:latitude')), Number(text(rec, 'loc:longitude'))]];
+    }
+    if (!line?.length || line.some(([a, b]) => !Number.isFinite(a) || !Number.isFinite(b))) continue;
+    const bearing = Number(text(rec, 'loc:bearing'));
+    const queue = Number(text(rec, 'sit:queueLength'));
+    found.push({
+      id: /<sit:situationRecord [^>]*\bid="([^"]+)"/.exec(rec)?.[1] ?? situation,
+      situation,
+      type,
+      kind,
+      cause,
+      status,
+      delayMin: type === 'jam' ? DELAY_MIN(Number(text(rec, 'sit:delayTimeValue'))) : null,
+      queueM: Number.isFinite(queue) && queue > 0 ? Math.round(queue) : null,
+      bearing: text(rec, 'loc:bearing') != null && Number.isFinite(bearing) ? bearing : null,
+      from: Number.isFinite(from) ? from : null,
+      until: Number.isFinite(until) ? until : null,
+      limitKmh,
+      line,
+    });
   }
-  const from = Date.parse(text(xml, 'com:overallStartTime'));
-  const until = Date.parse(text(xml, 'com:overallEndTime'));
-  if (from > now + 60_000 || until < now) return null;
-  let line = null;
-  const posList = /<loc:posList>([^<]*)</.exec(xml)?.[1];
-  if (posList) {
-    const numbers = posList.trim().split(/\s+/).map(Number);
-    line = [];
-    for (let i = 0; i + 1 < numbers.length; i += 2) line.push([numbers[i], numbers[i + 1]]);
-  } else {
-    const lat = Number(text(xml, 'loc:latitude'));
-    const lon = Number(text(xml, 'loc:longitude'));
-    if (Number.isFinite(lat) && Number.isFinite(lon) && text(xml, 'loc:latitude') != null) line = [[lat, lon]];
-  }
-  if (!line?.length || line.some(([a, b]) => !Number.isFinite(a) || !Number.isFinite(b))) return null;
-  const bearing = Number(text(xml, 'loc:bearing'));
-  const queue = Number(text(xml, 'sit:queueLength'));
-  return {
-    id: /<sit:situation id="([^"]+)"/.exec(xml)?.[1] ?? null,
-    type,
-    kind,
-    delayMin: type === 'jam' ? DELAY_MIN(Number(text(xml, 'sit:delayTimeValue'))) : null,
-    queueM: Number.isFinite(queue) && queue > 0 ? Math.round(queue) : null,
-    bearing: text(xml, 'loc:bearing') != null && Number.isFinite(bearing) ? bearing : null,
-    line,
-  };
+  return found;
 }
 
 const lineLengthM = (line) => {
@@ -248,117 +364,263 @@ export function roadOf(situation, sites) {
 }
 
 const TYPE_ORDER = { jam: 0, accident: 1, closure: 2, obstruction: 3 };
+const isARoad = (road) => typeof road === 'string' && road.startsWith('A');
 
-// What goes to the page for an airport: its measurement sites as [lat, lon, speed, flow, group]
-// (group: an index into `groups`, the [road, direction] pairs) and the situations near it.
-// `readings` maps a site id to { speed, flow }; `situations` are parsed situations.
-export function airportAnswer(airport, prepared, readings, situations, meta) {
-  const groups = [];
-  const groupIndex = new Map();
-  const sites = airport.sites.map((s) => {
-    const key = `${s.road}|${s.heading == null ? '' : compassOf(s.heading)}`;
-    if (!groupIndex.has(key)) groupIndex.set(key, groups.push([s.road, s.heading == null ? null : compassOf(s.heading)]) - 1);
-    const r = readings.get(s.id);
-    return [round(s.lat, 5), round(s.lon, 5), r?.speed ?? null, r?.flow ?? null, groupIndex.get(key)];
-  });
-  const near = [];
-  for (const situation of situations) {
-    const distances = situation.line.map(([lat, lon]) => distanceKm(airport.lat, airport.lon, lat, lon));
-    const km = Math.min(...distances);
-    if (km > prepared.radiusKm) continue;
-    const lengthM = situation.queueM ?? (situation.line.length > 1 ? lineLengthM(situation.line) : null);
-    const last = situation.line.at(-1);
-    near.push({
-      id: situation.id,
-      type: situation.type,
-      kind: situation.kind,
-      ...roadOf(situation, airport.sites),
-      delayMin: situation.delayMin,
-      lengthM,
-      distKm: round(km, 1),
-      start: [round(situation.line[0][0], 5), round(situation.line[0][1], 5)],
-      end: [round(last[0], 5), round(last[1], 5)],
-      line: situation.type === 'obstruction' || situation.line.length < 2 ? null : thin(situation.line),
+// What goes to the page for an airport: the measurement sites as chains, one per road and side of
+// the road in the order of the road, each point as [lat, lon, speed, flow]; the situations near it
+// (jams, accidents, closures, obstructions) ranked the way the page lists them; the temporary
+// speed limits; and how many roadworks end soon on a motorway. `readings` maps a site id to
+// { speed, flow }; `items` are parsed records (see parseSituation).
+export function airportAnswer(airport, prepared, readings, items, meta, now = Date.now()) {
+  const chains = new Map();
+  for (const s of airport.sites) {
+    const key = `${s.road}|${s.side}`;
+    if (!chains.has(key)) chains.set(key, { road: s.road, side: s.side, sites: [] });
+    chains.get(key).sites.push(s);
+  }
+  const out = [];
+  for (const chain of chains.values()) {
+    if (chain.side) chain.sites.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+    out.push({
+      road: chain.road,
+      side: chain.side,
+      pts: chain.sites.map((s) => {
+        const r = readings.get(s.id);
+        return [round(s.lat, 5), round(s.lon, 5), r?.speed ?? null, r?.flow ?? null];
+      }),
     });
   }
-  near.sort((a, b) => TYPE_ORDER[a.type] - TYPE_ORDER[b.type] || a.distKm - b.distKm);
-  return { airport: airport.icao, source: 'NDW', radiusKm: prepared.radiusKm, ...meta, groups, sites, situations: near.slice(0, NDW_MAX_SITUATIONS) };
+  const near = [];
+  const limits = [];
+  const planned = new Set();
+  for (const item of items) {
+    const km = Math.min(...item.line.map(([lat, lon]) => distanceKm(airport.lat, airport.lon, lat, lon)));
+    if (km > prepared.radiusKm) continue;
+    const where = roadOf(item, airport.sites);
+    if (item.type === 'maintenance') {
+      if (isARoad(where.road) && item.status === 'implemented' && item.until != null && item.until <= now + PLANNED_MS) planned.add(item.situation);
+      continue;
+    }
+    if (item.type === 'limit') {
+      if (limits.length < NDW_MAX_LIMITS) limits.push({ kmh: item.limitKmh, ...where, distKm: round(km, 1), line: thin(item.line, 12) });
+      continue;
+    }
+    const last = item.line.at(-1);
+    near.push({
+      id: item.id,
+      type: item.type,
+      kind: item.kind,
+      cause: item.cause,
+      ...where,
+      aRoad: isARoad(where.road),
+      delayMin: item.delayMin,
+      lengthM: item.queueM ?? (item.line.length > 1 ? lineLengthM(item.line) : null),
+      distKm: round(km, 1),
+      startedAt: item.from,
+      start: [round(item.line[0][0], 5), round(item.line[0][1], 5)],
+      end: [round(last[0], 5), round(last[1], 5)],
+      line: item.type === 'obstruction' || item.line.length < 2 ? null : thin(item.line),
+    });
+  }
+  // The same vehicle reported twice (by two sources) is listed once.
+  const seen = [];
+  for (let i = 0; i < near.length; i++) {
+    const s = near[i];
+    if (s.type !== 'obstruction') continue;
+    if (seen.some((o) => o.road === s.road && o.dir === s.dir && distanceKm(o.start[0], o.start[1], s.start[0], s.start[1]) < 0.3)) near.splice(i--, 1);
+    else seen.push(s);
+  }
+  // Jams by delay then length, the rest on motorways first, then the nearest.
+  near.sort(
+    (a, b) =>
+      TYPE_ORDER[a.type] - TYPE_ORDER[b.type] ||
+      (a.type === 'jam' ? (b.delayMin ?? 0) - (a.delayMin ?? 0) || (b.lengthM ?? 0) - (a.lengthM ?? 0) : Number(b.aRoad) - Number(a.aRoad)) ||
+      a.distKm - b.distKm,
+  );
+  return { airport: airport.icao, source: 'NDW', radiusKm: prepared.radiusKm, ...meta, chains: out, situations: near.slice(0, NDW_MAX_SITUATIONS), limits, planned: planned.size };
 }
 
-async function openXml(fetchFn, name, since) {
-  const res = await fetchFn(NDW_BASE + name, {
-    headers: { 'user-agent': 'power-globe-api-relay (https://github.com/PimDieks/Power-Globe)', ...(since && { 'if-modified-since': since }) },
-    signal: AbortSignal.timeout(NDW_TIMEOUT_MS),
-  });
-  if (res.status === 304) return { unchanged: true };
-  if (!res.ok) throw new Error(`${name} answered ${res.status}`);
-  return { lastModified: res.headers.get('last-modified'), xml: pipeline(Readable.fromWeb(res.body), createGunzip(), () => {}) };
+// A download of one of NDW's files, read as the decompressed XML, within NDW_TIMEOUT_MS from the
+// start to the end of the body. `read(xml)` gets the XML as a stream and gives the result;
+// `lastModified` is passed on for the next If-Modified-Since. Answers that are not the file are
+// cancelled so the connection is let go of.
+async function readFeed(fetchFn, name, since, read, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchFn(NDW_BASE + name, {
+      headers: { 'user-agent': 'power-globe-api-relay (https://github.com/PimDieks/Power-Globe)', ...(since && { 'if-modified-since': since }) },
+      signal: controller.signal,
+    });
+    if (res.status === 304) {
+      await res.body?.cancel?.().catch?.(() => {});
+      return { unchanged: true };
+    }
+    if (!res.ok) {
+      await res.body?.cancel?.().catch?.(() => {});
+      throw new Error(`${name} answered ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const first = await reader.read();
+    // A gzip file begins 1f 8b; anything else (an error page with a 200) is not the file.
+    if (first.done || first.value?.[0] !== 0x1f || first.value?.[1] !== 0x8b) {
+      await reader.cancel().catch?.(() => {});
+      throw new Error(`${name} did not come as a gzip file`);
+    }
+    async function* chunks() {
+      yield first.value;
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) return;
+        yield next.value;
+      }
+    }
+    const xml = pipeline(Readable.from(chunks(), { objectMode: false }), createGunzip(), () => {});
+    return { lastModified: res.headers.get('last-modified'), result: await read(xml) };
+  } catch (err) {
+    if (controller.signal.aborted) throw new Error(`${name} took more than ${Math.round(timeoutMs / 1000)} s`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // The road traffic job: every minute asks NDW for the live speeds and the current situations (only
 // when the files changed), and keeps the answer for each airport. `sitesSource` is a file path or
-// an address; `get(icao)` gives the newest answer as an object, or null.
-export function createNdwJob({ sitesSource = NDW_SITES_URL, fetchFn = fetch, read = readFile, now = Date.now, log = console.log, intervalMs = NDW_INTERVAL_MS } = {}) {
+// an address (a copy of what is downloaded is kept at `cachePath`, for when the download fails);
+// `get(icao)` gives the newest answer as an object, or null. Nothing is published until both files
+// have been read once, so that an answer never says "roads flowing" for want of data.
+export function createNdwJob({
+  sitesSource = NDW_SITES_URL,
+  cachePath = null,
+  fetchFn = fetch,
+  read = readFile,
+  write = writeFile,
+  now = Date.now,
+  log = console.log,
+  intervalMs = NDW_INTERVAL_MS,
+  timeoutMs = NDW_TIMEOUT_MS,
+} = {}) {
   let prepared = null;
   let timer = null;
   let running = false;
   const state = { speeds: { since: null, at: null, measuredAt: null, readings: new Map() }, situations: { since: null, at: null, madeAt: null, list: [] } };
   const answers = new Map();
-  let failures = 0;
+  // The failures in a row, if the last read failed: logged once when they start and once when they end.
+  let outage = null;
+  let drift = 0;
 
   async function loadSites() {
-    const raw = /^https?:\/\//.test(sitesSource)
-      ? await fetchFn(sitesSource, { signal: AbortSignal.timeout(NDW_TIMEOUT_MS) }).then((r) => {
+    let raw;
+    if (/^https?:\/\//.test(sitesSource)) {
+      try {
+        raw = await fetchFn(sitesSource, { signal: AbortSignal.timeout(timeoutMs) }).then((r) => {
           if (!r.ok) throw new Error(`${sitesSource} answered ${r.status}`);
           return r.text();
-        })
-      : await read(sitesSource, 'utf8');
-    prepared = prepareSites(JSON.parse(raw));
+        });
+        prepared = prepareSites(JSON.parse(raw));
+        if (cachePath) await write(cachePath, raw).catch((err) => log(`NDW: could not keep a copy of the site list (${err.message})`));
+      } catch (err) {
+        if (!cachePath) throw err;
+        prepared = prepareSites(JSON.parse(await read(cachePath, 'utf8').catch(() => Promise.reject(err))));
+        log(`NDW: ${err.message}; using the copy of the site list kept at ${cachePath}`);
+      }
+    } else prepared = prepareSites(JSON.parse(await read(sitesSource, 'utf8')));
     log(`NDW: ${prepared.sites.length} measurement sites for ${prepared.airports.map((a) => a.icao).join(', ')}`);
   }
 
   async function readSpeeds() {
-    const got = await openXml(fetchFn, NDW_FILES.speeds, state.speeds.since);
+    const got = await readFeed(
+      fetchFn,
+      NDW_FILES.speeds,
+      state.speeds.since,
+      async (xml) => {
+        const readings = new Map();
+        let publishedAt = null;
+        let mismatched = 0;
+        await readElements(
+          xml,
+          'roa:siteMeasurements',
+          (el) => {
+            const head = el.slice(0, 400);
+            const id = /measurementSiteReference[^>]*\sid="([^"]+)"/.exec(head)?.[1];
+            const site = prepared.byId.get(id);
+            if (!site) return;
+            // A site whose version changed may have other lanes than the list says: no reading.
+            if (/measurementSiteReference[^>]*\sversion="([^"]*)"/.exec(head)?.[1] !== site.version) {
+              mismatched++;
+              return;
+            }
+            readings.set(id, laneSummary(el, site.lanes));
+          },
+          (headText) => {
+            publishedAt = Date.parse(text(headText, 'com:publicationTime'));
+          },
+        );
+        return { readings, publishedAt, mismatched };
+      },
+      timeoutMs,
+    );
     if (got.unchanged) return false;
-    const readings = new Map();
-    let measuredAt = 0;
-    await readElements(got.xml, 'roa:siteMeasurements', (xml) => {
-      const id = /measurementSiteReference[^>]*\sid="([^"]+)"/.exec(xml.slice(0, 400))?.[1];
-      const site = prepared.byId.get(id);
-      if (!site) return;
-      readings.set(id, laneSummary(xml, site.lanes));
-      const time = Date.parse(text(xml, 'roa:timeValue'));
-      if (time > measuredAt) measuredAt = time;
-    });
-    state.speeds = { since: got.lastModified, at: now(), measuredAt: measuredAt || null, readings };
+    const { readings, publishedAt, mismatched } = got.result;
+    if (readings.size < prepared.sites.length * NDW_MIN_MATCH) {
+      throw new Error(`the speed file has readings for only ${readings.size} of the ${prepared.sites.length} sites${mismatched ? ` (${mismatched} changed version)` : ''}`);
+    }
+    if (mismatched !== drift) {
+      drift = mismatched;
+      if (mismatched) log(`NDW: ${mismatched} sites have a new version in the speed file and are not read until the site list is rebuilt`);
+    }
+    state.speeds = { since: got.lastModified, at: now(), measuredAt: Number.isFinite(publishedAt) ? publishedAt : null, readings };
     return true;
   }
 
   async function readSituations() {
-    const got = await openXml(fetchFn, NDW_FILES.situations, state.situations.since);
-    if (got.unchanged) return false;
-    const list = [];
     const t = now();
-    await readElements(got.xml, 'sit:situation', (xml) => {
-      const situation = parseSituation(xml, t);
-      if (situation && prepared.airports.some((a) => situation.line.some(([lat, lon]) => distanceKm(a.lat, a.lon, lat, lon) <= prepared.radiusKm))) list.push(situation);
-    });
-    state.situations = { since: got.lastModified, at: t, madeAt: Date.parse(got.lastModified) || t, list };
+    const got = await readFeed(
+      fetchFn,
+      NDW_FILES.situations,
+      state.situations.since,
+      async (xml) => {
+        const list = [];
+        await readElements(xml, 'sit:situation', (el) => {
+          for (const item of parseSituation(el, t)) {
+            if (prepared.airports.some((a) => item.line.some(([lat, lon]) => distanceKm(a.lat, a.lon, lat, lon) <= prepared.radiusKm))) list.push(item);
+          }
+        });
+        return list;
+      },
+      timeoutMs,
+    );
+    if (got.unchanged) return false;
+    state.situations = { since: got.lastModified, at: t, madeAt: Date.parse(got.lastModified) || t, list: got.result };
     return true;
   }
 
   function publish() {
-    if (state.speeds.at == null && state.situations.at == null) return;
+    // Both files are needed: speeds without situations, or the other way round, would tell half the story.
+    if (state.speeds.at == null || state.situations.at == null) return;
+    const t = now();
     for (const airport of prepared.airports) {
       answers.set(
         airport.icao,
-        airportAnswer(airport, prepared, state.speeds.readings, state.situations.list, {
-          fetched: Math.max(state.speeds.at ?? 0, state.situations.at ?? 0),
-          measuredAt: state.speeds.measuredAt ?? null,
-          situationsAt: state.situations.madeAt ?? null,
-        }),
+        airportAnswer(
+          airport,
+          prepared,
+          state.speeds.readings,
+          state.situations.list,
+          { fetched: Math.max(state.speeds.at, state.situations.at), measuredAt: state.speeds.measuredAt, situationsAt: state.situations.madeAt },
+          t,
+        ),
       );
     }
+  }
+
+  function noteFailure(message) {
+    if (!outage) {
+      outage = { failures: 0 };
+      log(`NDW: ${message} (the last answer stays; further failures are not logged until it reads again)`);
+    }
+    outage.failures++;
   }
 
   async function refresh() {
@@ -369,13 +631,13 @@ export function createNdwJob({ sitesSource = NDW_SITES_URL, fetchFn = fetch, rea
       const results = await Promise.allSettled([readSpeeds(), readSituations()]);
       const failed = results.map((r, i) => (r.status === 'rejected' ? `${['speeds', 'situations'][i]}: ${r.reason?.message ?? r.reason}` : null)).filter(Boolean);
       if (results.some((r) => r.status === 'fulfilled' && r.value)) publish();
-      if (failed.length) {
-        failures++;
-        log(`NDW: ${failed.join('; ')} (failure ${failures} in a row; the last answer stays)`);
-      } else failures = 0;
+      if (failed.length) noteFailure(failed.join('; '));
+      else if (outage) {
+        log(`NDW: reading again after ${outage.failures} failed ${outage.failures === 1 ? 'minute' : 'minutes'}`);
+        outage = null;
+      }
     } catch (err) {
-      failures++;
-      log(`NDW: ${err.message} (failure ${failures} in a row)`);
+      noteFailure(err.message);
     } finally {
       running = false;
     }
@@ -413,6 +675,10 @@ async function ndwReply(ndw, icao, headers) {
   }
   return out;
 }
+
+// Where a copy of the site list is kept, for when its download fails: NDW_SITES_CACHE, else the
+// service's state directory (systemd's StateDirectory=), else the temporary directory.
+const ndwCachePath = () => process.env.NDW_SITES_CACHE || join(process.env.STATE_DIRECTORY || tmpdir(), 'power-globe-ndw-sites.json');
 
 // The relay itself: ({ method, path, headers, body }) => { status, headers, body }, with headers
 // named in lower case as Node gives them.
@@ -485,7 +751,7 @@ export function serve({
   key = process.env.RELAY_KEY,
   port = Number(process.env.PORT) || 8788,
   host = process.env.HOST || '127.0.0.1',
-  ndw = /^(1|true|on|yes)$/i.test(process.env.NDW ?? '') ? createNdwJob({ sitesSource: process.env.NDW_SITES || NDW_SITES_URL }) : null,
+  ndw = /^(1|true|on|yes)$/i.test(process.env.NDW ?? '') ? createNdwJob({ sitesSource: process.env.NDW_SITES || NDW_SITES_URL, cachePath: ndwCachePath() }) : null,
 } = {}) {
   const handle = createRelay({ key, ndw });
   ndw?.start();

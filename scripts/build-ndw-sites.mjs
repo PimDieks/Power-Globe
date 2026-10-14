@@ -17,15 +17,13 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream';
 import { createGunzip } from 'node:zlib';
-import { NDW_RADIUS_KM, bearingDeg, distanceKm, readElements } from '../relay/api-relay.mjs';
+import { NDW_RADIUS_KM, addHeadings, distanceKm, readElements } from '../relay/api-relay.mjs';
 
 const BASE = 'https://opendata.ndw.nu/';
 const LIST = 'snelheden_en_intensiteiten_configuratie_meetlocaties.xml.gz';
 const SPEEDS = 'snelheden_en_intensiteiten_meetgegevens.xml.gz';
 const AIRPORTS = new URL('../public/data/airports.json', import.meta.url);
 const OUT = new URL('../public/data/ndw-sites.json', import.meta.url);
-// Neighbours further apart than this do not tell which way a road runs.
-const CHAIN_KM = 4;
 
 async function open(source) {
   const gz = /\.gz$/.test(source);
@@ -48,14 +46,16 @@ export function dutchAirports(file) {
 // Rijkswaterstaat have it in the id (`0041hrl0322ra`: road 004, A4; main carriageway "hr" or
 // connecting road "vw"; side l or r, which way the hectometre numbers run, as seen from the road;
 // position 0322 = 32.2 km; lane group), the provinces' sites in the name ("N463 km 2.736 Li").
-// A three-digit number under 100 is taken for an A road and 100 or more for an N road: an N road
-// under 100 (N31 and the like, rare near these airports) would show as an A road.
+// The number is an A road if it is one of the motorways of the Netherlands (MOTORWAYS) and an N road
+// otherwise, so that N46 is not taken for an A road.
+export const MOTORWAYS = new Set([1, 2, 4, 5, 6, 7, 8, 9, 10, 12, 13, 15, 16, 18, 20, 22, 27, 28, 29, 30, 31, 32, 35, 37, 38, 44, 50, 58, 59, 65, 67, 73, 74, 76, 77, 78, 79]);
+
 export function roadOf(id, name) {
   let m = /^RWS01_MONIBAS_(\d{3})\d(hr|vw)([a-z])(\d{4})/.exec(id) ?? /^(\d{3})(hr|vw)([a-z])(\d{4,6})/.exec(name ?? '');
   if (m) {
     const number = Number(m[1]);
     const side = m[2] === 'hr' ? (m[3] === 'l' ? 'l' : m[3] === 'r' ? 'r' : null) : null;
-    return { road: `${number < 100 ? 'A' : 'N'}${number}`, side, position: Number(m[4]), connecting: m[2] === 'vw' };
+    return { road: `${MOTORWAYS.has(number) ? 'A' : 'N'}${number}`, side, position: Number(m[4]), connecting: m[2] === 'vw' };
   }
   m = /^(N\d{2,3})\s+km\s+([\d.]+)\s+(Li|Re)\b/.exec(name ?? '');
   if (m) return { road: m[1], side: m[3] === 'Li' ? 'l' : 'r', position: Number(m[2]), connecting: false };
@@ -80,7 +80,7 @@ export async function readSites(source, airports, radiusKm = NDW_RADIUS_KM) {
     const lon = Number(/<loc:longitude>([-\d.]+)</.exec(xml)?.[1]);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
     if (!Object.values(airports).some(([a, o]) => distanceKm(a, o, lat, lon) <= radiusKm)) return;
-    const id = /<roa:measurementSite id="([^"]+)"/.exec(xml)[1];
+    const [, id, version] = /<roa:measurementSite id="([^"]+)" version="([^"]*)"/.exec(xml);
     const name = /<roa:measurementSiteName>.*?<com:value(?: [^>]*)?>([^<]*)</s.exec(xml)?.[1] ?? null;
     // The "any vehicle" flow and speed of each lane, in the order the lanes come.
     const speeds = [];
@@ -93,7 +93,7 @@ export async function readSites(source, airports, radiusKm = NDW_RADIUS_KM) {
     }
     // A lane needs both: speed only counts where there is flow.
     if (!speeds.length || speeds.length !== flows.length) return;
-    sites.push({ id, name, lat, lon, lanes: speeds.map((s, i) => [s, flows[i]]) });
+    sites.push({ id, version, name, lat, lon, lanes: speeds.map((s, i) => [s, flows[i]]) });
   });
   return { sites, total };
 }
@@ -106,35 +106,6 @@ export async function readLiveIds(source) {
     if (id) ids.add(id);
   });
   return ids;
-}
-
-// Gives each site on a road with sides its direction of travel in degrees: along the line to its
-// neighbours on the same side of the same road (the hectometre order), reversed on the left side,
-// where traffic runs towards lower numbers. Sites without such neighbours get null.
-export function addHeadings(sites) {
-  const chains = new Map();
-  for (const s of sites) {
-    if (!s.side || s.connecting || s.position == null) continue;
-    const key = `${s.road}${s.side}`;
-    if (!chains.has(key)) chains.set(key, []);
-    chains.get(key).push(s);
-  }
-  for (const chain of chains.values()) {
-    chain.sort((a, b) => a.position - b.position);
-    chain.forEach((s, i) => {
-      // The nearest sites before and after it that are a real step away (sites of one place
-      // report the same position), and not far.
-      const near = (list) => list.find((o) => distanceKm(s.lat, s.lon, o.lat, o.lon) >= 0.05 && distanceKm(s.lat, s.lon, o.lat, o.lon) <= CHAIN_KM);
-      const before = near(chain.slice(0, i).reverse());
-      const after = near(chain.slice(i + 1));
-      if (!before && !after) return;
-      const from = before ?? s;
-      const to = after ?? s;
-      const up = bearingDeg(from.lat, from.lon, to.lat, to.lon);
-      s.heading = Math.round(s.side === 'r' ? up : (up + 180) % 360);
-    });
-  }
-  return sites;
 }
 
 export async function build({ list = BASE + LIST, speeds = BASE + SPEEDS, live = true } = {}) {
@@ -150,8 +121,8 @@ export async function build({ list = BASE + LIST, speeds = BASE + SPEEDS, live =
   }
   const named = kept.map((s) => ({ ...s, ...roadOf(s.id, s.name) })).filter((s) => s.road);
   console.log(`${named.length} of those have a road (the rest are dropped: nothing to call them)`);
-  const sites = addHeadings(named.filter((s) => !s.connecting));
-  console.log(`${sites.length} on a main carriageway or provincial road (slip roads and connecting roads are left out), ${sites.filter((s) => s.heading != null).length} with a direction`);
+  const sites = named.filter((s) => !s.connecting);
+  console.log(`${sites.length} on a main carriageway or provincial road (slip roads and connecting roads are left out), ${addHeadings(sites.map((s) => ({ ...s }))).filter((s) => s.heading != null).length} with a direction, ${sites.filter((s) => MOTORWAYS.has(Number(s.road.slice(1))) && s.road[0] === 'A').length} on motorways`);
 
   const patterns = [];
   const patternIndex = new Map();
@@ -165,15 +136,15 @@ export async function build({ list = BASE + LIST, speeds = BASE + SPEEDS, live =
     if (!patternIndex.has(key)) patternIndex.set(key, patterns.push(s.lanes) - 1);
     const [prefix, rest] = common.has(splitId(s.id)[0]) ? splitId(s.id) : ['', s.id];
     if (!prefixes.includes(prefix)) prefixes.push(prefix);
-    return [prefixes.indexOf(prefix), rest, Math.round(s.lat * 1e5) / 1e5, Math.round(s.lon * 1e5) / 1e5, s.road, s.heading ?? null, patternIndex.get(key)];
+    return [prefixes.indexOf(prefix), rest, Math.round(s.lat * 1e5) / 1e5, Math.round(s.lon * 1e5) / 1e5, s.road, s.side ?? '', s.position, s.version, patternIndex.get(key)];
   });
   return {
-    version: 1,
+    version: 2,
     source: 'NDW, https://opendata.ndw.nu/ (measurement sites of snelheden_en_intensiteiten)',
     built: new Date().toISOString().slice(0, 10),
     radiusKm: NDW_RADIUS_KM,
     airports,
-    fields: ['prefix', 'rest of id', 'lat', 'lon', 'road', 'heading', 'lanes pattern'],
+    fields: ['prefix', 'rest of id', 'lat', 'lon', 'road', 'side (l or r, where the numbers run along the road)', 'position along the road', 'version of the site', 'lanes pattern'],
     prefixes,
     patterns,
     sites: rows,
