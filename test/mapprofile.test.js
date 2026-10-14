@@ -28,7 +28,7 @@ describe('the map profile of each tab', () => {
     for (const part of OPS_PARTS.filter((p) => p.overlay)) {
       for (const tab of Object.keys(MAP_PROFILES)) expect(MAP_PROFILES[tab][part.overlay]).toBe(tab === part.tab);
     }
-    expect(OPS_PARTS.filter((p) => p.overlay).map((p) => p.overlay).sort()).toEqual(['lightning', 'trafficMarks']);
+    expect(OPS_PARTS.filter((p) => p.overlay).map((p) => p.overlay).sort()).toEqual(['lightning', 'roads', 'trafficMarks']);
   });
 });
 

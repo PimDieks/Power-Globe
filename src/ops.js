@@ -43,6 +43,7 @@ import { escapeHtml } from './airportview.js';
 import { runwayPart } from './opsrunwayview.js';
 import { visibilityPart } from './opsvisview.js';
 import { lightningPart } from './opslightningview.js';
+import { accessPart } from './opsaccessview.js';
 import { trafficPart } from './opstrafficview.js';
 import { factItemHtml } from './opsfact.js';
 import { mapProfileFor } from './mapprofile.js';
@@ -53,6 +54,7 @@ export const OPS_PARTS = [
   visibilityPart,
   lightningPart,
   trafficPart,
+  accessPart,
 ];
 
 // The topic tabs after Details, in order. `empty` is what a tab says while no part is registered

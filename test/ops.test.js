@@ -94,11 +94,11 @@ describe('the Ops parts registry', () => {
     ...over,
   });
 
-  it('puts the registered parts in their tabs: runway, visibility and lightning in Weather, traffic in Traffic', () => {
+  it('puts the registered parts in their tabs: runway, visibility and lightning in Weather, traffic in Traffic, roads in Access', () => {
     const groups = partsByTab(OPS_PARTS);
     expect(groups.weather.map((p) => p.id)).toEqual(['runway', 'visibility', 'lightning']);
     expect(groups.traffic.map((p) => p.id)).toEqual(['traffic']);
-    expect(groups.access).toEqual([]);
+    expect(groups.access.map((p) => p.id)).toEqual(['access']);
     expect(OPS_PARTS.every((p) => TOPIC_TABS.some((t) => t.id === p.tab))).toBe(true);
   });
 

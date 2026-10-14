@@ -11,8 +11,10 @@ ExecStart=/usr/bin/node /opt/power-globe-api-relay/api-relay.mjs
 EnvironmentFile=/etc/power-globe-api-relay.env
 Restart=always
 RestartSec=10
-# A user of its own that can change nothing on the machine.
+# A user of its own that can change nothing on the machine, with a folder of its own
+# (/var/lib/power-globe-api-relay) where the road job keeps a copy of its list of measuring points.
 DynamicUser=yes
+StateDirectory=power-globe-api-relay
 NoNewPrivileges=yes
 PrivateTmp=yes
 

@@ -31,6 +31,8 @@ import { formatClock, formatClockShort, formatTick, zoneName } from './opsclock.
 import { afterDeselect, backAction, escapeAction, opsKeepsWatching, opsReturnFor } from './opsreturn.js';
 import { setLightningOverlay } from './opslightningview.js';
 import { setupLightningOverlay } from './lightningmap.js';
+import { setAccessOverlay } from './opsaccessview.js';
+import { setupAccessOverlay } from './accessmap.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
@@ -338,6 +340,8 @@ const airportMap = setupAirportMap({
 
 // The lightning part draws its rings and image on the map, while the Weather tab is open, through this.
 setLightningOverlay(setupLightningOverlay(globe));
+// The Ops tab's access part draws the road traffic through this: dots at the measurement sites, lines for jams and closures.
+setAccessOverlay(setupAccessOverlay(globe));
 
 // What the traffic part reads from the page and asks of it (see opstrafficview.js).
 const opsTraffic = {
