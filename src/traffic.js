@@ -1,7 +1,7 @@
 // Live traffic on the globe: flights, military flights and satellites, each behind a toggle.
 //
 // Flights worldwide come from the OpenSky Network every few minutes; zoomed in, the area in view
-// comes from an ADS-B Exchange style feed (adsb.lol, else airplanes.live, else adsb.fi) every
+// comes from an ADS-B Exchange style feed (adsb.lol, else adsb.fi) every
 // few seconds, which also marks military aircraft, and a worldwide military feed comes from the
 // same. Between reports each aircraft moves along its track at its ground speed. Satellites
 // follow CelesTrak's orbital elements, computed in a worker.
@@ -17,11 +17,6 @@ export const ADSB_PROVIDERS = [
     name: 'adsb.lol',
     military: 'https://api.adsb.lol/v2/mil',
     area: (lat, lng, nm) => `https://api.adsb.lol/v2/point/${lat}/${lng}/${nm}`,
-  },
-  {
-    name: 'airplanes.live',
-    military: 'https://api.airplanes.live/v2/mil',
-    area: (lat, lng, nm) => `https://api.airplanes.live/v2/point/${lat}/${lng}/${nm}`,
   },
   {
     name: 'adsb.fi',

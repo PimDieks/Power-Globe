@@ -50,9 +50,9 @@ describe('Power Globe API (worker)', () => {
     const fetchFn = vi.fn(async (url) => (url.includes('adsb.lol') ? reply('down', { status: 503 }) : reply({ ac: [{ hex: 'abc' }] })));
     const res = await route(new URL('https://api.example/flights/area?lat=52.31&lon=4.76&nm=40'), {}, fetchFn);
     const body = await res.json();
-    expect(body.source).toBe('airplanes.live');
+    expect(body.source).toBe('adsb.fi');
     expect(body.data.ac).toHaveLength(1);
-    expect(fetchFn.mock.calls[1][0]).toBe('https://api.airplanes.live/v2/point/52.25/4.75/50');
+    expect(fetchFn.mock.calls[1][0]).toBe('https://opendata.adsb.fi/api/v2/lat/52.25/lon/4.75/dist/50');
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=10');
   });
 
@@ -250,7 +250,6 @@ describe("the site's own data", () => {
 
 describe('leaving a flight feed alone after it refuses or limits the API', () => {
   const LOL = 'api.adsb.lol';
-  const LIVE = 'api.airplanes.live';
   const FI = 'opendata.adsb.fi';
   const AREA = new URL('https://api.example/flights/area?lat=52&lon=4&nm=50');
   const RELAY = { FLIGHT_RELAY_URL: 'https://relay.example/', FLIGHT_RELAY_KEY: 'relay-secret-123456' };
@@ -292,40 +291,49 @@ describe('leaving a flight feed alone after it refuses or limits the API', () =>
 
   it('leaves a feed that refuses for 6 hours and one that limits for a minute, while another answers', async () => {
     const cache = fakeCache();
-    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429), [LIVE]: status(403), [FI]: flights });
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429), [FI]: flights });
     const ask = () => route(AREA, {}, fetchFn, cache);
     expect((await (await ask()).json()).source).toBe('adsb.fi');
-    expect(hosts()).toEqual([LOL, LIVE, FI]);
+    expect(hosts()).toEqual([LOL, FI]);
     expect(maxAge(cache, 'adsb.lol')).toBe('public, max-age=60');
-    expect(maxAge(cache, 'airplanes.live')).toBe('public, max-age=21600');
+    expect(maxAge(cache, 'adsb.fi')).toBeUndefined();
 
     await ask();
     expect(hosts()).toEqual([FI]);
     vi.setSystemTime(START + 61_000);
     await ask();
     expect(hosts()).toEqual([LOL, FI]);
-    vi.setSystemTime(START + 6 * 3600_000 + 1000);
-    await ask();
-    expect(hosts()).toEqual([LOL, LIVE, FI]);
+
+    // A feed that refuses is left alone for 6 hours.
+    const refusing = fakeCache();
+    const refused = feedsAnswering({ [LOL]: status(403), [FI]: flights });
+    await route(AREA, {}, refused.fetchFn, refusing);
+    expect(refused.hosts()).toEqual([LOL, FI]);
+    expect(maxAge(refusing, 'adsb.lol')).toBe('public, max-age=21600');
+    await route(AREA, {}, refused.fetchFn, refusing);
+    expect(refused.hosts()).toEqual([FI]);
+    vi.setSystemTime(START + 61_000 + 6 * 3600_000 + 1000);
+    await route(AREA, {}, refused.fetchFn, refusing);
+    expect(refused.hosts()).toEqual([LOL, FI]);
   });
 
   it('leaves a limiting feed alone for as long as it asks, between 5 seconds and 15 minutes', async () => {
     const cache = fakeCache();
-    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429, { 'Retry-After': '300' }), [LIVE]: flights, [FI]: flights });
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429, { 'Retry-After': '300' }), [FI]: flights });
     const ask = () => route(AREA, {}, fetchFn, cache);
     await ask();
-    expect(hosts()).toEqual([LOL, LIVE]);
+    expect(hosts()).toEqual([LOL, FI]);
     expect(maxAge(cache, 'adsb.lol')).toBe('public, max-age=300');
     vi.setSystemTime(START + 120_000);
     await ask();
-    expect(hosts()).toEqual([LIVE]);
+    expect(hosts()).toEqual([FI]);
     vi.setSystemTime(START + 301_000);
     await ask();
-    expect(hosts()).toEqual([LOL, LIVE]);
+    expect(hosts()).toEqual([LOL, FI]);
 
     for (const [asked, kept] of [['86400', 900], ['1', 5]]) {
       const other = fakeCache();
-      const limited = feedsAnswering({ [LOL]: status(429, { 'Retry-After': asked }), [LIVE]: flights, [FI]: flights });
+      const limited = feedsAnswering({ [LOL]: status(429, { 'Retry-After': asked }), [FI]: flights });
       await route(AREA, {}, limited.fetchFn, other);
       expect(maxAge(other, 'adsb.lol')).toBe(`public, max-age=${kept}`);
     }
@@ -333,55 +341,60 @@ describe('leaving a flight feed alone after it refuses or limits the API', () =>
 
   it('leaves a feed that refuses or limits alone through the relay as well, as the owner\'s relay passes it on', async () => {
     const cache = fakeCache();
-    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429, marked(LOL)), [LIVE]: status(403, marked(LIVE)), [FI]: flightsFrom(FI) });
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(403, marked(LOL)), [FI]: flightsFrom(FI) });
     const ask = () => route(AREA, RELAY, fetchFn, cache);
     expect((await (await ask()).json()).source).toBe('adsb.fi');
-    expect(hosts()).toEqual([LOL, LIVE, FI]);
-    expect(maxAge(cache, 'adsb.lol', 'relay')).toBe('public, max-age=60');
-    expect(maxAge(cache, 'airplanes.live', 'relay')).toBe('public, max-age=21600');
+    expect(hosts()).toEqual([LOL, FI]);
+    expect(maxAge(cache, 'adsb.lol', 'relay')).toBe('public, max-age=21600');
     await ask();
     expect(hosts()).toEqual([FI]);
+
+    const limited = fakeCache();
+    const limiting = feedsAnswering({ [LOL]: status(429, marked(LOL)), [FI]: flightsFrom(FI) });
+    await route(AREA, RELAY, limiting.fetchFn, limited);
+    expect(limiting.hosts()).toEqual([LOL, FI]);
+    expect(maxAge(limited, 'adsb.lol', 'relay')).toBe('public, max-age=60');
   });
 
   it('leaves a feed the relay does not ask alone for a minute, but not one the relay cannot sign in to', async () => {
     const cache = fakeCache();
-    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429, marked(LOL)), [LIVE]: status(404), [FI]: flightsFrom(FI) });
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(404), [FI]: flightsFrom(FI) });
     const ask = () => route(AREA, RELAY, fetchFn, cache);
     expect((await (await ask()).json()).source).toBe('adsb.fi');
-    expect(hosts()).toEqual([LOL, LIVE, FI]);
-    expect(maxAge(cache, 'airplanes.live', 'relay')).toBe('public, max-age=60');
+    expect(hosts()).toEqual([LOL, FI]);
+    expect(maxAge(cache, 'adsb.lol', 'relay')).toBe('public, max-age=60');
     await ask();
     expect(hosts()).toEqual([FI]);
     vi.setSystemTime(START + 61_000);
     await ask();
-    expect(hosts()).toEqual([LOL, LIVE, FI]);
+    expect(hosts()).toEqual([LOL, FI]);
 
     // The relay's own 401 means its key does not match, which says nothing about the feeds.
     const wrongKey = fakeCache();
-    const refused = feedsAnswering({ [LOL]: status(401), [LIVE]: status(401), [FI]: status(401) });
+    const refused = feedsAnswering({ [LOL]: status(401), [FI]: status(401) });
     await expect(route(AREA, RELAY, refused.fetchFn, wrongKey)).rejects.toMatchObject({ status: 502 });
     await expect(route(AREA, RELAY, refused.fetchFn, wrongKey)).rejects.toMatchObject({ status: 502 });
-    expect(refused.hosts()).toEqual([LOL, LIVE, FI, LOL, LIVE, FI]);
+    expect(refused.hosts()).toEqual([LOL, FI, LOL, FI]);
     expect(wrongKey.entries.size).toBe(0);
   });
 
   it('goes by what the relay marked: a feed\'s own 401 or 403 is remembered, its own 404 or an unmarked 403 is not', async () => {
     for (const [code, headers, remembered] of [[401, marked(LOL), true], [403, marked(LOL), true], [404, marked(LOL), false], [403, undefined, false]]) {
       const cache = fakeCache();
-      const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(code, headers), [LIVE]: flightsFrom(LIVE), [FI]: flights });
+      const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(code, headers), [FI]: flightsFrom(FI) });
       await route(AREA, RELAY, fetchFn, cache);
-      expect(hosts()).toEqual([LOL, LIVE]);
+      expect(hosts()).toEqual([LOL, FI]);
       await route(AREA, RELAY, fetchFn, cache);
-      expect(hosts(), `a ${headers ? 'marked' : 'unmarked'} ${code}`).toEqual(remembered ? [LIVE] : [LOL, LIVE]);
+      expect(hosts(), `a ${headers ? 'marked' : 'unmarked'} ${code}`).toEqual(remembered ? [FI] : [LOL, FI]);
     }
   });
 
   it('keeps what direct requests were refused apart from what the relay will be asked', async () => {
     const cache = fakeCache();
-    const answers = { [LOL]: status(403), [LIVE]: flights, [FI]: flights };
+    const answers = { [LOL]: status(403), [FI]: flights };
     const { fetchFn, hosts } = feedsAnswering(answers);
-    expect((await (await route(AREA, {}, fetchFn, cache)).json()).source).toBe('airplanes.live');
-    expect(hosts()).toEqual([LOL, LIVE]);
+    expect((await (await route(AREA, {}, fetchFn, cache)).json()).source).toBe('adsb.fi');
+    expect(hosts()).toEqual([LOL, FI]);
     expect(maxAge(cache, 'adsb.lol')).toBe('public, max-age=21600');
 
     answers[LOL] = flightsFrom(LOL);
@@ -393,43 +406,43 @@ describe('leaving a flight feed alone after it refuses or limits the API', () =>
   it('asks again after a feed\'s own 404 or trouble, and leaves it alone after a 401 when asked direct', async () => {
     for (const [code, remembered] of [[401, true], [404, false], [503, false]]) {
       const cache = fakeCache();
-      const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(code), [LIVE]: flights, [FI]: flights });
+      const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(code), [FI]: flights });
       await route(AREA, {}, fetchFn, cache);
-      expect(hosts()).toEqual([LOL, LIVE]);
+      expect(hosts()).toEqual([LOL, FI]);
       await route(AREA, {}, fetchFn, cache);
-      expect(hosts(), `a direct ${code}`).toEqual(remembered ? [LIVE] : [LOL, LIVE]);
+      expect(hosts(), `a direct ${code}`).toEqual(remembered ? [FI] : [LOL, FI]);
     }
   });
 
   it('says which feeds are being left alone, without asking any, when none can be asked', async () => {
     const cache = fakeCache();
-    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(403), [LIVE]: status(403), [FI]: status(403) });
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(403), [FI]: status(403) });
     await expect(route(AREA, {}, fetchFn, cache)).rejects.toMatchObject({ status: 502 });
-    expect(hosts()).toEqual([LOL, LIVE, FI]);
+    expect(hosts()).toEqual([LOL, FI]);
     const err = await route(AREA, {}, fetchFn, cache).catch((e) => e);
     expect(err.status).toBe(502);
     expect(err.message).toBe(
-      'adsb.lol is not asked for now (api.adsb.lol answered 403); airplanes.live is not asked for now (api.airplanes.live answered 403); adsb.fi is not asked for now (opendata.adsb.fi answered 403)',
+      'adsb.lol is not asked for now (api.adsb.lol answered 403); adsb.fi is not asked for now (opendata.adsb.fi answered 403)',
     );
     expect(hosts()).toEqual([]);
   });
 
   it('remembers nothing without a cache, and carries on when the cache fails', async () => {
-    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(403), [LIVE]: flights, [FI]: flights });
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(403), [FI]: flights });
     await route(AREA, {}, fetchFn);
     await route(AREA, {}, fetchFn);
-    expect(hosts()).toEqual([LOL, LIVE, LOL, LIVE]);
+    expect(hosts()).toEqual([LOL, FI, LOL, FI]);
 
     const broken = { match: async () => Promise.reject(new Error('no cache')), put: async () => Promise.reject(new Error('no cache')) };
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect((await (await route(AREA, {}, fetchFn, broken)).json()).source).toBe('airplanes.live');
-    expect(hosts()).toEqual([LOL, LIVE]);
+    expect((await (await route(AREA, {}, fetchFn, broken)).json()).source).toBe('adsb.fi');
+    expect(hosts()).toEqual([LOL, FI]);
     expect(log).toHaveBeenCalledTimes(1);
   });
 
   it('is shared by the requests the handler answers', async () => {
     const cache = fakeCache();
-    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429), [LIVE]: status(403), [FI]: flights });
+    const { fetchFn, hosts } = feedsAnswering({ [LOL]: status(429), [FI]: flights });
     vi.stubGlobal('caches', { default: cache });
     vi.stubGlobal('fetch', fetchFn);
     const pending = [];
@@ -440,7 +453,7 @@ describe('leaving a flight feed alone after it refuses or limits the API', () =>
       expect((await res.json()).source).toBe('adsb.fi');
       await Promise.all(pending);
     }
-    expect(hosts()).toEqual([LOL, LIVE, FI, FI]);
+    expect(hosts()).toEqual([LOL, FI, FI]);
   });
 });
 
