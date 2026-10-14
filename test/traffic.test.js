@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AircraftStore, drawnAltitude, estimatePosition, fromAdsb, fromOpenSky } from '../src/aircraft.js';
+import { AircraftStore, drawnAltitude, estimatePosition, fromAdsb, fromOpenSky, hiddenByLayers } from '../src/aircraft.js';
 import { orbitClass, orbitPath, parseTle, periodMinutes, satellitePosition, toGeodetic, toSatrec, toScene, tleEpoch } from '../src/orbits.js';
 import { aircraftDetailsHtml, ago, satelliteDetailsHtml } from '../src/trafficview.js';
 import { areaRadiusNm } from '../src/traffic.js';
@@ -54,6 +54,12 @@ describe('fromAdsb', () => {
     expect(rest).toEqual([]);
     expect(mil).toMatchObject({ id: 'ae1234', callsign: 'RCH123', type: 'C17', registration: '05-5140', military: true, altitudeFt: 28000, seen: 1759999998000 });
     expect(klm).toMatchObject({ onGround: true, altitudeFt: 0, military: false });
+  });
+
+  it('reads the time of a feed that gives it in seconds (adsb.fi), as of one in milliseconds', () => {
+    const inSeconds = fromAdsb({ now: 1760000000.5, aircraft: [data.ac[1]] });
+    expect(inSeconds[0].seen).toBe(1760000000500 - 500);
+    expect(fromAdsb({ now: 1760000000500, ac: [data.ac[1]] })[0].seen).toBe(inSeconds[0].seen);
   });
 
   it('treats everything in the military feed as military', () => {
@@ -140,6 +146,20 @@ describe('behindGlobe', () => {
     const d = (65 * Math.PI) / 180;
     expect(behindGlobe(far, 0, R * Math.sin(d), R * Math.cos(d), R)).toBe(true);
     expect(behindGlobe(far, 0, high * Math.sin(d), high * Math.cos(d), R)).toBe(false);
+  });
+});
+
+describe('hiddenByLayers', () => {
+  it('shows civil aircraft with Flights and military ones with Military flights', () => {
+    expect(hiddenByLayers({ military: false }, { flights: true, military: false })).toBe(false);
+    expect(hiddenByLayers({ military: false }, { flights: false, military: true })).toBe(true);
+    expect(hiddenByLayers({ military: true }, { flights: true, military: false })).toBe(true);
+    expect(hiddenByLayers({ military: true }, { flights: false, military: true })).toBe(false);
+  });
+
+  it('hides an aircraft that is gone only when both layers are off', () => {
+    expect(hiddenByLayers(undefined, { flights: false, military: true })).toBe(false);
+    expect(hiddenByLayers(undefined, { flights: false, military: false })).toBe(true);
   });
 });
 

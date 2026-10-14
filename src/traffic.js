@@ -1,11 +1,11 @@
 // Live traffic on the globe: flights, military flights and satellites, each behind a toggle.
 //
 // Flights worldwide come from the OpenSky Network every few minutes; zoomed in, the area in view
-// comes from an ADS-B Exchange style feed (adsb.lol, else airplanes.live, else adsb.fi) every
+// comes from an ADS-B Exchange style feed (adsb.lol, else adsb.fi) every
 // few seconds, which also marks military aircraft, and a worldwide military feed comes from the
 // same. Between reports each aircraft moves along its track at its ground speed. Satellites
 // follow CelesTrak's orbital elements, computed in a worker.
-import { AircraftStore, drawnAltitude, estimatePosition, fromAdsb, fromOpenSky } from './aircraft.js';
+import { AircraftStore, drawnAltitude, estimatePosition, fromAdsb, fromOpenSky, hiddenByLayers } from './aircraft.js';
 import { aircraftLayer, behindGlobe, orbitLine, satelliteLayer, selectionRing } from './trafficlayer.js';
 import { EARTH_RADIUS_KM, orbitClass, orbitPath, parseTle, periodMinutes, satellitePosition, toGeodetic, toSatrec, tleEpoch } from './orbits.js';
 import { aircraftDetailsHtml, aircraftName, satelliteDetailsHtml } from './trafficview.js';
@@ -17,11 +17,6 @@ export const ADSB_PROVIDERS = [
     name: 'adsb.lol',
     military: 'https://api.adsb.lol/v2/mil',
     area: (lat, lng, nm) => `https://api.adsb.lol/v2/point/${lat}/${lng}/${nm}`,
-  },
-  {
-    name: 'airplanes.live',
-    military: 'https://api.airplanes.live/v2/mil',
-    area: (lat, lng, nm) => `https://api.airplanes.live/v2/point/${lat}/${lng}/${nm}`,
   },
   {
     name: 'adsb.fi',
@@ -278,6 +273,8 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
   let nextMilitary = 0;
   let nextArea = 0;
   let lastArea = null;
+  // Whether the last request for the area failed. Its retry waits FEED_RETRY_MS whatever the view does.
+  let areaFailed = false;
   const inFlight = new Set();
   let shown = [];
   // Bumped when new aircraft data arrives or the toggles change, to rebuild the shown list.
@@ -391,10 +388,12 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
         const { data, name } = await fromProviders((p) => p.area(center.lat, center.lng, nm), `/flights/area?lat=${center.lat}&lon=${center.lng}&nm=${nm}`);
         addAircraft(fromAdsb(data), name);
         lastArea = { ...center, nm };
+        areaFailed = false;
         status.area = `In view from ${name}, ${timeText()}`;
         nextArea = Date.now() + AREA_MS;
       } catch (err) {
         console.error(err);
+        areaFailed = true;
         status.area = `Flights in view unavailable (${explain(err)})`;
         nextArea = Date.now() + FEED_RETRY_MS;
       }
@@ -495,7 +494,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     saveSettings(settings);
     planes.visible = settings.flights || settings.military;
     sats.visible = settings.satellites;
-    if (selected?.kind === 'aircraft' && !(settings.flights || settings.military)) deselect();
+    if (selected?.kind === 'aircraft' && hiddenByLayers(store.byId.get(selected.id), settings)) deselect();
     if (selected?.kind === 'satellite' && (!settings.satellites || selected.group !== settings.group)) deselect();
     if (settings.satellites) loadSatellites(settings.group);
     version++;
@@ -617,7 +616,9 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
       if (settings.flights && wall >= nextGlobal) loadGlobal();
       if (settings.military && wall >= nextMilitary) loadMilitary();
       if (settings.flights || settings.military) {
-        const moved = lastArea && greatCircleNm(lastArea, pov) > lastArea.nm / 2;
+        // A view that has moved on is asked for at once, except after a failure: the area then stays
+        // the one before it, so it would look moved on every frame and ask again and again.
+        const moved = lastArea && !areaFailed && greatCircleNm(lastArea, pov) > lastArea.nm / 2;
         if (wall >= nextArea || moved) loadArea(pov);
       }
     }
@@ -725,6 +726,12 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
     return satellites.tles[item.index]?.name ?? 'Satellite';
   }
 
+  // The selected aircraft's latest report (see aircraft.js), for a camera that follows it, or null
+  // when an aircraft is not selected or is no longer received.
+  function selectedAircraft() {
+    return selected?.kind === 'aircraft' ? (store.byId.get(selected.id) ?? null) : null;
+  }
+
   // Details of the selected aircraft or satellite, as HTML, or null if it is gone.
   function detailsHtml() {
     const now = Date.now();
@@ -752,7 +759,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, announce }) {
 
   applySettings();
 
-  return { frame, pick, select, deselect, detailsHtml, title, get selected() { return selected; } };
+  return { frame, pick, select, deselect, detailsHtml, title, selectedAircraft, get selected() { return selected; } };
 }
 
 // Normalised device coordinates of a point, or null if it is behind the camera.

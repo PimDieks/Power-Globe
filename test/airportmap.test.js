@@ -23,12 +23,13 @@ describe('weather for the airports in view', () => {
   async function setup(airports) {
     const { loadAirports } = await import('../src/airports.js');
     loadAirports.mockResolvedValue(airports);
-    const map = setupAirportMap({ globe: {}, mapFeatures: { setRunwayLabels() {} }, getTime: () => '2026-10-13T12:00', getLimits: () => ({ crosswind: 25, tailwind: 10 }) });
+    const setRunwayLabels = vi.fn();
+    const map = setupAirportMap({ globe: {}, mapFeatures: { setRunwayLabels }, getTime: () => '2026-10-13T12:00', getLimits: () => ({ crosswind: 25, tailwind: 10 }) });
     const settle = async (pov = view, ms = 400) => {
       map.view(pov);
       await vi.advanceTimersByTimeAsync(ms);
     };
-    return { map, settle };
+    return { map, settle, setRunwayLabels };
   }
 
   beforeEach(() => {
@@ -81,6 +82,58 @@ describe('weather for the airports in view', () => {
     const { settle } = await setup([FIELD]);
     for (let i = 0; i < 5; i++) await settle({ ...view, lat: 51 + i * 0.001 });
     expect(airportWeather).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the camera to settle however long a drag or zoom lasts', async () => {
+    airportWeather.mockResolvedValue(new Map());
+    const { map, setRunwayLabels } = await setup([FIELD]);
+    for (let t = 0; t < 10_000; t += 16) {
+      map.view({ ...view, lng: t * 1e-7 });
+      await vi.advanceTimersByTimeAsync(16);
+    }
+    expect(setRunwayLabels).not.toHaveBeenCalled();
+    expect(airportWeather).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(400);
+    expect(setRunwayLabels).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps up with a camera that follows an aircraft, about once a second, and asks for the weather once', async () => {
+    airportWeather.mockImplementation(async (list, { onData }) => {
+      const answer = new Map(list.map((a) => [a.ident, null]));
+      onData(answer);
+      return answer;
+    });
+    const { map, setRunwayLabels } = await setup([FIELD]);
+    map.setFollowing(true);
+    // The camera reports about every 300 ms, so the update that waits for it to settle never comes.
+    for (let t = 0; t < 10_000; t += 300) {
+      map.view({ ...view, lng: t * 1e-7 });
+      await vi.advanceTimersByTimeAsync(300);
+    }
+    const during = setRunwayLabels.mock.calls.length;
+    expect(during).toBeGreaterThanOrEqual(9);
+    expect(during).toBeLessThanOrEqual(11);
+    expect(airportWeather).toHaveBeenCalledTimes(1);
+    // And once more when it stops.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(setRunwayLabels.mock.calls.length).toBe(during + 1);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(setRunwayLabels.mock.calls.length).toBe(during + 1);
+  });
+
+  it('goes back to waiting for the camera to settle once following stops', async () => {
+    airportWeather.mockResolvedValue(new Map());
+    const { map, setRunwayLabels } = await setup([FIELD]);
+    map.setFollowing(true);
+    map.view(view);
+    map.setFollowing(false);
+    await vi.advanceTimersByTimeAsync(400);
+    const before = setRunwayLabels.mock.calls.length;
+    for (let t = 0; t < 5000; t += 16) {
+      map.view({ ...view, lng: t * 1e-7 });
+      await vi.advanceTimersByTimeAsync(16);
+    }
+    expect(setRunwayLabels.mock.calls.length).toBe(before);
   });
 
   it('asks for an airport again once its lookup is over without an answer for it', async () => {

@@ -4,7 +4,7 @@
 //
 //   GET /                         what is here
 //   GET /flights/global           all aircraft (OpenSky Network), cached 2 min with an account, else 5 min
-//   GET /flights/area?lat&lon&nm  aircraft around a point, up to 250 NM (adsb.lol, airplanes.live, adsb.fi), cached 10 s
+//   GET /flights/area?lat&lon&nm  aircraft around a point, up to 250 NM (adsb.lol, adsb.fi), cached 10 s
 //   GET /flights/military         military aircraft worldwide (same feeds), cached 30 s
 //   GET /metar?ids=EHAM,KJFK      latest METARs (NOAA Aviation Weather Center), cached 2 min
 //   GET /satellites/<group>       orbital elements as TLE (CelesTrak), cached 2 h
@@ -56,12 +56,11 @@ export const OPENAIP_MAX_LEVEL = 14;
 
 export const ADSB_FEEDS = [
   { name: 'adsb.lol', military: 'https://api.adsb.lol/v2/mil', area: (lat, lon, nm) => `https://api.adsb.lol/v2/point/${lat}/${lon}/${nm}` },
-  { name: 'airplanes.live', military: 'https://api.airplanes.live/v2/mil', area: (lat, lon, nm) => `https://api.airplanes.live/v2/point/${lat}/${lon}/${nm}` },
   { name: 'adsb.fi', military: 'https://opendata.adsb.fi/api/v2/mil', area: (lat, lon, nm) => `https://opendata.adsb.fi/api/v2/lat/${lat}/lon/${lon}/dist/${nm}` },
 ];
 
 // Asked through the flight relay when there is one; the same hosts as in relay/api-relay.mjs.
-export const RELAYED_HOSTS = ['opensky-network.org', 'auth.opensky-network.org', 'api.adsb.lol', 'api.airplanes.live', 'opendata.adsb.fi'];
+export const RELAYED_HOSTS = ['opensky-network.org', 'auth.opensky-network.org', 'api.adsb.lol', 'opendata.adsb.fi'];
 const relayOn = (env) => Boolean(env.FLIGHT_RELAY_URL && env.FLIGHT_RELAY_KEY);
 
 class HttpError extends Error {

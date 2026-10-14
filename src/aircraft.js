@@ -71,11 +71,12 @@ export function fromOpenSky(data) {
     });
 }
 
-// ADS-B Exchange v2 style feeds (adsb.lol, airplanes.live, adsb.fi): { now, ac: [{ hex, flight,
+// ADS-B Exchange v2 style feeds (adsb.lol, adsb.fi): { now, ac: [{ hex, flight,
 // r, t, desc, ownOp, dbFlags, alt_baro, gs, track, baro_rate, squawk, lat, lon, seen_pos }] },
 // in feet and knots. dbFlags bit 1 marks military aircraft.
 export function fromAdsb(data, { military = false } = {}) {
-  const now = data?.now ?? Date.now();
+  // adsb.fi gives the time of the feed in seconds, the others in milliseconds.
+  const now = data?.now == null ? Date.now() : data.now < 1e11 ? data.now * 1000 : data.now;
   return (data?.ac ?? data?.aircraft ?? [])
     .filter((a) => a.lat != null && a.lon != null && !/^C/.test(a.category ?? ''))
     .map((a) => {
@@ -124,6 +125,13 @@ export function estimatePosition(ac, now) {
 export function drawnAltitude(ac) {
   if (ac.onGround || !Number.isFinite(ac.altitudeFt)) return 0;
   return (Math.max(0, ac.altitudeFt) * M_PER_FT) / EARTH_RADIUS_M;
+}
+
+// Whether the layers that are on leave `ac` out: civil aircraft show with Flights, military ones
+// with Military flights. An aircraft that is gone is hidden only when both are off.
+export function hiddenByLayers(ac, { flights, military }) {
+  if (!ac) return !(flights || military);
+  return !(ac.military ? military : flights);
 }
 
 // Every aircraft heard from any feed, by ICAO 24-bit address. Each report replaces an older one;
