@@ -1,7 +1,10 @@
 // Map tiles that fail to load are asked for again, a few times and a little later, instead of
-// staying missing. three-slippy-map-globe asks for each tile once and has no handler for a failed
-// load: the tile is "loading" for ever, so a single refused request (a busy service, a dropped
-// connection) left a hole in the chart until the page was reloaded.
+// staying missing. three-slippy-map-globe as published asks for each tile once and has no handler
+// for a failed load: the tile is "loading" for ever, so a single refused request (a busy service, a
+// dropped connection) left a hole in the chart until the page was reloaded. The site's copy (see
+// src/vendor) now frees such a tile and asks for it again when it is next in view after a pause of
+// at least five seconds; the loader below, which never reports a failure to the engine, retries
+// sooner and under a fresh address, and gives up with a transparent tile.
 
 // Waits before each further attempt. Even with the spread below they add up to over a minute, so
 // a limit that resets every minute (see TILE_RATE_LIMIT in api/worker.js) has passed before the

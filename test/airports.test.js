@@ -579,6 +579,35 @@ describe('airport weather when Open-Meteo refuses', () => {
     expect(batches).toEqual([1]);
     expect(askedProxy(fetchMock)).toEqual([1]);
   });
+
+  it('keeps the weather of no more than the airports asked for last, and none for over an hour', async () => {
+    const fetchMock = services({ openMeteo: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const { airportWeather, weatherCacheSize, WEATHER_CACHE_SIZE } = await fresh();
+    const ids = Array.from({ length: WEATHER_CACHE_SIZE + 1 }, (_, i) => `XAQ${i}`);
+    expect(await settlesWithin(airportWeather(ids.map(field)), 600_000)).toBe(true);
+    expect(weatherCacheSize()).toBe(WEATHER_CACHE_SIZE);
+    const asked = askedOpenMeteo(fetchMock);
+    // The newest is kept; the oldest has gone and is asked for again.
+    await airportWeather([field(ids.at(-1))], { preferLive: true });
+    expect(askedOpenMeteo(fetchMock)).toBe(asked);
+    await airportWeather([field(ids[0])], { preferLive: true });
+    expect(askedOpenMeteo(fetchMock)).toBe(asked + 1);
+    // An hour on, none is kept: they are let go, not only passed over.
+    vi.setSystemTime(Date.now() + 3_600_000);
+    await airportWeather([field(ids.at(-1))], { preferLive: true });
+    expect(askedOpenMeteo(fetchMock)).toBe(asked + 2);
+    expect(weatherCacheSize()).toBe(1);
+  });
+
+  it('has room in its cache for every airport the wind check asks about', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { majorAirports, WEATHER_CACHE_SIZE } = await fresh();
+    const data = JSON.parse(await readFile(new URL('../public/data/airports.json', import.meta.url), 'utf8'));
+    const major = majorAirports(data.airports.map(toAirport)).length;
+    expect(major).toBeGreaterThan(1000);
+    expect(major).toBeLessThan(WEATHER_CACHE_SIZE);
+  });
 });
 
 describe('the airport panel never waits for ever', () => {

@@ -5,6 +5,7 @@ import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 // MapLibre starts its worker from the file next to its own, which a bundle does not keep there.
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
+import { withTimeout } from './api.js';
 import { cameraTarget, hazeBand, imageryTier } from './pilotview.js';
 
 maplibregl.setWorkerUrl(workerUrl);
@@ -36,14 +37,23 @@ export const RETRY_PAUSES_MS = [400, 1500];
 // This many tiles of one kind in a row failing for good means the service cannot be reached.
 export const TROUBLE_AFTER = 6;
 
+// The listener goes with the pause, so that the tile's signal does not gather one for every retry.
 const sleep = (ms, signal) =>
   new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => {
+    const onAbort = () => {
       clearTimeout(timer);
       reject(signal.reason ?? new Error('Aborted'));
-    });
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
+
+// A map whose style has not loaded by then is given up on: MapLibre may never say either way
+// (when the GPU context is lost as it starts), and the map and its context would stay.
+export const STYLE_TIMEOUT_MS = 20_000;
 
 const TROUBLE_TEXT = { imagery: 'Imagery unavailable', terrain: 'Terrain unavailable', 'imagery terrain': 'Imagery and terrain unavailable' };
 
@@ -148,8 +158,11 @@ export async function createPilotMap({ container, terrain, onLoaded, onTrouble }
     // The style, then the terrain and the level of detail, are in place before the first tile is
     // asked for, so nothing is loaded twice.
     let ready = false;
-    await new Promise((resolve, reject) => {
+    // Set once the map is given up on, so that a style that loads after all touches nothing.
+    let gaveUp = false;
+    const styled = new Promise((resolve, reject) => {
       map.once('style.load', () => {
+        if (gaveUp) return;
         map.setMaxPitch(120);
         if (terrain) map.setTerrain({ source: 'dem', exaggeration: 1 });
         ready = true;
@@ -162,6 +175,10 @@ export async function createPilotMap({ container, terrain, onLoaded, onTrouble }
         if (ready) console.error(event.error);
         else reject(event.error);
       });
+    });
+    await withTimeout(styled, STYLE_TIMEOUT_MS, 'The map did not start in time').catch((err) => {
+      gaveUp = true;
+      throw err;
     });
 
     // Said once, when the first view has all its tiles (not before the first have been asked for).

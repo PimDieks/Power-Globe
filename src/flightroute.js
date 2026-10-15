@@ -2,7 +2,7 @@
 // from OpenSky (api/worker.js, /track), the airport it left from, and the route the static
 // route database gives for its callsign, which is only used when the aircraft's position bears it
 // out. The parts that need no browser; flightlines.js draws them.
-import { PROXY_URL } from './api.js';
+import { PROXY_URL, remember } from './api.js';
 
 // Static route data (VRS standing data, CC0, published through adsb.lol), one small file per
 // callsign, and open to web pages.
@@ -205,6 +205,8 @@ export function acceptRoute(airports, { position, trackStart = null, heading = n
 }
 
 const caches = { tracks: new Map(), routes: new Map() };
+// The routes of no more than this many callsigns are kept, those looked up longest ago going first.
+export const ROUTE_CACHE_SIZE = 200;
 
 // The track of an aircraft's current flight from the Power Globe API, { points, endTime, callsign },
 // with no points if it has none or cannot be had. Kept for TRACK_CACHE_MS, whatever the answer
@@ -228,12 +230,13 @@ export function loadTrack(id, { fetchFn = fetch, now = Date.now, proxy = PROXY_U
 }
 
 // The airports of a callsign's route, or null if the database has none. A route (or its absence)
-// is kept for the session; a lookup that failed is asked again after ROUTE_RETRY_MS.
+// is kept for the session (for the last ROUTE_CACHE_SIZE callsigns); a lookup that failed is asked
+// again after ROUTE_RETRY_MS.
 export function loadRoute(callsign, { fetchFn = fetch, now = Date.now } = {}) {
   const url = routeUrl(callsign);
   if (!url) return Promise.resolve(null);
   const hit = caches.routes.get(url);
-  if (hit && (hit.failedAt === null || now() - hit.failedAt < ROUTE_RETRY_MS)) return hit.promise;
+  if (hit && (hit.failedAt === null || now() - hit.failedAt < ROUTE_RETRY_MS)) return remember(caches.routes, url, hit, ROUTE_CACHE_SIZE).promise;
   const entry = { promise: null, failedAt: null, value: undefined };
   entry.promise = (async () => {
     try {
@@ -249,7 +252,7 @@ export function loadRoute(callsign, { fetchFn = fetch, now = Date.now } = {}) {
   entry.promise.then((route) => {
     entry.value = route;
   });
-  caches.routes.set(url, entry);
+  remember(caches.routes, url, entry, ROUTE_CACHE_SIZE);
   return entry.promise;
 }
 

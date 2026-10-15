@@ -4,6 +4,8 @@ import { viewProfile } from '../src/pilotview.js';
 // MapLibre needs WebGL: a stand-in that records what is asked of it.
 const maps = [];
 const protocols = {};
+// When set, the stand-in never says its style has loaded (nor that it failed).
+const silence = { style: false };
 vi.mock('maplibre-gl', () => {
   class Map {
     constructor(options) {
@@ -14,7 +16,7 @@ vi.mock('maplibre-gl', () => {
       this.removed = 0;
       this.terrain = null;
       maps.push(this);
-      queueMicrotask(() => this.handlers['style.load']?.());
+      if (!silence.style) queueMicrotask(() => this.handlers['style.load']?.());
     }
     once(type, fn) {
       this.handlers[type] = fn;
@@ -72,7 +74,7 @@ vi.mock('maplibre-gl', () => {
 vi.mock('maplibre-gl/dist/maplibre-gl.css', () => ({}));
 vi.mock('maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url', () => ({ default: '/worker.js' }));
 
-const { NO_DATA_BYTES, RETRY_PAUSES_MS, TROUBLE_AFTER, TileHealth, TileUnavailable, createPilotMap, fetchTile } = await import('../src/pilotmap.js');
+const { NO_DATA_BYTES, RETRY_PAUSES_MS, STYLE_TIMEOUT_MS, TROUBLE_AFTER, TileHealth, TileUnavailable, createPilotMap, fetchTile } = await import('../src/pilotmap.js');
 
 const answer = (status, bytes = 100) => ({ status, ok: status >= 200 && status < 300, arrayBuffer: async () => new ArrayBuffer(bytes) });
 const noPause = vi.fn(async () => {});
@@ -125,6 +127,30 @@ describe('fetchTile', () => {
       throw new Error('aborted');
     });
     await expect(fetchTile('u', { kind: 'imagery', signal: controller.signal, fetchImpl, pause: noPause })).rejects.toThrow('aborted');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves no listener on the signal after its pauses', async () => {
+    vi.useFakeTimers();
+    try {
+      const listeners = new Set();
+      const signal = { aborted: false, addEventListener: (type, fn) => listeners.add(fn), removeEventListener: (type, fn) => listeners.delete(fn) };
+      const request = fetchTile('u', { kind: 'imagery', signal, fetchImpl: async () => answer(503) }).catch((err) => err);
+      await vi.runAllTimersAsync();
+      expect((await request).message).toBe('Tile 503');
+      expect(listeners.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still stops a pause when the map no longer wants the tile', async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn(async () => answer(503));
+    const request = fetchTile('u', { kind: 'imagery', signal: controller.signal, fetchImpl });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort(new Error('gone'));
+    await expect(request).rejects.toThrow('gone');
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
@@ -314,5 +340,25 @@ describe('createPilotMap', () => {
     maps[0].handlers.error({ error: new Error('shader') });
     expect(error).toHaveBeenCalledTimes(1);
     error.mockRestore();
+  });
+
+  it('gives up on a map whose style never loads, and leaves nothing of it', async () => {
+    vi.useFakeTimers();
+    silence.style = true;
+    try {
+      const made = createPilotMap({ container, terrain: true }).catch((err) => err);
+      await vi.advanceTimersByTimeAsync(STYLE_TIMEOUT_MS - 1);
+      expect(maps[0].removed).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect((await made).name).toBe('TimeoutError');
+      expect(maps[0].removed).toBe(1);
+      expect(container.children).toHaveLength(0);
+      // A style that loads after all, once the map is gone, touches nothing.
+      maps[0].handlers['style.load']();
+      expect(maps[0].terrain).toBeNull();
+    } finally {
+      silence.style = false;
+      vi.useRealTimers();
+    }
   });
 });

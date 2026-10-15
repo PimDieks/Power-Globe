@@ -1,6 +1,6 @@
 // The latest forecast for an airport (TAF), from the Aviation Weather Center's public data API
 // (NOAA, public domain), and its groups read into periods with a visibility and a ceiling.
-import { PROXY_URL } from './api.js';
+import { PROXY_URL, remember } from './api.js';
 import { visibilityMiles } from './metar.js';
 
 const TAF_URL = (ident) => `https://aviationweather.gov/api/data/taf?ids=${encodeURIComponent(ident)}&format=json`;
@@ -144,13 +144,16 @@ export function newestTaf(list) {
   return parsed.sort((a, b) => b.issued - a.issued)[0] ?? null;
 }
 
+// The forecasts of no more than this many airports are kept, those asked for longest ago going
+// first.
+export const TAF_CACHE_SIZE = 100;
 const cache = new Map();
 
 // The current TAF for an airport, or null when it has none (most small fields do not). Throws if
 // the service cannot be reached.
 export async function latestTaf(ident) {
   const hit = cache.get(ident);
-  if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
+  if (hit && Date.now() - hit.at < CACHE_MS) return remember(cache, ident, hit, TAF_CACHE_SIZE).value;
   let text;
   // Through the Power Globe API when there is one, else straight from aviationweather.gov.
   for (const url of [PROXY_URL && `${PROXY_URL}/taf?ids=${encodeURIComponent(ident)}`, TAF_URL(ident)].filter(Boolean)) {
@@ -164,6 +167,6 @@ export async function latestTaf(ident) {
     }
   }
   const value = newestTaf(text.trim() ? JSON.parse(text) : []);
-  cache.set(ident, { at: Date.now(), value });
+  remember(cache, ident, { at: Date.now(), value }, TAF_CACHE_SIZE);
   return value;
 }

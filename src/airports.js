@@ -1,7 +1,7 @@
 // Airports and their runways (from OurAirports, see scripts/build-airports.mjs), airport search,
 // and hourly ground conditions at airports from Open-Meteo.
 import { AIRPORT_VARIABLES, fetchAirportHourly, openMeteoOpen, parseTime } from './weather.js';
-import { LARGE_SNAPSHOT_TIMEOUT_MS, SNAPSHOT_FRESH_MS, SNAPSHOT_TIMEOUT_MS, fetchSnapshot, withTimeout } from './api.js';
+import { LARGE_SNAPSHOT_TIMEOUT_MS, SNAPSHOT_FRESH_MS, SNAPSHOT_TIMEOUT_MS, fetchSnapshot, remember, withTimeout } from './api.js';
 
 // Case- and accent-insensitive form for matching, so "sao" finds "São Paulo".
 export const fold = (text) =>
@@ -115,9 +115,15 @@ export function conditionsAt(hourly, time) {
   };
 }
 
-// Hourly conditions per airport ident, kept for an hour like the global forecast.
+// Hourly conditions per airport ident, kept for an hour like the global forecast, and for no more
+// than the WEATHER_CACHE_SIZE airports asked for last: room for every major airport the wind check
+// asks about (1,149 in October 2026; a test keeps it below this) and the nearby airports the map
+// asks about besides, so a second check within the hour doesn't fetch them again.
 const CACHE_MS = 60 * 60 * 1000;
+export const WEATHER_CACHE_SIZE = 2000;
 const weatherCache = new Map();
+// The number of airports whose conditions are kept, for tests.
+export const weatherCacheSize = () => weatherCache.size;
 
 // The site's own airport weather (major airports, every hour, see build-data.mjs; copies built
 // earlier have a step every three hours):
@@ -180,6 +186,11 @@ function fromSnapshot(snapshot, list, result, maxAge, now = Date.now()) {
 // each batch arrives, so a long list can fill in progressively.
 export async function airportWeather(airports, { onData, onProgress, onWait, preferLive = false } = {}) {
   const now = Date.now();
+  // The oldest entries come first: those over the hour are let go.
+  for (const [ident, entry] of weatherCache) {
+    if (now - entry.at < CACHE_MS) break;
+    weatherCache.delete(ident);
+  }
   const result = new Map();
   let missing = [];
   for (const a of airports) {
@@ -203,7 +214,7 @@ export async function airportWeather(airports, { onData, onProgress, onWait, pre
       preferLive,
       onBatch: (batch, hourly) => {
         batch.forEach((a, i) => {
-          weatherCache.set(a.ident, { at: Date.now(), hourly: hourly[i] });
+          remember(weatherCache, a.ident, { at: Date.now(), hourly: hourly[i] }, WEATHER_CACHE_SIZE);
           result.set(a.ident, hourly[i]);
         });
         onData?.(result);
