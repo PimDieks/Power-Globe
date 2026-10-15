@@ -92,7 +92,14 @@ export const BUS_STOPS = {
   EHAM: { areas: [], stops: ['57330760', '57330221', '57330222', '57330224', '57330620', '57330630', '57330730', '57330740', '57332107', '57332108'] },
 };
 export const BUS_WINDOW_MINUTES = 60;
-const MAX_BUS_PASSES = 60;
+// A busy hour at Schiphol's terminal has about 70 departures; the cap only guards against a runaway answer.
+const MAX_BUS_PASSES = 120;
+// A pass is live only when the feed updated it this recently. OVapi keeps TripStopStatus DRIVING on
+// buses it has heard nothing from for hours, and their expected times are then just the schedule.
+// A stamp more than BUS_LIVE_MAX_AHEAD_MS ahead of the clock is not believed. The page checks the same
+// limits against its own clock (BUS_LIVE_MAX_AGE_MS and BUS_LIVE_MAX_AHEAD_MS in src/opstransit.js: keep them equal).
+export const BUS_LIVE_MAX_AGE_MS = 15 * 60_000;
+export const BUS_LIVE_MAX_AHEAD_MS = 2 * 60_000;
 const MAX_TRAINS = 12;
 const MAX_DISRUPTIONS = 6;
 const OVAPI = 'http://v0.ovapi.nl';
@@ -511,15 +518,24 @@ function* ovapiStops(body) {
 }
 
 const RUNNING = new Set(['DRIVING', 'ARRIVED', 'PASSED']);
+const LIVE_STATUS = new Set(['DRIVING', 'ARRIVED']);
+
+// The feed's update stamp in ms, or null: local time without a zone like the other times, or with an
+// offset ("2026-10-15T19:36:27+0200"), which is then honoured.
+const updateMs = (text) => (/(?:Z|[+-]\d\d:?\d\d)$/.test(String(text ?? '')) ? zonedMs(text) : amsterdamMs(text));
 
 // The buses due in the next `windowMinutes` at the stops of one or more OVapi answers, merged:
-// { line, destination, operator, stop, planned, expected, delayMin, status, cancelled, contradicted }
-// by expected time. The delay is expected against scheduled in minutes, never below 0 (a bus ahead of
+// { line, destination, operator, stop, planned, expected, delayMin, status, live, cancelled, contradicted }
+// by expected time, at most `limit` of them. `updated` is the feed's last update of the pass
+// (LastUpdateTimeStamp) in ms, or null; `live` is true when the pass is reported DRIVING or ARRIVED and
+// `updated` is within BUS_LIVE_MAX_AGE_MS of `now`; any other pass has only its schedule behind its
+// times. The page decides `live` again from `updated` and its own clock, as the answer may be shown
+// minutes after it was made. The delay is expected against scheduled in minutes, never below 0 (a bus ahead of
 // time is on time). A pass the feed marks CANCEL is a cancellation only when its trip is not also
 // reported DRIVING, ARRIVED or PASSED at any stop (the feed keeps CANCEL on trips that run); one that
 // is contradicted that way is `contradicted` and not `cancelled`. Buses that end their trip at the
 // stop are arrivals and are left out.
-export function mergeBusPasses(bodies, now = Date.now(), windowMinutes = BUS_WINDOW_MINUTES) {
+export function mergeBusPasses(bodies, now = Date.now(), windowMinutes = BUS_WINDOW_MINUTES, limit = MAX_BUS_PASSES) {
   const found = [];
   const seen = new Set();
   const running = new Set();
@@ -546,9 +562,10 @@ export function mergeBusPasses(bodies, now = Date.now(), windowMinutes = BUS_WIN
   return found
     .filter((x) => x.expected >= now - 60_000 && Math.min(x.planned, x.expected) <= until)
     .sort((a, b) => a.expected - b.expected || a.planned - b.planned)
-    .slice(0, MAX_BUS_PASSES)
+    .slice(0, limit)
     .map(({ p, trip, planned, expected, stopName }) => {
       const flagged = p.TripStopStatus === 'CANCEL';
+      const updated = updateMs(p.LastUpdateTimeStamp);
       return {
         line: String(p.LinePublicNumber ?? ''),
         destination: String(p.DestinationName50 ?? '').slice(0, 50) || null,
@@ -558,6 +575,8 @@ export function mergeBusPasses(bodies, now = Date.now(), windowMinutes = BUS_WIN
         expected,
         delayMin: flagged ? 0 : Math.max(0, Math.round((expected - planned) / 60_000)),
         status: p.TripStopStatus ?? 'UNKNOWN',
+        updated,
+        live: LIVE_STATUS.has(p.TripStopStatus) && updated != null && now - updated <= BUS_LIVE_MAX_AGE_MS && updated - now <= BUS_LIVE_MAX_AHEAD_MS,
         cancelled: flagged && !running.has(trip),
         contradicted: flagged && running.has(trip),
       };
@@ -575,7 +594,9 @@ async function accessBuses(url, fetchFn) {
   const bodies = settled.filter((r) => r.status === 'fulfilled').map((r) => r.value);
   if (!bodies.length) throw new HttpError(502, settled.find((r) => r.status === 'rejected')?.reason?.message ?? 'OVapi answered without stops');
   const now = Date.now();
-  const passes = mergeBusPasses(bodies, now);
+  // Asked for one more than the cap, to know whether the cap cut the hour short.
+  const found = mergeBusPasses(bodies, now, BUS_WINDOW_MINUTES, MAX_BUS_PASSES + 1);
+  const passes = found.slice(0, MAX_BUS_PASSES);
   return new Response(
     JSON.stringify({
       available: true,
@@ -584,6 +605,8 @@ async function accessBuses(url, fetchFn) {
       fetched: now,
       windowMinutes: BUS_WINDOW_MINUTES,
       partial: bodies.length < urls.length,
+      // True when more buses were due in the window than `passes` holds: the list then ends before the hour does.
+      capped: found.length > MAX_BUS_PASSES,
       // The feed's cancellations are often wrong: they are reported, not known.
       cancellations: 'reported',
       cancellationsReported: passes.filter((x) => x.cancelled).length,

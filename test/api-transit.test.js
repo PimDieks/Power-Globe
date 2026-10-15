@@ -222,6 +222,55 @@ describe('merging the passes of the bus stops', () => {
     expect(list).toHaveLength(1);
   });
 
+  it('counts a pass as live only when the feed updated it in the last 15 minutes', () => {
+    // The destination names the pass, as the list is in the order of the times.
+    const p = (n, over) => pass({ JourneyNumber: n, DestinationName50: `trip ${n}`, ...over });
+    const list = mergeBusPasses(
+      [
+        stopWith('a', [
+          // DRIVING since last night, with nothing heard from the bus for hours: schedule only.
+          p(1, { LastUpdateTimeStamp: '2026-10-13T23:41:12' }),
+          p(2, { LastUpdateTimeStamp: '2026-10-14T21:58:40' }),
+          p(3, { LastUpdateTimeStamp: '2026-10-14T21:45:00' }),
+          p(4, { LastUpdateTimeStamp: '2026-10-14T21:44:00' }),
+          p(5, { TripStopStatus: 'ARRIVED', LastUpdateTimeStamp: '2026-10-14T21:59:00' }),
+          p(6, { TripStopStatus: 'PLANNED', LastUpdateTimeStamp: '2026-10-14T21:59:00' }),
+          p(7, { TripStopStatus: 'CANCEL', LastUpdateTimeStamp: '2026-10-14T21:59:00' }),
+          p(8),
+        ]),
+      ],
+      NOW,
+    );
+    const live = Object.fromEntries(list.map((x) => [x.destination, x.live]));
+    expect(list).toHaveLength(8);
+    expect(live).toEqual({ 'trip 1': false, 'trip 2': true, 'trip 3': true, 'trip 4': false, 'trip 5': true, 'trip 6': false, 'trip 7': false, 'trip 8': false });
+  });
+
+  it('does not believe an update time ahead of the clock, or one that cannot be read, and passes the time on', () => {
+    const p = (n, over) => pass({ JourneyNumber: n, DestinationName50: `trip ${n}`, ...over });
+    const list = mergeBusPasses(
+      [stopWith('a', [p(1, { LastUpdateTimeStamp: '2026-10-15T08:00:00' }), p(2, { LastUpdateTimeStamp: '2026-10-14T22:00:30' }), p(3, { LastUpdateTimeStamp: 'last night' }), p(4, { LastUpdateTimeStamp: '2026-10-14T22:01:30' }), p(5, { LastUpdateTimeStamp: '2026-10-14T22:01:40' })])],
+      NOW,
+    );
+    const by = Object.fromEntries(list.map((x) => [x.destination, x]));
+    expect([1, 2, 3, 4, 5].map((n) => by[`trip ${n}`].live)).toEqual([false, true, false, true, false]);
+    expect(by['trip 3'].updated).toBeNull();
+    expect(by['trip 2'].updated).toBe(Date.parse('2026-10-14T20:00:30Z'));
+  });
+
+  it('reads an update time with an offset, as OVapi writes it, by that offset', () => {
+    const p = (n, over) => pass({ JourneyNumber: n, DestinationName50: `trip ${n}`, ...over });
+    const list = mergeBusPasses(
+      [stopWith('a', [p(1, { LastUpdateTimeStamp: '2026-10-14T21:58:27+0200' }), p(2, { LastUpdateTimeStamp: '2026-10-14T21:58:27+0000' }), p(3, { LastUpdateTimeStamp: '2026-10-14T19:58:27Z' })])],
+      NOW,
+    );
+    const by = Object.fromEntries(list.map((x) => [x.destination, x]));
+    expect(by['trip 1']).toMatchObject({ live: true, updated: Date.parse('2026-10-14T19:58:27Z') });
+    // 21:58:27 in UTC is 23:58 in Amsterdam: ahead of the clock.
+    expect(by['trip 2'].live).toBe(false);
+    expect(by['trip 3'].live).toBe(true);
+  });
+
   it('reads stop areas too, and survives passes without times', () => {
     const area = { schuvw: stopWith('57330070', [pass({ JourneyNumber: 9 }), pass({ JourneyNumber: 10, TargetDepartureTime: undefined, TargetArrivalTime: undefined })]) };
     expect(mergeBusPasses([area, null, {}], NOW)).toHaveLength(1);
@@ -239,9 +288,27 @@ describe('GET /access/buses', () => {
     expect(init.headers['Accept-Encoding']).toBe('gzip');
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=60');
     const body = await res.json();
-    expect(body).toMatchObject({ available: true, airport: 'EHAM', source: 'OVapi', fetched: NOW, windowMinutes: 60, partial: false, cancellations: 'reported' });
+    expect(body).toMatchObject({ available: true, airport: 'EHAM', source: 'OVapi', fetched: NOW, windowMinutes: 60, partial: false, capped: false, cancellations: 'reported' });
     expect(body.passes.length).toBeGreaterThan(15);
     expect(body.cancellationsReported).toBe(body.passes.filter((p) => p.cancelled).length);
+  });
+
+  it('answers a whole busy hour, more than the old cap of 60, and says when the cap cut it short', async () => {
+    const hour = (n) => stopWith('a', Array.from({ length: n }, (_, i) => pass({ JourneyNumber: i, TargetDepartureTime: `2026-10-14T22:${String(i % 59).padStart(2, '0')}:00`, ExpectedDepartureTime: `2026-10-14T22:${String(i % 59).padStart(2, '0')}:00` })));
+    const ask = async (n) => (await route(at('/access/buses?airport=EHAM'), {}, async () => reply(hour(n)))).json();
+    const busy = await ask(100);
+    expect(busy.passes).toHaveLength(100);
+    expect(busy.capped).toBe(false);
+    const runaway = await ask(130);
+    expect(runaway.passes).toHaveLength(120);
+    expect(runaway.capped).toBe(true);
+    // The list is the earliest 120, and ends before the window does.
+    expect(runaway.passes.at(-1).expected).toBeLessThan(NOW + 3_600_000 - 60_000);
+    expect(runaway.passes.map((x) => x.expected)).toEqual([...runaway.passes.map((x) => x.expected)].sort((a, b) => a - b));
+    expect((await ask(121)).passes).toHaveLength(120);
+    expect((await ask(121)).capped).toBe(true);
+    // Exactly the cap is not a cut.
+    expect((await ask(120)).capped).toBe(false);
   });
 
   it('keeps the stop table to the terminal: no stop area away from it, and the empty one only as a stop', () => {
