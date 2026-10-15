@@ -40,15 +40,23 @@ export const BEHIND_GLOBE = /* glsl */ `
 export const hideUniform = (globe) => ({ value: (globe.getGlobeRadius() * HIDE_RADIUS) ** 2 });
 
 // Plane silhouettes, nose up, white with a dark outline so they read over any map or weather.
-function planeTexture() {
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = 64;
-  const ctx = canvas.getContext('2d');
-  ctx.translate(32, 32);
-  const outline = [
-    [0, -28], [3.5, -22], [3.5, -8], [27, 5], [27, 10], [3.5, 4], [3.5, 16], [11, 22], [11, 26], [0, 23],
-    [-11, 26], [-11, 22], [-3.5, 16], [-3.5, 4], [-27, 10], [-27, 5], [-3.5, -8], [-3.5, -22],
-  ];
+// Two glyphs side by side in one 128 x 64 atlas: a narrow-body on the left, a wide-body on the
+// right with a fuselage twice as thick, longer swept wings and a wider tailplane.
+const NARROW_OUTLINE = [
+  [0, -28], [3.5, -22], [3.5, -8], [27, 5], [27, 10], [3.5, 4], [3.5, 16], [11, 22], [11, 26], [0, 23],
+  [-11, 26], [-11, 22], [-3.5, 16], [-3.5, 4], [-27, 10], [-27, 5], [-3.5, -8], [-3.5, -22],
+];
+// The right side from nose to tail; the outline goes round the tail and back up the mirrored left.
+const WIDE_SIDE = [[3.5, -27.5], [6, -23], [7, -15], [7, -11], [28.5, 4], [28.5, 11], [7, 6], [7, 14], [16, 21], [16, 26]];
+const WIDE_OUTLINE = [[0, -29], ...WIDE_SIDE, [0, 24], ...WIDE_SIDE.map(([x, y]) => [-x, y]).reverse()];
+
+function drawGlyph(ctx, cx, outline) {
+  ctx.save();
+  // Keep each glyph, outline included, inside its own 64 x 64 half.
+  ctx.beginPath();
+  ctx.rect(cx - 32, 0, 64, 64);
+  ctx.clip();
+  ctx.translate(cx, 32);
   ctx.beginPath();
   outline.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
   ctx.closePath();
@@ -58,6 +66,16 @@ function planeTexture() {
   ctx.stroke();
   ctx.fillStyle = '#fff';
   ctx.fill();
+  ctx.restore();
+}
+
+function planeTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  drawGlyph(ctx, 32, NARROW_OUTLINE);
+  drawGlyph(ctx, 96, WIDE_OUTLINE);
   const texture = new THREE.CanvasTexture(canvas);
   // Row 0 of the canvas at v = 0, like gl_PointCoord.
   texture.flipY = false;
@@ -70,10 +88,12 @@ const AIRCRAFT_VERTEX = /* glsl */ `
   attribute vec3 aColor;
   attribute float aHeading;
   attribute float aScale;
+  attribute float aBody;
   uniform float uSize;
   uniform vec2 uViewport;
   varying vec3 vColor;
   varying float vAngle;
+  varying float vBody;
   void main() {
     vec4 clip = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     // The aircraft's track as a direction on screen: north and east at its position on the
@@ -87,6 +107,7 @@ const AIRCRAFT_VERTEX = /* glsl */ `
     vec2 d = (ahead.xy / ahead.w - clip.xy / clip.w) * uViewport;
     vAngle = atan(d.y, d.x);
     vColor = aColor;
+    vBody = aBody;
     gl_Position = behindGlobe(position) ? vec4(2.0, 2.0, 2.0, 1.0) : clip;
     gl_PointSize = uSize * aScale;
   }
@@ -96,6 +117,7 @@ const AIRCRAFT_FRAGMENT = /* glsl */ `
   uniform sampler2D uGlyph;
   varying vec3 vColor;
   varying float vAngle;
+  varying float vBody;
   void main() {
     // Turn the nose-up glyph to the track's direction on screen.
     vec2 s = vec2(gl_PointCoord.x - 0.5, 0.5 - gl_PointCoord.y);
@@ -103,7 +125,10 @@ const AIRCRAFT_FRAGMENT = /* glsl */ `
     vec2 t = vec2(s.x * cos(a) - s.y * sin(a), s.x * sin(a) + s.y * cos(a));
     vec2 uv = vec2(t.x + 0.5, 0.5 - t.y);
     if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) discard;
-    vec4 g = texture2D(uGlyph, uv);
+    // The atlas holds the narrow-body glyph in its left half and the wide-body one in its right;
+    // sampling stays a texel inside the half so the neighbour does not bleed in.
+    float x = clamp(uv.x, 1.5 / 64.0, 1.0 - 1.5 / 64.0);
+    vec4 g = texture2D(uGlyph, vec2((x + step(0.5, vBody)) * 0.5, uv.y));
     if (g.a < 0.04) discard;
     gl_FragColor = vec4(g.rgb * vColor, g.a);
   }
@@ -226,7 +251,7 @@ export function aircraftLayer(globe) {
     depthTest: false,
     depthWrite: false,
   });
-  const cloud = new PointCloud(globe, material, { aColor: 3, aHeading: 1, aScale: 1 }, 10);
+  const cloud = new PointCloud(globe, material, { aColor: 3, aHeading: 1, aScale: 1, aBody: 1 }, 10);
   cloud.setViewport = (w, h) => material.uniforms.uViewport.value.set(w, h);
   return cloud;
 }

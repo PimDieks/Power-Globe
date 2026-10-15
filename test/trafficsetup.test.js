@@ -8,7 +8,7 @@ const drawn = vi.hoisted(() => ({ lines: [], clouds: [] }));
 // The layers draw with three.js on a globe; these keep the numbers and nothing else.
 vi.mock('../src/trafficlayer.js', async (importOriginal) => {
   const cloud = () => {
-    const attrs = { position: new Float32Array(30_000), aColor: new Float32Array(30_000), aScale: new Float32Array(10_000), aHeading: new Float32Array(10_000), aNext: new Float32Array(30_000) };
+    const attrs = { position: new Float32Array(30_000), aColor: new Float32Array(30_000), aScale: new Float32Array(10_000), aHeading: new Float32Array(10_000), aBody: new Float32Array(10_000), aNext: new Float32Array(30_000) };
     const made = {
       capacity: 10_000,
       count: 0,
@@ -426,6 +426,22 @@ describe('traffic on the globe', () => {
       expect(direct.length).toBeGreaterThanOrEqual(2);
       expect(direct.length).toBeLessThanOrEqual(4);
       for (let i = 1; i < direct.length; i++) expect(direct[i] - direct[i - 1]).toBeGreaterThanOrEqual(60_000);
+    });
+
+    it('draws wide-bodies with the broad glyph and 1.4 times as big, narrow-bodies and unknown types as before, all smaller on the ground', async () => {
+      respond = () =>
+        feed([
+          klm({ t: 'B77W' }),
+          klm({ hex: 'aa0002', t: 'A21N', category: 'A3' }),
+          klm({ hex: 'aa0003' }),
+          klm({ hex: 'aa0004', t: 'A359', alt_baro: 'ground' }),
+        ]);
+      await run(300);
+      const planes = drawn.clouds[0];
+      const at = (hex) => traffic.aircraft().findIndex((a) => a.id === hex);
+      const scale = (hex) => Math.round(planes.attrs.aScale[at(hex)] * 100) / 100;
+      expect([scale('484506'), scale('aa0002'), scale('aa0003'), scale('aa0004')]).toEqual([1.4, 1, 1, 0.98]);
+      expect(['484506', 'aa0002', 'aa0003', 'aa0004'].map((hex) => planes.attrs.aBody[at(hex)])).toEqual([1, 0, 0, 1]);
     });
 
     it('tints the inbound aircraft and the holding ones, rings only the holding ones, and takes it all off', async () => {
