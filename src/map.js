@@ -86,6 +86,23 @@ export const BASEMAPS = {
     credit:
       'Chart <a href="https://www.openaip.net/" target="_blank" rel="noopener">openAIP</a> (CC BY-NC 4.0); map <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, HERE, Garmin, OpenStreetMap contributors and the GIS User Community',
   },
+  // The satellite imagery recoloured into a calm night palette (see PALETTES), so aircraft,
+  // labels and the weather stand out against it.
+  dark: {
+    label: 'Dark',
+    url: esri('World_Imagery'),
+    maxLevel: 17,
+    light: 1.2,
+    palette: 'night',
+    credit: 'Imagery <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics and the GIS User Community; NASA Blue Marble',
+  },
+};
+
+// Colour schemes a map's imagery can be drawn in (a basemap's `palette`). The imagery's
+// brightness picks a colour along `stops` (sRGB, darkest first), and water, told apart by its
+// blue or teal colour, goes darker still.
+export const PALETTES = {
+  night: { stops: ['#05080f', '#131a27', '#3a475e'] },
 };
 // Below this altitude the view reads as a map: brighter imagery, borders and city names.
 const MAP_ALTITUDE = 1.3;
@@ -112,11 +129,15 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     if (!baseEngine) {
       baseEngine = findTileEngine(globe, chart.engine);
       if (baseEngine) {
-        seeThroughNoData(baseEngine, () => style.noDataBlack);
+        styleTiles(baseEngine, () => style);
+        // Tiles loaded before the hook was in place go, and the view's tiles load again, styled:
+        // the engine asks for tiles only as the camera moves, and it may not move again for a while.
+        if (style.noDataBlack || style.palette) {
+          globe.globeTileEngineClearCache();
+          baseEngine.updatePov?.(globe.camera());
+        }
         settleLevels(baseEngine, globe);
         boundAfterAdding(baseEngine, globe);
-        // Tiles loaded before the hook was in place.
-        if (style.noDataBlack) globe.globeTileEngineClearCache();
       }
     }
     return baseEngine;
@@ -138,9 +159,20 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
   const texture = new THREE.TextureLoader().load(backdropUrl);
   texture.colorSpace = THREE.SRGBColorSpace;
   const dayMaterial = new THREE.MeshLambertMaterial({ map: texture });
+  // The same image in each palette, so it matches the tiles while they load.
+  const paletteMaterials = new Map();
+  const backdropMaterial = () => {
+    if (!style.palette) return dayMaterial;
+    if (!paletteMaterials.has(style.palette)) {
+      const material = new THREE.MeshLambertMaterial({ map: texture });
+      restyle(material, { palette: style.palette });
+      paletteMaterials.set(style.palette, material);
+    }
+    return paletteMaterials.get(style.palette);
+  };
   const backdrop = new THREE.Mesh(
     new THREE.SphereGeometry(globe.getGlobeRadius() * 0.995, 96, 64),
-    dayMaterial,
+    backdropMaterial(),
   );
   // three-globe rotates its globe mesh this way so equirectangular textures line up.
   backdrop.rotation.y = -Math.PI / 2;
@@ -172,6 +204,7 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     // Drop the old map's tiles; the new URL then loads tiles for the current view.
     globe.globeTileEngineClearCache();
     globe.globeTileEngineMaxLevel(style.maxLevel).globeTileEngineUrl(style.url);
+    backdrop.material = backdropMaterial();
     chart.set(style.chart);
     moving.setActive(Boolean(style.moving));
     setAltitude(altitude);
@@ -313,27 +346,52 @@ export function settleLevels(engine, globe) {
 // imagery is never this dark in all three channels by day, not even deep ocean.
 const NO_DATA_LEVEL = 0.0015;
 
-// While `active()`, new tiles leave out pure black pixels, so the whole-Earth image beneath
-// shows through gaps in the imagery.
-function seeThroughNoData(engine, active) {
+// New tiles are drawn as the current style asks: with pure black pixels left out where it has
+// `noDataBlack`, so the whole-Earth image beneath shows through gaps in the imagery, and
+// recoloured where it has a `palette`.
+function styleTiles(engine, current) {
   const add = engine.add.bind(engine);
   engine.add = (...tiles) => {
-    if (active()) {
-      for (const tile of tiles) {
-        if (!tile.material?.map) continue;
-        tile.material.onBeforeCompile = (shader) => {
-          shader.fragmentShader = shader.fragmentShader.replace(
-            '#include <map_fragment>',
-            `#include <map_fragment>
-            if (max(max(diffuseColor.r, diffuseColor.g), diffuseColor.b) < ${NO_DATA_LEVEL}) discard;`,
-          );
-        };
-        tile.material.customProgramCacheKey = () => 'see-through-no-data';
-        tile.material.needsUpdate = true;
-      }
+    const { noDataBlack, palette } = current();
+    if (noDataBlack || palette) {
+      for (const tile of tiles) if (tile.material?.map) restyle(tile.material, { noDataBlack, palette });
     }
     return add(...tiles);
   };
+}
+
+function restyle(material, { noDataBlack = false, palette = null }) {
+  const steps = [];
+  if (noDataBlack) steps.push(`if (max(max(diffuseColor.r, diffuseColor.g), diffuseColor.b) < ${NO_DATA_LEVEL}) discard;`);
+  if (palette) steps.push(paletteGlsl(PALETTES[palette]));
+  material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace('#include <map_fragment>', `#include <map_fragment>\n${steps.join('\n')}`);
+  };
+  const key = [noDataBlack && 'see-through-no-data', palette && `palette-${palette}`].filter(Boolean).join('+');
+  material.customProgramCacheKey = () => key;
+  // Dark gradients would show steps without it.
+  material.dithering = Boolean(palette);
+  material.needsUpdate = true;
+}
+
+// GLSL that recolours `diffuseColor` (linear, straight from the imagery) into `palette`.
+function paletteGlsl({ stops }) {
+  const [dark, mid, light] = stops.map((hex) => {
+    const c = new THREE.Color().setStyle(hex, THREE.NoColorSpace);
+    return `vec3(${c.r.toFixed(4)}, ${c.g.toFixed(4)}, ${c.b.toFixed(4)})`;
+  });
+  return `{
+    vec3 s = pow(max(diffuseColor.rgb, vec3(0.0)), vec3(1.0 / 2.2));
+    float l = dot(s, vec3(0.299, 0.587, 0.114));
+    // Water is blue or teal and darkish; green and brown land is not.
+    float water = smoothstep(0.03, 0.12, s.b - s.r) * (1.0 - smoothstep(0.0, 0.06, s.g - s.b)) * (1.0 - smoothstep(0.35, 0.55, l));
+    // A gentle curve: land starts a step above the sea and keeps its texture, its brightest
+    // parts (towns, concrete, sand, snow) lift without glaring.
+    float x = clamp((l - 0.04) / 0.76, 0.0, 1.0);
+    float t = mix(0.26 + 0.66 * pow(x, 0.7), 0.04 + 0.2 * x, water);
+    vec3 col = t < 0.5 ? mix(${dark}, ${mid}, t * 2.0) : mix(${mid}, ${light}, t * 2.0 - 1.0);
+    diffuseColor.rgb = pow(col, vec3(2.2));
+  }`;
 }
 
 let blankImage = null;
