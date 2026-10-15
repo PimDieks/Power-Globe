@@ -246,6 +246,31 @@ describe('merging the passes of the bus stops', () => {
     expect(live).toEqual({ 'trip 1': false, 'trip 2': true, 'trip 3': true, 'trip 4': false, 'trip 5': true, 'trip 6': false, 'trip 7': false, 'trip 8': false });
   });
 
+  it('does not believe an update time ahead of the clock, or one that cannot be read, and passes the time on', () => {
+    const p = (n, over) => pass({ JourneyNumber: n, DestinationName50: `trip ${n}`, ...over });
+    const list = mergeBusPasses(
+      [stopWith('a', [p(1, { LastUpdateTimeStamp: '2026-10-15T08:00:00' }), p(2, { LastUpdateTimeStamp: '2026-10-14T22:00:30' }), p(3, { LastUpdateTimeStamp: 'last night' }), p(4, { LastUpdateTimeStamp: '2026-10-14T22:01:30' }), p(5, { LastUpdateTimeStamp: '2026-10-14T22:01:40' })])],
+      NOW,
+    );
+    const by = Object.fromEntries(list.map((x) => [x.destination, x]));
+    expect([1, 2, 3, 4, 5].map((n) => by[`trip ${n}`].live)).toEqual([false, true, false, true, false]);
+    expect(by['trip 3'].updated).toBeNull();
+    expect(by['trip 2'].updated).toBe(Date.parse('2026-10-14T20:00:30Z'));
+  });
+
+  it('reads an update time with an offset, as OVapi writes it, by that offset', () => {
+    const p = (n, over) => pass({ JourneyNumber: n, DestinationName50: `trip ${n}`, ...over });
+    const list = mergeBusPasses(
+      [stopWith('a', [p(1, { LastUpdateTimeStamp: '2026-10-14T21:58:27+0200' }), p(2, { LastUpdateTimeStamp: '2026-10-14T21:58:27+0000' }), p(3, { LastUpdateTimeStamp: '2026-10-14T19:58:27Z' })])],
+      NOW,
+    );
+    const by = Object.fromEntries(list.map((x) => [x.destination, x]));
+    expect(by['trip 1']).toMatchObject({ live: true, updated: Date.parse('2026-10-14T19:58:27Z') });
+    // 21:58:27 in UTC is 23:58 in Amsterdam: ahead of the clock.
+    expect(by['trip 2'].live).toBe(false);
+    expect(by['trip 3'].live).toBe(true);
+  });
+
   it('reads stop areas too, and survives passes without times', () => {
     const area = { schuvw: stopWith('57330070', [pass({ JourneyNumber: 9 }), pass({ JourneyNumber: 10, TargetDepartureTime: undefined, TargetArrivalTime: undefined })]) };
     expect(mergeBusPasses([area, null, {}], NOW)).toHaveLength(1);
@@ -280,6 +305,8 @@ describe('GET /access/buses', () => {
     // The list is the earliest 120, and ends before the window does.
     expect(runaway.passes.at(-1).expected).toBeLessThan(NOW + 3_600_000 - 60_000);
     expect(runaway.passes.map((x) => x.expected)).toEqual([...runaway.passes.map((x) => x.expected)].sort((a, b) => a - b));
+    expect((await ask(121)).passes).toHaveLength(120);
+    expect((await ask(121)).capped).toBe(true);
     // Exactly the cap is not a cut.
     expect((await ask(120)).capped).toBe(false);
   });

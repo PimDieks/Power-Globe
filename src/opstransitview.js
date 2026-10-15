@@ -94,11 +94,12 @@ function busTimes(line) {
 
 function busSummary(b) {
   // A capped list ends before the hour does, so it is not the count of the hour.
-  const parts = [b.capped ? `Showing the first ${plural(b.running, 'bus', 'buses')} (to ${clock(b.cappedTo)})` : `${plural(b.running, 'bus', 'buses')} due in the next hour`];
-  if (b.late) parts.push(`${b.late} ${b.late === 1 ? 'is' : 'are'} ${LATE_MIN} minutes or more late, up to ${b.maxDelay} min`);
-  else if (enoughLive(b)) parts.push('none late');
-  else parts.push('too few with live times to say whether they are late');
-  return parts.join(', ');
+  const head = b.capped ? `Showing ${b.running === 1 ? '1 bus' : `the first ${b.running} buses`} (to ${clock(b.cappedTo)})` : `${plural(b.running, 'bus', 'buses')} due in the next hour`;
+  // Lateness is only known of the buses with live times, so it is said of them alone unless all are live.
+  const all = b.live === b.running;
+  if (b.late) return `${head}${all ? `, ${b.late} ${b.late === 1 ? 'is' : 'are'}` : `; ${b.live} with live times, ${b.late} of them`} ${LATE_MIN} minutes or more late, up to ${b.maxDelay} min`;
+  if (enoughLive(b)) return `${head}${all ? ', none late' : `; ${b.live} with live times, none of them late`}`;
+  return `${head}, too few with live times to say whether they are late`;
 }
 
 export function busesHtml(data) {
@@ -123,5 +124,5 @@ export function busesHtml(data) {
     ${b.running || b.lines.length ? `<p>${busSummary(b)}.</p>` : ''}
     ${body}
     ${cancelled}
-    <p class="ops-note">Buses at the terminal stops, next departures per line. Times are Amsterdam time: the expected time where the feed has real-time information (in bold), the scheduled one otherwise (grey), with the delay in minutes. A time counts as real-time only when the feed updated it in the last 15 minutes. ${BUSES_SOURCE_TEXT}.</p>`;
+    <p class="ops-note">Buses at the terminal stops, next departures per line. Times are Amsterdam time: the expected time where the feed has real-time information (in bold), the scheduled one otherwise (grey), with the delay in minutes. A time counts as real-time only for a bus that is driving or arrived and was updated by the feed in the last 15 minutes. ${BUSES_SOURCE_TEXT}.</p>`;
 }

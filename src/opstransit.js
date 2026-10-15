@@ -29,6 +29,21 @@ export const BUS_VERY_LATE_MIN = 15;
 // "on time" to mean anything; the rest of the times are only the schedule.
 export const BUS_MIN_LIVE = 3;
 export const BUS_MIN_LIVE_SHARE = 0.5;
+// The share is taken of the buses due in this many minutes: if the feed is healthy, those are on the
+// road and tracked, while later ones have not started and are rightly only scheduled.
+export const BUS_SOON_MIN = 20;
+// A pass is live when the feed updated it within BUS_LIVE_MAX_AGE_MS of the page's clock, and not more
+// than BUS_LIVE_MAX_AHEAD_MS ahead of it. Mirrors the Worker's limits (api/worker.js: keep them equal).
+export const BUS_LIVE_MAX_AGE_MS = 15 * 60_000;
+export const BUS_LIVE_MAX_AHEAD_MS = 2 * 60_000;
+
+// Whether a pass has real-time information now. The answer is cached and may be shown minutes after the
+// Worker made it, so this is decided from the update time and the clock of the page; an answer without
+// the update time (an older Worker) keeps the Worker's own flag.
+export function busIsLive(p, now) {
+  if (!Number.isFinite(p.updated)) return p.live === true;
+  return ['DRIVING', 'ARRIVED'].includes(p.status) && now - p.updated <= BUS_LIVE_MAX_AGE_MS && p.updated - now <= BUS_LIVE_MAX_AHEAD_MS;
+}
 const TRAIN_VERY_LATE_MIN = 10;
 
 const minutesOld = (fetched, now) => (Number.isFinite(fetched) ? Math.max(0, Math.round((now - fetched) / 60_000)) : null);
@@ -99,16 +114,21 @@ export function trainsFact(t) {
 
 // The buses due in the next hour, grouped by line and destination. `lines` is [{ line, destination,
 // next: [pass...], delayMin }] by the time of the next bus; `late` counts the buses LATE_MIN or more
-// late, `live` those the feed has real-time information for, and `cancelledReported` those it says
-// are cancelled (which it often says wrongly).
+// late, `live` those with real-time information (a recent update, not just a status; see busIsLive),
+// `soon` those due in the next BUS_SOON_MIN minutes and `liveSoon` the live ones among them, and
+// `cancelledReported` those the feed says are cancelled (which it often says wrongly). `capped` is set
+// when the Worker's list ends before the hour does, and `cappedTo` is the time it ends.
 export function analyseBuses({ airport, now = Date.now(), result = null }) {
   const base = shell(airport, now, result);
   if (!base.data) return base;
   const { data } = base;
   const until = now + (data.windowMinutes ?? 60) * 60_000;
-  const passes = (data.passes ?? []).filter((p) => p.expected >= now - 60_000 && Math.min(p.planned, p.expected) <= until);
+  const passes = (data.passes ?? [])
+    .filter((p) => p.expected >= now - 60_000 && Math.min(p.planned, p.expected) <= until)
+    .map((p) => ({ ...p, live: busIsLive(p, now) }));
   const running = passes.filter((p) => !p.cancelled);
-  const liveRunning = running.filter((p) => p.live === true);
+  const liveRunning = running.filter((p) => p.live);
+  const soon = running.filter((p) => p.expected <= now + BUS_SOON_MIN * 60_000);
   const groups = new Map();
   for (const p of passes) {
     const key = `${p.line}\u0000${p.destination ?? ''}`;
@@ -130,6 +150,8 @@ export function analyseBuses({ airport, now = Date.now(), result = null }) {
     moreLines: Math.max(0, lines.length - MAX_BUS_LINES),
     running: running.length,
     live: liveRunning.length,
+    soon: soon.length,
+    liveSoon: soon.filter((p) => p.live).length,
     // Only live times say anything about delay: the others are the schedule.
     late: liveRunning.filter((p) => p.delayMin >= LATE_MIN).length,
     maxDelay: Math.max(0, ...liveRunning.map((p) => p.delayMin)),
@@ -140,8 +162,9 @@ export function analyseBuses({ airport, now = Date.now(), result = null }) {
   };
 }
 
-// Whether enough of the buses have live times to say how they are doing.
-export const enoughLive = (b) => b.live >= BUS_MIN_LIVE && b.live / b.running >= BUS_MIN_LIVE_SHARE;
+// Whether enough of the buses have live times to say how they are doing: at least BUS_MIN_LIVE of them,
+// and BUS_MIN_LIVE_SHARE of those due soon (of all of them when none is due soon).
+export const enoughLive = (b) => b.live >= BUS_MIN_LIVE && (b.soon ? b.liveSoon / b.soon : b.live / b.running) >= BUS_MIN_LIVE_SHARE;
 
 // The bus part's contribution to the summary. Reported cancellations are left out of it: the feed
 // is not good enough to say anything with them.

@@ -96,7 +96,10 @@ export const BUS_WINDOW_MINUTES = 60;
 const MAX_BUS_PASSES = 120;
 // A pass is live only when the feed updated it this recently. OVapi keeps TripStopStatus DRIVING on
 // buses it has heard nothing from for hours, and their expected times are then just the schedule.
+// A stamp more than BUS_LIVE_MAX_AHEAD_MS ahead of the clock is not believed. The page checks the same
+// limits against its own clock (BUS_LIVE_MAX_AGE_MS and BUS_LIVE_MAX_AHEAD_MS in src/opstransit.js: keep them equal).
 export const BUS_LIVE_MAX_AGE_MS = 15 * 60_000;
+export const BUS_LIVE_MAX_AHEAD_MS = 2 * 60_000;
 const MAX_TRAINS = 12;
 const MAX_DISRUPTIONS = 6;
 const OVAPI = 'http://v0.ovapi.nl';
@@ -517,11 +520,17 @@ function* ovapiStops(body) {
 const RUNNING = new Set(['DRIVING', 'ARRIVED', 'PASSED']);
 const LIVE_STATUS = new Set(['DRIVING', 'ARRIVED']);
 
+// The feed's update stamp in ms, or null: local time without a zone like the other times, or with an
+// offset ("2026-10-15T19:36:27+0200"), which is then honoured.
+const updateMs = (text) => (/(?:Z|[+-]\d\d:?\d\d)$/.test(String(text ?? '')) ? zonedMs(text) : amsterdamMs(text));
+
 // The buses due in the next `windowMinutes` at the stops of one or more OVapi answers, merged:
 // { line, destination, operator, stop, planned, expected, delayMin, status, live, cancelled, contradicted }
-// by expected time, at most `limit` of them. `live` is true when the pass is reported DRIVING or ARRIVED
-// and the feed updated it (LastUpdateTimeStamp) within BUS_LIVE_MAX_AGE_MS of `now`; any other pass has
-// only its schedule behind its times. The delay is expected against scheduled in minutes, never below 0 (a bus ahead of
+// by expected time, at most `limit` of them. `updated` is the feed's last update of the pass
+// (LastUpdateTimeStamp) in ms, or null; `live` is true when the pass is reported DRIVING or ARRIVED and
+// `updated` is within BUS_LIVE_MAX_AGE_MS of `now`; any other pass has only its schedule behind its
+// times. The page decides `live` again from `updated` and its own clock, as the answer may be shown
+// minutes after it was made. The delay is expected against scheduled in minutes, never below 0 (a bus ahead of
 // time is on time). A pass the feed marks CANCEL is a cancellation only when its trip is not also
 // reported DRIVING, ARRIVED or PASSED at any stop (the feed keeps CANCEL on trips that run); one that
 // is contradicted that way is `contradicted` and not `cancelled`. Buses that end their trip at the
@@ -556,7 +565,7 @@ export function mergeBusPasses(bodies, now = Date.now(), windowMinutes = BUS_WIN
     .slice(0, limit)
     .map(({ p, trip, planned, expected, stopName }) => {
       const flagged = p.TripStopStatus === 'CANCEL';
-      const updated = amsterdamMs(p.LastUpdateTimeStamp);
+      const updated = updateMs(p.LastUpdateTimeStamp);
       return {
         line: String(p.LinePublicNumber ?? ''),
         destination: String(p.DestinationName50 ?? '').slice(0, 50) || null,
@@ -566,7 +575,8 @@ export function mergeBusPasses(bodies, now = Date.now(), windowMinutes = BUS_WIN
         expected,
         delayMin: flagged ? 0 : Math.max(0, Math.round((expected - planned) / 60_000)),
         status: p.TripStopStatus ?? 'UNKNOWN',
-        live: LIVE_STATUS.has(p.TripStopStatus) && updated != null && now - updated <= BUS_LIVE_MAX_AGE_MS,
+        updated,
+        live: LIVE_STATUS.has(p.TripStopStatus) && updated != null && now - updated <= BUS_LIVE_MAX_AGE_MS && updated - now <= BUS_LIVE_MAX_AHEAD_MS,
         cancelled: flagged && !running.has(trip),
         contradicted: flagged && running.has(trip),
       };

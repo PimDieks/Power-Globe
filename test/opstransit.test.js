@@ -211,12 +211,38 @@ describe('the bus fact', () => {
 
   it('is not green when most of the DRIVING buses have had no update for hours', () => {
     // 29 of 39 were like that in a live audit: the feed says DRIVING, but the times are the schedule.
-    const passes = [...Array.from({ length: 10 }, (_, i) => bus(i + 1)), ...Array.from({ length: 29 }, (_, i) => stale(i + 11))];
+    const passes = [...Array.from({ length: 29 }, (_, i) => stale(i + 1)), ...Array.from({ length: 10 }, (_, i) => bus(i + 30))];
     expect(fact(passes)).toMatchObject({ text: SCHEDULED, status: 'unknown', asOf: NOW - 20_000 });
     expect(fact(run(5, { live: false }))).toMatchObject({ text: SCHEDULED, status: 'unknown' });
     // Two live buses are too few, and half live is enough.
     expect(fact([bus(1), bus(2), ...Array.from({ length: 3 }, (_, i) => stale(i + 3))]).text).toBe(SCHEDULED);
     expect(fact([bus(1), bus(2), bus(3), stale(4), stale(5), stale(6)])).toMatchObject({ text: 'Buses on time', status: 'ok' });
+  });
+
+  it('takes the share of the buses due in the next 20 minutes, which a healthy feed tracks', () => {
+    // Later buses have not started and are only scheduled, which is as it should be.
+    const healthy = [...run(5), ...Array.from({ length: 30 }, (_, i) => bus(i + 21, { status: 'PLANNED', live: false }))];
+    expect(fact(healthy)).toMatchObject({ text: 'Buses on time', status: 'ok' });
+    // Nothing due soon: the share of all of them.
+    expect(fact([bus(30), bus(31), bus(32), stale(33)]).status).toBe('ok');
+    expect(fact([bus(30), bus(31), bus(32), stale(33), stale(34), stale(35), stale(36)]).text).toBe(SCHEDULED);
+  });
+
+  it('decides what is live from the update time and its own clock, as a cached answer ages', () => {
+    const passes = [
+      bus(20, { updated: NOW - 5 * MIN }),
+      bus(22, { updated: NOW - 16 * MIN }),
+      bus(24, { updated: NOW + 1 * MIN }),
+      bus(26, { updated: NOW + 5 * MIN }),
+      bus(28, { updated: NOW - MIN, status: 'PLANNED' }),
+      // Without an update time, the flag of the Worker stands.
+      bus(30),
+      bus(32, { live: false }),
+    ];
+    const live = (now) => buses(ok(busData({ passes })), EHAM, now).passes.map((p) => p.live);
+    expect(live(NOW)).toEqual([true, false, true, false, false, true, false]);
+    // Eleven minutes on, the first is 16 minutes old and the third 10, and the fourth is no longer ahead.
+    expect(live(NOW + 11 * MIN)).toEqual([false, false, true, true, false, true, false]);
   });
 
   it('is delayed when several are, or two are very late', () => {
@@ -364,7 +390,7 @@ describe('the buses in the section', () => {
     const out = html(ok(busData({ passes: [bus(3, { delayMin: 7, planned: NOW + 3 * MIN - 7 * MIN }), bus(10, { status: 'PLANNED', live: false }), bus(12)] })));
     expect(out).toContain('22:02 <span class="access-late">+7</span>');
     expect(out).toContain('<span class="access-sched">22:09</span>');
-    expect(out).toContain('3 buses due in the next hour, 1 is 5 minutes or more late, up to 7 min');
+    expect(out).toContain('3 buses due in the next hour; 2 with live times, 1 of them 5 minutes or more late, up to 7 min');
   });
 
   it('word cancellations as reported, and keep them out of the times', () => {
@@ -389,7 +415,17 @@ describe('the buses in the section', () => {
     expect(out).toContain('<span class="access-sched">21:53</span>');
     expect(out).not.toContain('+9');
     expect(out).toContain('<span class="access-live">22:09</span>');
-    expect(out).toContain('4 buses due in the next hour, none late');
+    expect(out).toContain('4 buses due in the next hour; 3 with live times, none of them late');
+  });
+
+  it('say lateness of the live buses only, even when too few are live to call the rest on time', () => {
+    const out = html(ok(busData({ passes: [bus(2, { delayMin: 6 }), stale(4), stale(6), stale(8)] })));
+    expect(out).toContain('4 buses due in the next hour; 1 with live times, 1 of them 5 minutes or more late, up to 6 min.');
+    expect(busesFact(buses(ok(busData({ passes: [bus(2, { delayMin: 6 }), stale(4), stale(6), stale(8)] }))))).toMatchObject({ text: 'Bus times mostly scheduled, little live data' });
+  });
+
+  it('say 1 bus, not the first 1, when the cut-short list holds one', () => {
+    expect(html(ok(busData({ passes: [bus(5)], capped: true })))).toContain('Showing 1 bus (to 22:04), too few with live times');
   });
 
   it('do not say how many are due in the next hour when the list was cut short', () => {
