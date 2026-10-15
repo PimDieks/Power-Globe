@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
+import { configDefaults } from 'vitest/config';
 
 export default defineConfig({
   // Relative asset paths so the build works from any sub-path, e.g. GitHub Pages project sites.
@@ -15,5 +16,9 @@ export default defineConfig({
       // import of it goes to the copy, three-globe's included.
       'three-slippy-map-globe': fileURLToPath(new URL('./src/vendor/three-slippy-map-globe.mjs', import.meta.url)),
     },
+  },
+  test: {
+    // Worktrees of other sessions keep copies of the tests that may be out of date.
+    exclude: [...configDefaults.exclude, '.claude/**'],
   },
 });

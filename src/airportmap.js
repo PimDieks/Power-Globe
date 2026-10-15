@@ -29,6 +29,41 @@ const MOVING_UPDATE_MS = 1000;
 // every view change does not send the same failing request again. It is asked again by itself
 // when this is over.
 export const WEATHER_RETRY_MS = 30_000;
+// Weather for an airport is asked for again once it is this old, and at most this many airports'
+// weather is kept (the longest unrefreshed go first).
+export const WEATHER_MAX_AGE_MS = 60 * 60_000;
+export const WEATHER_MAX_AIRPORTS = 300;
+
+// The airports' weather: hourly forecasts by ident, each with when it arrived. One older than
+// `maxAge` is still drawn but counts as missing, so it is asked for again. `version` changes with
+// every arrival.
+export function weatherCache({ maxAge = WEATHER_MAX_AGE_MS, max = WEATHER_MAX_AIRPORTS, now = Date.now } = {}) {
+  const entries = new Map();
+  let version = 0;
+  return {
+    get: (ident) => entries.get(ident)?.hourly,
+    // Whether there is weather for `ident` that is recent enough.
+    fresh(ident) {
+      const entry = entries.get(ident);
+      return !!entry && now() - entry.at < maxAge;
+    },
+    // When the weather for `ident` goes stale, or undefined without any.
+    staleAt: (ident) => (entries.has(ident) ? entries.get(ident).at + maxAge : undefined),
+    set(ident, hourly) {
+      // Insertion order is age order: a refreshed airport goes to the back.
+      entries.delete(ident);
+      entries.set(ident, { hourly, at: now() });
+      while (entries.size > max) entries.delete(entries.keys().next().value);
+      version++;
+    },
+    get size() {
+      return entries.size;
+    },
+    get version() {
+      return version;
+    },
+  };
+}
 
 const DEG = Math.PI / 180;
 const wrapLng = (d) => ((((d + 180) % 360) + 360) % 360) - 180;
@@ -94,12 +129,14 @@ export function labelCandidates(selected, flagged, labelled) {
 // the airport open in the panel (null for none): its label is drawn selected and is always shown.
 export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getProblems = () => [], onSelect }) {
   const runways = setupRunways(globe);
-  const weather = new Map();
+  const weather = weatherCache();
   let airports = null;
   let shown = [];
   let labelled = [];
   let pov = null;
   let timer = null;
+  // When `timer` fires.
+  let timerAt = 0;
   // Updates the map even if the camera does not settle, while following (see MOVING_UPDATE_MS).
   let moving = null;
   let following = false;
@@ -113,6 +150,8 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
   let profile = null;
   // Ident of the selected airport's label while it is shown on its own (see showAlone), if it is.
   let alone = null;
+  // What the map was last drawn from (see render), or null when it has to be drawn again.
+  let drawnFrom = null;
 
   function aspect() {
     return window.innerWidth / window.innerHeight;
@@ -131,20 +170,29 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
       return;
     }
     timer = setTimeout(update, SETTLE_MS);
+    timerAt = Date.now() + SETTLE_MS;
     if (following) moving ??= setTimeout(update, MOVING_UPDATE_MS);
   }
 
   // Updates again by itself when the first airport in view that is waiting to be asked again may
-  // be, unless an update is already coming (the camera moving schedules its own).
+  // be, or whose weather goes stale, unless an update is already coming by then (the camera
+  // moving schedules its own).
   function retryWhenDue() {
-    if (timer) return;
     const now = Date.now();
-    const due = shown.filter((a) => !weather.has(a.ident) && retryAt.get(a.ident) > now).map((a) => retryAt.get(a.ident));
-    if (due.length) timer = setTimeout(update, Math.min(...due) - now);
+    const due = shown
+      .map((a) => (weather.fresh(a.ident) ? weather.staleAt(a.ident) : retryAt.get(a.ident)))
+      .filter((at) => at > now);
+    if (!due.length) return;
+    const at = Math.min(...due);
+    if (timer && timerAt <= at) return;
+    clearTimeout(timer);
+    timerAt = at;
+    timer = setTimeout(update, at - now);
   }
 
   function clear() {
     active = false;
+    drawnFrom = null;
     shown = [];
     labelled = [];
     runways.draw([], 1);
@@ -159,6 +207,7 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     const ident = selected?.ident ?? null;
     if (ident === alone && !again) return;
     alone = ident;
+    drawnFrom = null;
     const flag = getProblems().find((p) => p.airport.ident === ident)?.status;
     const label = selected && { ...airportLabel(selected, flag, profile && !profile.runwayStatus), lat: selected.lat, lng: selected.lng };
     mapFeatures.setRunwayLabels(label ? [label] : [], onSelect);
@@ -209,8 +258,9 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     // looked up, or waiting to be asked again): the site's own data where it has them, else
     // Open-Meteo.
     const now = Date.now();
+    for (const [ident, at] of retryAt) if (at <= now) retryAt.delete(ident);
     const missing = shown
-      .filter((a) => !weather.has(a.ident) && !looking.has(a.ident) && !(retryAt.get(a.ident) > now))
+      .filter((a) => !weather.fresh(a.ident) && !looking.has(a.ident) && !retryAt.has(a.ident))
       .slice(0, MAX_WEATHER);
     retryWhenDue();
     if (!missing.length) return;
@@ -223,12 +273,14 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
         },
       });
     } catch (err) {
-      for (const a of missing) if (!weather.has(a.ident)) retryAt.set(a.ident, Date.now() + WEATHER_RETRY_MS);
-      retryWhenDue();
+      for (const a of missing) if (!weather.fresh(a.ident)) retryAt.set(a.ident, Date.now() + WEATHER_RETRY_MS);
       console.error('Could not load weather for runways', err);
     } finally {
       for (const a of missing) looking.delete(a.ident);
     }
+    // When to look again: for weather that arrived, once it goes stale, even if the camera stays
+    // where it is; for weather that did not, once the wait is over.
+    retryWhenDue();
   }
 
   // Airport status at the timeline's time: per runway end, and the airport's best.
@@ -239,11 +291,16 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     return { conditions, endStatus: new Map(result.ends.map((e) => [e.ident, e.status])), status: result.status };
   }
 
-  // Draw the runways in view and place every label, for the timeline's time.
+  // Draw the runways in view and place every label, for the timeline's time. Nothing is done
+  // when nothing it draws from has changed since the last time.
   function render() {
     if (!active || !pov) return;
     const time = getTime();
     const limits = getLimits();
+    const problems = getProblems();
+    const from = [pov, shown, labelled, weather.version, time, JSON.stringify(limits), selected, profile, runwayUse, window.innerWidth, window.innerHeight, problems.map((p) => `${p.airport.ident}:${p.status}`).join()];
+    if (drawnFrom?.every((value, i) => value === from[i])) return;
+    drawnFrom = from;
     const mpp = metresPerPixel(pov.altitude, window.innerHeight);
     const showEnds = pov.altitude < LABEL_ALTITUDE;
     const frame = localFrame(pov);
@@ -320,10 +377,10 @@ export function setupAirportMap({ globe, mapFeatures, getTime, getLimits, getPro
     // The selected airport and those the wind check flags are always labelled (the flagged ones in
     // their status colour); the selected one claims its place first.
     const bounds = viewBounds(pov, aspect());
-    const flagged = new Map(getProblems().filter((p) => inBounds(p.airport, bounds)).map((p) => [p.airport.ident, p.status]));
+    const flagged = new Map(problems.filter((p) => inBounds(p.airport, bounds)).map((p) => [p.airport.ident, p.status]));
     const candidates = labelCandidates(
       selected,
-      getProblems().map((p) => p.airport).filter((a) => flagged.has(a.ident)),
+      problems.map((p) => p.airport).filter((a) => flagged.has(a.ident)),
       labelled,
     );
     for (const airport of candidates) {

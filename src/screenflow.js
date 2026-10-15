@@ -1,6 +1,7 @@
 import { Matrix4 } from 'three';
 import { WORLD } from './field.js';
 import { RATE, advect } from './flow.js';
+import { pixelRatio } from './pacing.js';
 
 const DEG = Math.PI / 180;
 // Positions remembered per particle, one per frame: the length of its trail.
@@ -66,7 +67,8 @@ export class ScreenFlow {
   }
 
   resize() {
-    const dpr = window.devicePixelRatio || 1;
+    // No sharper than the globe under it (see pacing.js).
+    const dpr = pixelRatio();
     this.canvas.width = Math.round(window.innerWidth * dpr);
     this.canvas.height = Math.round(window.innerHeight * dpr);
     this.lineWidth = 1.4 * dpr;
@@ -107,6 +109,12 @@ export class ScreenFlow {
     // Start with the whole trail at the spawn point, so it grows out from there.
     const [x, y, z] = toCartesian(this.lat[i], this.lng[i], this.radius);
     for (let k = 0; k < TRAIL; k++) this.trail.set([x, y, z], (i * TRAIL + k) * 3);
+  }
+
+  // The seconds to step after a frame of `dt`: all of them, as the trails are drawn again from
+  // the camera on every frame the globe is drawn.
+  take(dt) {
+    return dt;
   }
 
   // Advance particles `dt` seconds through the wind from `sampleWind(lat, lng, out)` and draw.

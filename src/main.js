@@ -42,6 +42,7 @@ import { CARD_REFRESH_MS, cardText, focusTarget, followLayout, freeArea, spokenD
 import { latestObservation } from './metar.js';
 import { latestTaf } from './taf.js';
 import { explain } from './api.js';
+import { FrameBudget, FrameMeter, busyNow, pixelRatio, playStep, unattended } from './pacing.js';
 
 // Timeline playback speed: three hours of forecast a second, whatever the forecast's step.
 const PLAY_HOURS_PER_SECOND = 3;
@@ -169,6 +170,8 @@ const state = {
   // The clouds loop's status as last shown ('loading', 'playing', 'failed' or null).
   loopStatus: null,
   playing: false,
+  // Whether the play is the one the page starts by itself, which plays the forecast once.
+  autoplay: false,
   // Step whose discrete layers (the storm rings) are currently drawn.
   drawnStep: -1,
   // The storm rings the globe shows, kept so that unchanged ones are not given to it again.
@@ -194,6 +197,8 @@ const state = {
   // On phones: whether the full panel was asked for while following, instead of the small card.
   followExpanded: false,
   autoRotate: !reducedMotion,
+  // Whether the globe has stopped turning because nobody has used the page for a while (see pacing.js).
+  resting: false,
 };
 
 // On phones the controls start folded so the globe gets the screen.
@@ -226,6 +231,35 @@ const globe = new Globe(els.globe, { animateIn: !reducedMotion })
   // Drawn after the colour field and wind layers, which do not write depth, so they show on top.
   .ringAltitude(0.0008)
   .onGlobeClick(({ lat, lng }) => !pickedTraffic() && showDetails(lat, lng));
+
+// Fewer pixels on high-density screens (see pacing.js), read again when the window changes size
+// (or moves to another screen). The post-processing composer keeps its own copy of the ratio for
+// its buffers.
+function applyPixelRatio() {
+  const ratio = pixelRatio();
+  if (globe.renderer().getPixelRatio() === ratio) return;
+  globe.renderer().setPixelRatio(ratio);
+  globe.postProcessingComposer?.()?.setPixelRatio?.(ratio);
+}
+applyPixelRatio();
+
+// globe.gl draws the globe on every frame the screen shows. Instead, `tick` draws it, only as
+// often as the frame budget allows (see pacing.js): globe.gl looks up its `_animationCycle` on
+// the globe each time it asks for the next frame, so with a stand-in that does nothing its own
+// loop stops after the frame in flight, and the original draws one frame (controls, tweens, the
+// scene and the HTML labels) when called. pauseAnimation and resumeAnimation, which also pause the
+// globe's layers (the pulsing rings), keep working. Without that method, globe.gl keeps drawing
+// on its own.
+const drawGlobe = typeof globe._animationCycle === 'function' ? globe._animationCycle : null;
+if (drawGlobe) globe._animationCycle = () => {};
+else console.warn('globe.gl has no _animationCycle: it draws every frame itself, and frame pacing is off.');
+const budget = new FrameBudget(performance.now());
+const meter = new FrameMeter();
+// Until when the camera is flying somewhere (see goToAirport).
+let cameraFlightUntil = 0;
+let frameMode = 'active';
+// For checking what the page is doing, in the browser's console.
+window.__powerGlobe = { fps: () => meter.fps(performance.now()), mode: () => frameMode };
 
 const BASEMAP_KEY = 'power-globe:basemap';
 state.basemap = (() => {
@@ -309,6 +343,8 @@ const windCheck = setupWindCheck({
   // Airports near the middle of the view are checked first.
   getCenter: () => globe.pointOfView(),
   formatTime: (time) => formatTime(time),
+  // Its airports are worked out only while it is in use: its panel is open, or one of its airports is.
+  inUse: () => state.windCheck,
   onSelect: (airport) => goToAirport(airport, { fromList: true }),
   // Airports with wind trouble are marked on the map while the wind check is in use; zoomed
   // in, their airfield labels show it instead (see airportmap.js).
@@ -395,7 +431,10 @@ const detailFlow = new ScreenFlow(globe, els.globe, { count: largeScreen ? 2200 
 detailField.visible = false;
 detailFlow.visible = false;
 
-window.addEventListener('resize', () => globe.width(window.innerWidth).height(window.innerHeight));
+window.addEventListener('resize', () => {
+  applyPixelRatio();
+  globe.width(window.innerWidth).height(window.innerHeight);
+});
 
 function radioButtons(container, items, activeKey, onSelect) {
   // The buttons are redrawn on every change; keep keyboard focus on the same one.
@@ -609,8 +648,9 @@ function drawStep(step) {
   renderCaption();
   renderCloudsLoop();
   renderDetails();
-  windCheck.update();
-  airportMap.refresh();
+  // The wind check refreshes the airport map with its findings; if it is not in use, the map is
+  // refreshed here.
+  if (!windCheck.update()) airportMap.refresh();
   state.drawnStep = step;
 }
 
@@ -676,9 +716,12 @@ function sampleWind(lat, lng, out) {
   return true;
 }
 
-function stepWind(dt) {
+function stepWind(frameDt) {
   const active = state.region ? detailFlow : flow;
   if (!active.visible) return;
+  // The global flow steps at most 30 times a second (see flow.js): the wind is blended only then.
+  const dt = active.take(frameDt);
+  if (!dt) return;
   const [i0, i1, t] = blendIndices();
   blendWind(state.winds, i0, i1, t, globalWind, shape.cols);
   fillPoleRows(globalWind.u, windShape);
@@ -696,17 +739,66 @@ function stepWind(dt) {
 
 const ease = (x) => 1 - (1 - x) ** 3;
 
+// The globe stops turning after a while without anyone using the page, and turns again (if it
+// was) at the next touch.
+function setResting(resting) {
+  if (resting === state.resting) return;
+  state.resting = resting;
+  controls.autoRotate = state.autoRotate && !resting && globe.pointOfView().altitude >= DETAIL_ALTITUDE;
+}
+
 let lastFrame = performance.now();
 let lastTrafficRender = 0;
+// Runs `fn`, reporting only the first error of each `kind`, so that one going wrong on every frame
+// neither stops the rest of the frame nor floods the console.
+const reported = new Set();
+function guarded(kind, fn) {
+  try {
+    fn();
+  } catch (err) {
+    if (reported.has(kind)) return;
+    reported.add(kind);
+    console.error(err);
+  }
+}
+
+// The clouds loop plays by itself unless motion is reduced (each press shows the next image then).
+const cloudsLoopPlays = () => state.loopStatus === 'playing' && !reducedMotion;
+
 function tick(now) {
-  const dt = Math.min(0.1, (now - lastFrame) / 1000);
+  requestAnimationFrame(tick);
+  // Active while something moves by itself that should look smooth (see busyNow in pacing.js). The
+  // clouds loop stops after a long while without input, like a play started with the Play button.
+  const attended = !unattended(now, budget.lastInput);
+  if (cloudsLoopPlays() && !attended) stopCloudsLoop();
+  const busy = busyNow({ playing: state.playing, flying: now < cameraFlightUntil, following: !!state.follow, looping: cloudsLoopPlays(), attended });
+  frameMode = budget.mode(now, { busy, paused: pilot.isOpen });
+  setResting(frameMode === 'still');
+  if (!budget.due(now, frameMode)) return;
+  // The globe is drawn first, as globe.gl did on its own: what this frame changes shows in the
+  // next, and the zoomed-in wind is drawn with the camera the globe was just drawn with.
+  if (frameMode !== 'paused') {
+    if (cloudsLoopPlays()) guarded('clouds loop', () => basemap.frameCloudsLoop(now));
+    if (drawGlobe) guarded('globe', drawGlobe);
+    meter.count(now);
+  }
+  // At most a frame of the slowest rate (5 a second), so fades and particles keep their speed then.
+  const dt = Math.min(0.25, (now - lastFrame) / 1000);
   lastFrame = now;
   // The weather is not drawn while the pilot view covers the globe.
   if (state.forecast && !pilot.isOpen) {
     const last = state.timeline.times.length - 1;
     if (state.playing) {
-      state.t += (dt * PLAY_HOURS_PER_SECOND) / state.stepHours;
-      if (state.t >= last) state.t = 0;
+      const next = playStep(state.t, (dt * PLAY_HOURS_PER_SECOND) / state.stepHours, last, { once: state.autoplay });
+      state.t = next.t;
+      // The play the page started by itself goes back to the present at the end; one started
+      // with the Play button stops when nobody has touched the page for a long while.
+      if (next.ended) {
+        setPlaying(false);
+        seek(startIndex(state.timeline.times));
+      } else if (!state.autoplay && !attended) {
+        setPlaying(false);
+      }
       state.dirty = true;
     }
     if (state.dirty) {
@@ -740,11 +832,12 @@ function tick(now) {
     lastTrafficRender = now;
     renderDetails();
   }
-  requestAnimationFrame(tick);
 }
 
-function setPlaying(playing) {
+// `auto`: the play the page starts by itself, which plays the forecast once.
+function setPlaying(playing, { auto = false } = {}) {
   state.playing = playing;
+  state.autoplay = playing && auto;
   // The moving clouds follow the timeline differently while it plays (see cloudTimes).
   if (state.forecast) syncClouds();
   els.playIcon.textContent = playing ? '❚❚' : '▶';
@@ -778,7 +871,7 @@ async function refresh(force = false) {
     for (const el of [els.play, els.slider, els.now]) el.disabled = false;
     state.fieldFade = 0;
     seek(startIndex(state.timeline.times));
-    if (!reducedMotion) setPlaying(true);
+    if (!reducedMotion) setPlaying(true, { auto: true });
     const updated = state.forecast.built
       ? ` · updated ${new Date(state.forecast.built).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`
       : '';
@@ -874,7 +967,7 @@ function onView(pov) {
   mapFeatures.update(pov.altitude);
   airportMap.view(pov);
   const zoomedIn = pov.altitude < DETAIL_ALTITUDE;
-  controls.autoRotate = state.autoRotate && !zoomedIn;
+  controls.autoRotate = state.autoRotate && !zoomedIn && !state.resting;
   if (!zoomedIn) {
     clearTimeout(regionTimer);
     regionTimer = null;
@@ -1391,6 +1484,7 @@ function goToAirport(airport, { stayClose = false, ...options } = {}) {
   stopCameraDrift();
   const duration = reducedMotion ? 0 : 2200;
   globe.pointOfView({ lat, lng: airport.lng, altitude }, duration);
+  cameraFlightUntil = performance.now() + duration + 100;
   setTimeout(stopCameraDrift, duration + 50);
   if (stayClose && panelStays(state.detail, airport)) return;
   // Trying an open airport again keeps the way back to the wind check.
@@ -1601,8 +1695,16 @@ function wake() {
     else document.body.classList.add('idle');
   }, IDLE_MS);
 }
-for (const type of ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart']) {
-  window.addEventListener(type, wake, { passive: true });
+// Any input also brings the full frame rate back at once (see pacing.js).
+function onInput() {
+  budget.input(performance.now());
+  setResting(false);
+  wake();
+}
+// A screen reader's activation can be just a click, and a resize clears the canvas, which must be
+// drawn again at once.
+for (const type of ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart', 'click', 'input', 'focusin', 'resize']) {
+  window.addEventListener(type, onInput, { passive: true, capture: true });
 }
 
 els.refresh.addEventListener('click', () => refresh(true));

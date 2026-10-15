@@ -51,7 +51,9 @@ export function distance(a, b) {
   return Math.acos(Math.min(1, Math.max(-1, cos)));
 }
 
-export function setupWindCheck({ els, getTime, getCenter, formatTime, onSelect, onProblems, onLimitsChange }) {
+// `inUse()`: whether the page still uses the findings while the panel is closed (one of its
+// airports is open); without the panel and that, nothing is worked out.
+export function setupWindCheck({ els, getTime, getCenter, formatTime, onSelect, onProblems, onLimitsChange, inUse = () => false }) {
   let limits = readLimits();
   let airports = null;
   let weather = new Map();
@@ -192,20 +194,26 @@ export function setupWindCheck({ els, getTime, getCenter, formatTime, onSelect, 
     });
   }
 
-  // Re-evaluate every airport at the timeline's time with the current limits.
+  // Re-evaluate every airport at the timeline's time with the current limits, while the wind
+  // check is in use. Returns whether it did (and so told onProblems).
   function update() {
-    if (!airports) return;
+    if (!airports) return false;
+    const hidden = els.panel.classList.contains('hidden');
+    if (hidden && !inUse()) {
+      lastKey = '';
+      return false;
+    }
     const time = getTime();
     const { problems, checked } = windProblems(airports, weather, time, limits, { marginal: els.marginal.checked });
     onProblems(problems);
-    if (els.panel.classList.contains('hidden')) {
+    if (hidden) {
       lastKey = '';
-      return;
+      return true;
     }
     const nogo = problems.filter((p) => p.status === 'nogo').length;
     const caution = problems.length - nogo;
     const key = [time, checked, els.marginal.checked, ...problems.map((p) => `${p.airport.ident}${p.status}${p.best.ident}`)].join();
-    if (key === lastKey) return;
+    if (key === lastKey) return true;
     lastKey = key;
 
     const parts = [`${nogo} out of limits`];
@@ -222,6 +230,7 @@ export function setupWindCheck({ els, getTime, getCenter, formatTime, onSelect, 
         ? '<li class="empty">No airport has wind trouble at this time with these limits.</li>'
         : '';
     if (focused) els.list.querySelector(`[data-ident="${CSS.escape(focused)}"]`)?.focus();
+    return true;
   }
 
   function open() {

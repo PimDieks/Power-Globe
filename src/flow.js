@@ -12,6 +12,22 @@ const BAND_ALPHA = [0.16, 0.32, 0.55, 0.85];
 // Trails fade on an 8-bit canvas, so they never quite reach zero: with FADE, alpha gets stuck
 // below about 14/255. The layer's shader treats anything that faint as fully transparent.
 const RESIDUE = 0.06;
+// The particles move, and the canvas goes to the graphics card (8 MB at 2048 × 1024), at most this
+// often a second: more would not show, as each upload is all a frame can see of them. A step a
+// little early counts, as frame times jitter.
+export const STEPS_PER_SECOND = 30;
+const MIN_STEP_S = 1 / STEPS_PER_SECOND - 0.004;
+// The longest step: a frame of the page's slowest rate (5 a second, see pacing.js), so particles
+// keep their speed then.
+export const MAX_STEP_S = 0.25;
+
+// Motion waiting to be stepped: `pending` seconds plus a frame of `dt`. Returns { pending, step }:
+// the seconds to step now (0 while fewer than a step's worth are waiting) and what is left waiting.
+export function takeStep(pending, dt) {
+  const total = pending + dt;
+  if (total < MIN_STEP_S) return { pending: total, step: 0 };
+  return { pending: 0, step: Math.min(MAX_STEP_S, total) };
+}
 
 // Eastward (u) and northward (v) components of wind blowing *from* `direction` degrees.
 export function windComponents(speed, direction) {
@@ -60,9 +76,14 @@ export class WindFlow {
     this.age = new Float32Array(count);
     this.life = new Float32Array(count);
     this.wind = new Float32Array(2);
+    // Seconds of motion not stepped yet (see STEPS_PER_SECOND).
+    this.pending = 0;
 
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.colorSpace = THREE.SRGBColorSpace;
+    // No mipmaps: they would be made again on the graphics card for every upload.
+    this.texture.generateMipmaps = false;
+    this.texture.minFilter = THREE.LinearFilter;
     this.texture.anisotropy = Math.min(4, globe.renderer().capabilities.getMaxAnisotropy());
     const material = new THREE.MeshBasicMaterial({
       map: this.texture,
@@ -131,8 +152,16 @@ export class WindFlow {
     return lat < south || lat > north ? NaN : ((north - lat) / (north - south)) * this.height;
   }
 
-  // Advance every particle `dt` seconds. `sampleWind(lat, lng, out)` writes the wind's u and v
-  // (km/h) into `out` and returns false where there is no data.
+  // The seconds to step after a frame of `dt`, or 0 if no step is due: at most STEPS_PER_SECOND
+  // steps are taken, shorter frames adding up until one is due.
+  take(dt) {
+    const { pending, step } = takeStep(this.pending, dt);
+    this.pending = pending;
+    return step;
+  }
+
+  // Advance every particle `dt` seconds (see take). `sampleWind(lat, lng, out)` writes the wind's u
+  // and v (km/h) into `out` and returns false where there is no data.
   step(dt, sampleWind) {
     const { ctx, width, height, wind } = this;
     ctx.globalCompositeOperation = 'destination-out';

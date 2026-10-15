@@ -16,7 +16,7 @@
     "ndw-sites": "node scripts/build-ndw-sites.mjs"
   },
   "dependencies": {
-    "globe.gl": "^2.46.2",
+    "globe.gl": "~2.46.2",
     "maplibre-gl": "6.11.2",
     "satellite.js": "^7.1.0",
     "three": "^0.186.1",

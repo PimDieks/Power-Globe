@@ -170,6 +170,14 @@ function saveSettings(settings) {
   }
 }
 
+// The points `from` to `from + n` of a list of `length`, which wrap round to its start, as
+// [first, count] ranges; none for no points.
+export function aircraftRanges(from, n, length) {
+  if (n <= 0 || length <= 0) return [];
+  const end = from + n;
+  return end <= length ? [[from, n]] : [[from, length - from], [0, end - length]];
+}
+
 // Orbital elements for a group of satellites, as text: the bundled copy while it is fresh, else
 // live (see askLive), else the bundled copy however old it is.
 export async function loadElements(group) {
@@ -647,12 +655,15 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
     for (let k = 0; k < n; k++) {
       const i = (from + k) % shown.length;
       const ac = shown[i];
-      const p = estimatePosition(ac, now);
-      ac.estimate = p;
+      // Each aircraft keeps its estimate in one object, written over every time it moves.
+      const p = estimatePosition(ac, now, (ac.estimate ??= { lat: 0, lng: 0 }));
       scenePoint(p.lat, p.lng, drawnAltitude(ac), attrs.position, i);
     }
     cursor = from + n;
-    planes.commit(shown.length);
+    // Only what changed goes to the graphics card: the colours, headings and sizes with new data,
+    // the positions of the aircraft moved (the slice may wrap round to the start).
+    if (rebuilt) planes.commit(shown.length);
+    else planes.commit(shown.length, { changed: ['position'], ranges: aircraftRanges(from, n, shown.length) });
   }
 
   function drawSatellites(now) {
@@ -709,7 +720,8 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
 
   // Pixel sizes for the zoom: small when looking at the whole globe, bigger zoomed in.
   function resize(altitude) {
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    // Point sizes are in the renderer's pixels, which are not the screen's (see pacing.js).
+    const dpr = globe.renderer?.().getPixelRatio?.() ?? Math.min(2, window.devicePixelRatio || 1);
     const planePx = Math.max(6, Math.min(20, 20 * (0.12 / Math.max(altitude, 0.01)) ** 0.35));
     planes.size = planePx * dpr;
     // The plane drawn in the sprite reaches about 0.44 of its width from the middle.
