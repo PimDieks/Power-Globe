@@ -113,8 +113,8 @@ const AIRCRAFT_FRAGMENT = /* glsl */ `
     vec4 g = texture(uIcons, vec3(uv, floor(vClass + 0.5)));
     if (g.a < 0.04) discard;
     // On the ground the dark edge and shadow are made firmer, so the sprite holds on a grey apron.
-    float a = vGround > 0.5 ? min(1.0, g.a * 1.5) : g.a;
-    gl_FragColor = vec4(g.rgb * vColor, a);
+    float alpha = vGround > 0.5 ? min(1.0, g.a * 1.5) : g.a;
+    gl_FragColor = vec4(g.rgb * vColor, alpha);
   }
 `;
 
