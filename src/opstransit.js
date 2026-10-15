@@ -21,12 +21,14 @@ export const MAX_TRAINS_SHOWN = 6;
 export const MAX_BUS_LINES = 8;
 export const BUS_PER_LINE = 3;
 // Buses are delayed when at least BUS_LATE_COUNT of the next hour's run LATE_MIN late or more, and
-// BUS_LATE_SHARE of those that run; or when two or more are this many minutes late.
+// BUS_LATE_SHARE of those with live times; or when two or more are this many minutes late.
 export const BUS_LATE_COUNT = 3;
 export const BUS_LATE_SHARE = 0.3;
 export const BUS_VERY_LATE_MIN = 15;
-// Live times are needed from at least this many buses for "on time" to mean anything.
-export const BUS_MIN_LIVE = 2;
+// Live times are needed from at least this many buses, and from this share of those that run, for
+// "on time" to mean anything; the rest of the times are only the schedule.
+export const BUS_MIN_LIVE = 3;
+export const BUS_MIN_LIVE_SHARE = 0.5;
 const TRAIN_VERY_LATE_MIN = 10;
 
 const minutesOld = (fetched, now) => (Number.isFinite(fetched) ? Math.max(0, Math.round((now - fetched) / 60_000)) : null);
@@ -106,6 +108,7 @@ export function analyseBuses({ airport, now = Date.now(), result = null }) {
   const until = now + (data.windowMinutes ?? 60) * 60_000;
   const passes = (data.passes ?? []).filter((p) => p.expected >= now - 60_000 && Math.min(p.planned, p.expected) <= until);
   const running = passes.filter((p) => !p.cancelled);
+  const liveRunning = running.filter((p) => p.live === true);
   const groups = new Map();
   for (const p of passes) {
     const key = `${p.line}\u0000${p.destination ?? ''}`;
@@ -118,7 +121,7 @@ export function analyseBuses({ airport, now = Date.now(), result = null }) {
   const cancelledLines = [...groups.values()].filter((g) => g.cancelledReported).map((g) => g.line);
   const lines = [...groups.values()]
     .filter((g) => g.next.length)
-    .map((g) => ({ ...g, delayMin: Math.max(0, ...g.next.map((p) => p.delayMin)), next: g.next.slice(0, BUS_PER_LINE) }))
+    .map((g) => ({ ...g, delayMin: Math.max(0, ...g.next.filter((p) => p.live).map((p) => p.delayMin)), next: g.next.slice(0, BUS_PER_LINE) }))
     .sort((a, b) => (a.next[0]?.expected ?? Infinity) - (b.next[0]?.expected ?? Infinity) || a.line.localeCompare(b.line, 'en', { numeric: true }));
   return {
     ...base,
@@ -126,13 +129,19 @@ export function analyseBuses({ airport, now = Date.now(), result = null }) {
     lines: lines.slice(0, MAX_BUS_LINES),
     moreLines: Math.max(0, lines.length - MAX_BUS_LINES),
     running: running.length,
-    live: running.filter((p) => ['DRIVING', 'ARRIVED', 'PASSED'].includes(p.status) || p.delayMin > 0).length,
-    late: running.filter((p) => p.delayMin >= LATE_MIN).length,
-    maxDelay: Math.max(0, ...running.map((p) => p.delayMin)),
+    live: liveRunning.length,
+    // Only live times say anything about delay: the others are the schedule.
+    late: liveRunning.filter((p) => p.delayMin >= LATE_MIN).length,
+    maxDelay: Math.max(0, ...liveRunning.map((p) => p.delayMin)),
+    capped: data.capped === true,
+    cappedTo: passes.length ? Math.max(...passes.map((p) => p.expected)) : null,
     cancelledReported: passes.filter((p) => p.cancelled).length,
     cancelledLines: [...new Set(cancelledLines)].sort((a, b) => a.localeCompare(b, 'en', { numeric: true })),
   };
 }
+
+// Whether enough of the buses have live times to say how they are doing.
+export const enoughLive = (b) => b.live >= BUS_MIN_LIVE && b.live / b.running >= BUS_MIN_LIVE_SHARE;
 
 // The bus part's contribution to the summary. Reported cancellations are left out of it: the feed
 // is not good enough to say anything with them.
@@ -142,10 +151,10 @@ export function busesFact(b) {
   if (b.old) return { text: `Bus data ${b.ageMin} min old`, status: 'unknown' };
   const asOf = b.data.fetched;
   if (!b.running) return { text: 'No buses listed', status: 'unknown', asOf };
-  if ((b.late >= BUS_LATE_COUNT && b.late / b.running >= BUS_LATE_SHARE) || (b.late >= 2 && b.maxDelay >= BUS_VERY_LATE_MIN)) {
+  if ((b.late >= BUS_LATE_COUNT && b.late / b.live >= BUS_LATE_SHARE) || (b.late >= 2 && b.maxDelay >= BUS_VERY_LATE_MIN)) {
     return { text: `Buses delayed, up to ${b.maxDelay} min`, status: 'caution', asOf };
   }
-  if (b.live < BUS_MIN_LIVE) return { text: 'No live bus times', status: 'unknown', asOf };
+  if (!enoughLive(b)) return { text: 'Bus times mostly scheduled, little live data', status: 'unknown', asOf };
   return { text: 'Buses on time', status: 'ok', asOf };
 }
 

@@ -2,7 +2,7 @@
 // opsaccessview.js, each a function of the analysis (see opstransit.js). Times are Amsterdam time,
 // where the airport and its trains and buses are.
 import { escapeHtml } from './airportview.js';
-import { BUS_MIN_LIVE, LATE_MIN, OLD_MIN } from './opstransit.js';
+import { LATE_MIN, OLD_MIN, enoughLive } from './opstransit.js';
 
 export const TRAINS_SOURCE_TEXT = 'Source: NS (apiportal.ns.nl)';
 export const BUSES_SOURCE_TEXT = 'Source: OVapi (NDOV, the open real-time bus feed)';
@@ -81,19 +81,22 @@ export function trainsHtml(data) {
 function busTimes(line) {
   return line.next
     .map((p) => {
-      const live = ['DRIVING', 'ARRIVED', 'PASSED'].includes(p.status) || p.delayMin > 0;
-      const late = p.delayMin >= LATE_MIN;
-      const shown = clock(p.delayMin > 0 ? p.expected : p.planned);
-      const text = p.delayMin > 0 ? `${shown} <span class="${late ? 'access-late' : 'ops-note'}">+${p.delayMin}</span>` : shown;
+      // Without a recent update the times are the schedule, whatever the status says.
+      const live = p.live === true;
+      const late = live && p.delayMin >= LATE_MIN;
+      const delayed = live && p.delayMin > 0;
+      const shown = clock(delayed ? p.expected : p.planned);
+      const text = delayed ? `${shown} <span class="${late ? 'access-late' : 'ops-note'}">+${p.delayMin}</span>` : shown;
       return `<span class="${live ? 'access-live' : 'access-sched'}">${text}</span>`;
     })
     .join(', ');
 }
 
 function busSummary(b) {
-  const parts = [`${plural(b.running, 'bus', 'buses')} due in the next hour`];
+  // A capped list ends before the hour does, so it is not the count of the hour.
+  const parts = [b.capped ? `Showing the first ${plural(b.running, 'bus', 'buses')} (to ${clock(b.cappedTo)})` : `${plural(b.running, 'bus', 'buses')} due in the next hour`];
   if (b.late) parts.push(`${b.late} ${b.late === 1 ? 'is' : 'are'} ${LATE_MIN} minutes or more late, up to ${b.maxDelay} min`);
-  else if (b.live >= BUS_MIN_LIVE) parts.push('none late');
+  else if (enoughLive(b)) parts.push('none late');
   else parts.push('too few with live times to say whether they are late');
   return parts.join(', ');
 }
@@ -120,5 +123,5 @@ export function busesHtml(data) {
     ${b.running || b.lines.length ? `<p>${busSummary(b)}.</p>` : ''}
     ${body}
     ${cancelled}
-    <p class="ops-note">Buses at the terminal stops, next departures per line. Times are Amsterdam time: the expected time where the feed has real-time information (in bold), the scheduled one otherwise (grey), with the delay in minutes. ${BUSES_SOURCE_TEXT}.</p>`;
+    <p class="ops-note">Buses at the terminal stops, next departures per line. Times are Amsterdam time: the expected time where the feed has real-time information (in bold), the scheduled one otherwise (grey), with the delay in minutes. A time counts as real-time only when the feed updated it in the last 15 minutes. ${BUSES_SOURCE_TEXT}.</p>`;
 }
