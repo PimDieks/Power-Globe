@@ -75,21 +75,43 @@ export function setupRunways(globe) {
     for (const i of [0, 1, 2, 0, 2, 3]) toScene(corners[i], positions);
   }
 
+  // What the shapes and the colours were last made from, so that unchanged ones are kept.
+  let drawnShapes = '';
+  let drawnColors = '';
+
   // `runways`: [{ ends: [a, b], widthFt, status }]; `metresPerPixel` sets the minimum width.
   function draw(runways, metresPerPixel) {
     if (!runways.length) {
       outline.visible = strip.visible = false;
       return;
     }
+    const shapes = shapeKey(runways, metresPerPixel);
+    const colorKey = runways.map((rw) => rw.status).join();
+    if (shapes === drawnShapes && colorKey === drawnColors) {
+      outline.visible = strip.visible = true;
+      return;
+    }
+    const colors = [];
+    for (const rw of runways) {
+      const c = STATUS_COLORS[rw.status] ?? STATUS_COLORS.unknown;
+      for (let k = 0; k < 6; k++) colors.push(...c);
+    }
+    drawnColors = colorKey;
+    if (shapes === drawnShapes) {
+      // Only the colours changed (the timeline moved on): written into the buffer there is.
+      const color = strip.geometry.getAttribute('color');
+      color.array.set(colors);
+      color.needsUpdate = true;
+      outline.visible = strip.visible = true;
+      return;
+    }
+    drawnShapes = shapes;
     const inner = [];
     const outer = [];
-    const colors = [];
     for (const rw of runways) {
       const width = Math.max(rw.widthFt * FT, 5 * metresPerPixel);
       quad(rw.ends, width + 3 * metresPerPixel, 1.5 * metresPerPixel, outer);
       quad(rw.ends, width, 0, inner);
-      const c = STATUS_COLORS[rw.status] ?? STATUS_COLORS.unknown;
-      for (let k = 0; k < 6; k++) colors.push(...c);
     }
     outline.geometry.dispose();
     strip.geometry.dispose();
@@ -101,6 +123,13 @@ export function setupRunways(globe) {
   }
 
   return { draw };
+}
+
+// What a set of runway shapes is made from: their ends and widths, and the scale.
+export function shapeKey(runways, metresPerPixel) {
+  let key = String(metresPerPixel);
+  for (const { ends, widthFt } of runways) key += `;${ends[0].lat},${ends[0].lng},${ends[1].lat},${ends[1].lng},${widthFt}`;
+  return key;
 }
 
 export function bearingBetween(a, b) {

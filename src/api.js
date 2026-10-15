@@ -42,6 +42,16 @@ export function withTimeout(promise, ms, message) {
   return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 }
 
+// Puts `value` in `map` under `key` as its newest entry, and lets go of the oldest entries beyond
+// `max`, so that a cache filled by whatever someone happens to look at cannot grow for as long as
+// the page is open. Returns `value`.
+export function remember(map, key, value, max) {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > max) map.delete(map.keys().next().value);
+  return value;
+}
+
 // What went wrong, in words: "Failed to fetch" means the browser was not allowed to ask the
 // service (it does not accept requests from other websites) or could not reach it.
 export function explain(err) {

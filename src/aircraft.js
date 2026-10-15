@@ -107,9 +107,14 @@ export function fromAdsb(data, { military = false } = {}) {
 }
 
 // Where an aircraft is likely to be at `now`, following its track at its ground speed since the
-// last report (great-circle dead reckoning). Aircraft on the ground stay put.
-export function estimatePosition(ac, now) {
-  if (ac.onGround || !ac.speedKt || ac.track == null) return { lat: ac.lat, lng: ac.lng };
+// last report (great-circle dead reckoning). Aircraft on the ground stay put. Written into `out`
+// when given (so a frame that moves thousands of aircraft makes no objects), else a new one.
+export function estimatePosition(ac, now, out = {}) {
+  if (ac.onGround || !ac.speedKt || ac.track == null) {
+    out.lat = ac.lat;
+    out.lng = ac.lng;
+    return out;
+  }
   const seconds = Math.min(MAX_ESTIMATE_S, Math.max(0, (now - ac.seen) / 1000));
   const d = (ac.speedKt / KT_PER_MS) * seconds / EARTH_RADIUS_M;
   const lat1 = ac.lat * RAD;
@@ -117,7 +122,9 @@ export function estimatePosition(ac, now) {
   const bearing = ac.track * RAD;
   const lat2 = Math.asin(Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(bearing));
   const lng2 = lng1 + Math.atan2(Math.sin(bearing) * Math.sin(d) * Math.cos(lat1), Math.cos(d) - Math.sin(lat1) * Math.sin(lat2));
-  return { lat: lat2 / RAD, lng: ((((lng2 / RAD + 180) % 360) + 360) % 360) - 180 };
+  out.lat = lat2 / RAD;
+  out.lng = ((((lng2 / RAD + 180) % 360) + 360) % 360) - 180;
+  return out;
 }
 
 // How far above the surface an aircraft is drawn, in globe radii. Its true height, so nothing

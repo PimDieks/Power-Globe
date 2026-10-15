@@ -64,6 +64,28 @@ describe('the wind check status', () => {
     expect(status).toBe("1 major airports checked. Some are from the site's own copy, built at 2026-10-12T06:00, as live data was not available.");
   });
 
+  it('works nothing out while its panel is closed and none of its airports is open', async () => {
+    let inUse = true;
+    const onProblems = vi.fn();
+    loadAirports.mockResolvedValue([big]);
+    airportWeather.mockImplementation(async (list, { onData }) => {
+      const result = new Map(list.map((a) => [a.ident, hourly()]));
+      onData(result);
+      return result;
+    });
+    // The panel reads as hidden throughout (see elements).
+    const els = elements();
+    const windCheck = setupWindCheck({ els, getTime: () => '2026-10-13T12:00', formatTime: (t) => t, onSelect() {}, onProblems, onLimitsChange() {}, inUse: () => inUse });
+    windCheck.open();
+    await vi.waitFor(() => expect(els.status.textContent).toMatch(/checked/));
+    onProblems.mockClear();
+    expect(windCheck.update()).toBe(true);
+    expect(onProblems).toHaveBeenCalledTimes(1);
+    inUse = false;
+    expect(windCheck.update()).toBe(false);
+    expect(onProblems).toHaveBeenCalledTimes(1);
+  });
+
   it('says nothing about a copy recent enough to be used instead of asking', async () => {
     expect(await statusFor(hourly(NOW - 3_600_000))).toBe('1 major airports checked');
   });

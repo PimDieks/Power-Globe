@@ -171,8 +171,12 @@ const RING_FRAGMENT = /* glsl */ `
   }
 `;
 
+// Update ranges an attribute collects before it is uploaded in one go (the globe is not drawn while
+// the pilot view is open); past this many, it is uploaded whole.
+const MAX_UPDATE_RANGES = 16;
+
 // A growable set of points with per-point attributes, drawn after the weather layers.
-class PointCloud {
+export class PointCloud {
   constructor(globe, material, attributes, renderOrder) {
     this.globe = globe;
     this.attributeSizes = { position: 3, ...attributes };
@@ -189,6 +193,8 @@ class PointCloud {
   // Room for `n` points; returns the attribute arrays to fill.
   reserve(n) {
     if (n > this.capacity || !this.capacity) {
+      // The buffers being replaced are freed, rather than left on the graphics card.
+      this.geometry.dispose();
       this.capacity = Math.max(n, Math.ceil(this.capacity * 1.5), 256);
       for (const [name, size] of Object.entries(this.attributeSizes)) {
         const attribute = new THREE.BufferAttribute(new Float32Array(this.capacity * size), size);
@@ -199,15 +205,26 @@ class PointCloud {
     return Object.fromEntries(Object.keys(this.attributeSizes).map((name) => [name, this.geometry.attributes[name].array]));
   }
 
-  // Draw the first `n` points after their attributes were filled in.
-  commit(n) {
+  // Draw the first `n` points after their attributes were filled in. Only what was written is
+  // uploaded: `changed`, the attributes written (all by default), and `ranges`, the points
+  // written in them as [first, count] pairs (all n by default). Ranges add up until the next
+  // upload, so points written by commits that were never drawn are not lost. Nothing is uploaded
+  // for no points: an empty range would upload the whole buffer (WebGL 2 reads a count of 0 as
+  // "to the end").
+  commit(n, { changed = Object.keys(this.attributeSizes), ranges = null } = {}) {
     this.count = n;
     this.geometry.setDrawRange(0, n);
-    for (const name of Object.keys(this.attributeSizes)) {
+    if (!n || ranges?.length === 0) return;
+    for (const name of changed) {
       const attribute = this.geometry.attributes[name];
       if (!attribute) continue;
-      attribute.clearUpdateRanges();
-      attribute.addUpdateRange(0, n * attribute.itemSize);
+      const size = attribute.itemSize;
+      if (!ranges || attribute.updateRanges.length + ranges.length > MAX_UPDATE_RANGES) {
+        attribute.clearUpdateRanges();
+        attribute.addUpdateRange(0, n * size);
+      } else {
+        for (const [first, count] of ranges) if (count > 0) attribute.addUpdateRange(first * size, count * size);
+      }
       attribute.needsUpdate = true;
     }
   }

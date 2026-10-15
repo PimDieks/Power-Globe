@@ -112,7 +112,7 @@ const MAP_ALTITUDE = 1.3;
 // load, or if the tile server cannot be reached.
 // Returns { setAltitude(altitude), setStyle(key), setFollowing(on), setTime(time, ahead),
 // cloudsAsOf(), cloudsShown(), and the clouds loop: startCloudsLoop({ manual }), stopCloudsLoop(),
-// advanceCloudsLoop(), cloudsLoop() }. `onClouds()` is called when the moving clouds show another
+// advanceCloudsLoop(), frameCloudsLoop(now), cloudsLoop() }. `onClouds()` is called when the moving clouds show another
 // image, and `onCredit(html)` whenever the credit changes.
 export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCredit, onClouds } = {}) {
   let style = BASEMAPS[initial] ?? BASEMAPS.satellite;
@@ -227,6 +227,7 @@ export function setupBasemap(globe, backdropUrl, { initial = 'satellite', onCred
     startCloudsLoop: moving.startLoop,
     stopCloudsLoop: moving.stopLoop,
     advanceCloudsLoop: moving.advanceLoop,
+    frameCloudsLoop: moving.frameLoop,
     cloudsLoop: moving.loopState,
   };
 }
@@ -604,7 +605,9 @@ const LOOP_STORE_MAX = 230;
 // its images have loaded, each fading into the next, with coarser tiles (see coarserView).
 // `baseEngine()` is the map's own tile engine, whose tile level this follows.
 // Returns { setActive(on), update(), setFollowing(on), setTime(time, ahead, playing), asOf(),
-// shown(), startLoop({ manual }), stopLoop(), advanceLoop(), loopState() }.
+// shown(), startLoop({ manual }), stopLoop(), advanceLoop(), frameLoop(now), loopState() }. The page
+// calls frameLoop for every frame it draws while the loop plays, so the loop goes at the globe's
+// frame rate (see pacing.js) rather than the screen's.
 function setupMovingClouds(globe, baseEngine, onChange) {
   // 0.0002 globe radii is about 1.3 km above the ground.
   const radius = globe.getGlobeRadius() * 1.0002;
@@ -802,41 +805,38 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     return true;
   }
 
+  // The loop's tiles on show: those in view that have all its images, worked out again only when
+  // the view or the tiles that are ready change, not for every frame.
+  let loopTiles = { view: null, ready: -1, tiles: [], keep: new Set() };
+  function loopTilesNow() {
+    if (loopTiles.view !== views.coarse || loopTiles.ready !== loop.ready.size) {
+      const tiles = tileKeys(views.coarse).filter((tile) => loop.ready.has(tile));
+      loopTiles = { view: views.coarse, ready: loop.ready.size, tiles, keep: new Set(tiles) };
+    }
+    return loopTiles;
+  }
+
   // The loop's images `a` and `b` on its tiles, `mix` of the way from one to the other. Tiles that
   // came into view since it started join once all its images for them are there.
   function showLoop(a, b, mix) {
-    const tiles = tileKeys(views.coarse).filter((tile) => loop.ready.has(tile));
-    const keep = new Set(tiles);
-    for (const tile of [...meshes.keys()]) if (!keep.has(tile)) removeMesh(tile);
+    const { tiles, keep } = loopTilesNow();
+    // (A Map's keys can be deleted while going through them.)
+    for (const tile of meshes.keys()) if (!keep.has(tile)) removeMesh(tile);
     for (const tile of tiles) {
       const ta = store.get(`${a}/${tile}`).value;
       const tb = store.get(`${b}/${tile}`).value;
-      paint(meshFor(tile, ta), `${a}/${tile}`, ta, tb, mix);
+      const mesh = meshFor(tile, ta);
+      // Between two images only the blend moves.
+      if (mesh.material.map === ta && mesh.material.userData.cross.map2.value === tb) mesh.material.userData.cross.crossMix.value = mix;
+      else paint(mesh, `${a}/${tile}`, ta, tb, mix);
     }
     setShown(a);
-  }
-
-  function animateLoop() {
-    if (!globalThis.requestAnimationFrame) return;
-    const frame = (now) => {
-      if (loop?.status !== 'playing') return;
-      try {
-        const step = loopStep({ index: loop.index, since: loop.since }, now, loop.playable.length);
-        loop.index = step.index;
-        loop.since = step.since;
-        showLoop(loop.playable[step.index], loop.playable[step.next], step.mix);
-      } finally {
-        if (loop?.status === 'playing') loop.raf = requestAnimationFrame(frame);
-      }
-    };
-    loop.raf = requestAnimationFrame(frame);
   }
 
   // Ends the loop. The store goes back to its usual bound once the refresh that follows has said
   // which tiles are wanted now (see TileStore.want).
   function stopLoop({ failed = false } = {}) {
     if (!loop) return;
-    if (loop.raf) cancelAnimationFrame(loop.raf);
     clearTimeout(loop.stall);
     loop = null;
     setFailed(failed);
@@ -921,7 +921,6 @@ function setupMovingClouds(globe, baseEngine, onChange) {
       loop.since = performance.now();
       loop.index = 0;
       showLoop(playable[0], playable[0], 0);
-      if (!loop.manual) animateLoop();
       onChange?.();
     } else if (changed) {
       onChange?.();
@@ -1069,7 +1068,7 @@ function setupMovingClouds(globe, baseEngine, onChange) {
       setFailed(false);
       if (!active || !times || !views?.coarse.tiles.length) return false;
       if (loop) stopLoop();
-      loop = { frames: loopFrames(times), status: 'loading', progress: 0, playable: [], ready: new Set(), manual, index: 0, since: 0, raf: null };
+      loop = { frames: loopFrames(times), status: 'loading', progress: 0, playable: [], ready: new Set(), manual, index: 0, since: 0 };
       store.max = LOOP_STORE_MAX;
       refresh();
       onChange?.();
@@ -1095,6 +1094,15 @@ function setupMovingClouds(globe, baseEngine, onChange) {
     // The loop for the page to show: null when off, else { status: 'loading' | 'playing' |
     // 'failed', progress (0 to 1), frame (the image on show while playing), last (whether a manual
     // loop is on its newest image) }.
+    // Moves the playing loop on to `now` (ms, as performance.now()); with `manual` it waits for
+    // advanceLoop instead.
+    frameLoop(now) {
+      if (loop?.status !== 'playing' || loop.manual) return;
+      const step = loopStep({ index: loop.index, since: loop.since }, now, loop.playable.length);
+      loop.index = step.index;
+      loop.since = step.since;
+      showLoop(loop.playable[step.index], loop.playable[step.next], step.mix);
+    },
     loopState() {
       if (loopFailed) return { status: 'failed', progress: 0, frame: null, last: false };
       if (!loop) return null;
@@ -1115,7 +1123,8 @@ function setupMovingClouds(globe, baseEngine, onChange) {
 function matchTileDetailToScreen(globe, chart) {
   const engine = findTileEngine(globe, chart);
   if (!engine) return false;
-  const pixels = window.innerHeight * window.devicePixelRatio;
+  // The pixels the globe is drawn with, which are fewer than the screen's on a Retina screen (see pacing.js).
+  const pixels = window.innerHeight * (globe.renderer?.().getPixelRatio?.() ?? window.devicePixelRatio);
   // Levels finer than the default that the screen can show: on a phone about 1.8, which comes
   // out a little under one texel per pixel at mid latitudes. Going all the way to one texel
   // per pixel looks barely sharper but downloads about twice as many tiles.
@@ -1228,6 +1237,10 @@ function runwayLabelElement(label, onSelect) {
   return el;
 }
 
+// Everything a runway, wind or airfield label's element shows, so equal keys can share one.
+export const runwayLabelKey = (label) =>
+  JSON.stringify([label.kind, label.key, label.airport?.ident, label.status, label.flag, label.selected, label.use, label.text, label.title, label.direction]);
+
 // Country borders and city names that appear as the view zooms in, airports with wind trouble
 // and a pin for the selected place. Returns `update(altitude)` to call as the camera moves,
 // `setMarker(place)` and `setAirports(problems, onClick)`.
@@ -1257,6 +1270,9 @@ export function setupMapFeatures(globe) {
   // keeps an object on screen as long as the same datum is passed in).
   let airportMarkers = new Map();
   let runwayLabels = [];
+  // Runway, wind and airfield labels by everything they show, reused while that stays the same,
+  // like the airport markers.
+  let runwayLabelData = new Map();
   // The airports at the ends of the selected aircraft's lines (see flightlines.js).
   let flightEnds = [];
   let borders = null;
@@ -1290,6 +1306,8 @@ export function setupMapFeatures(globe) {
   // `problems`: [{ airport, status }], or [] to remove the markers.
   function setAirports(problems, onClick) {
     if (!problems.length && !airports.length) return;
+    // The same markers as before: nothing to tell the globe.
+    if (problems.length === airportMarkers.size && problems.every(({ airport, status }) => airportMarkers.has(`${airport.ident}:${status}`))) return;
     const next = new Map();
     airports = problems.map(({ airport, status }) => {
       const key = `${airport.ident}:${status}`;
@@ -1301,12 +1319,22 @@ export function setupMapFeatures(globe) {
     refreshLabels();
   }
 
-  // Labels for runway ends and airport winds (see airportmap.js). Made afresh each time: they
-  // only change when the view settles, the timeline steps or weather arrives, and fresh labels
-  // can never be left at a previous layout's position.
+  // Labels for runway ends and airport winds (see airportmap.js). A label that shows the same as
+  // one already on the map keeps its element and is moved to its new place (the globe places
+  // every label it is given again), so the labels are not built afresh for every timeline step.
   function setRunwayLabels(labels, onSelect) {
     if (!labels.length && !runwayLabels.length) return;
-    runwayLabels = labels.map((label) => ({ lat: label.lat, lng: label.lng, ident: label.airport?.ident, kind: label.kind, el: runwayLabelElement(label, onSelect) }));
+    const next = new Map();
+    runwayLabels = labels.map((label) => {
+      const key = runwayLabelKey(label);
+      // The same label twice in one set gets an element of its own.
+      const datum = (!next.has(key) && runwayLabelData.get(key)) || { ident: label.airport?.ident, kind: label.kind, el: runwayLabelElement(label, onSelect) };
+      datum.lat = label.lat;
+      datum.lng = label.lng;
+      next.set(key, datum);
+      return datum;
+    });
+    runwayLabelData = next;
     refreshLabels();
   }
 

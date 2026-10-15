@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { airportWeather, toAirport } from '../src/airports.js';
-import { WEATHER_RETRY_MS, labelCandidates, setupAirportMap } from '../src/airportmap.js';
+import { WEATHER_MAX_AGE_MS, WEATHER_RETRY_MS, labelCandidates, setupAirportMap, weatherCache } from '../src/airportmap.js';
 import { MAP_PROFILES } from '../src/mapprofile.js';
 
 vi.mock('../src/airports.js', async (importOriginal) => ({
@@ -183,6 +183,56 @@ describe('weather for the airports in view', () => {
     await settle();
     await settle();
     expect(airportWeather).toHaveBeenCalledTimes(2);
+  });
+  it('asks again for weather that has become an hour old, and draws with the new forecast', async () => {
+    const hourlyFrom = (direction) => ({ time: ['2026-10-13T12:00', '2026-10-13T13:00'], wind_direction_10m: [direction, direction], wind_speed_10m: [15, 15], wind_gusts_10m: [15, 15] });
+    let direction = 270;
+    airportWeather.mockImplementation(async (list, { onData }) => {
+      const answer = new Map(list.map((a) => [a.ident, hourlyFrom(direction)]));
+      onData(answer);
+      return answer;
+    });
+    const { setRunwayLabels, settle } = await setup([FIELD]);
+    const endStatus = (ident) => setRunwayLabels.mock.lastCall[0].find((l) => l.kind === 'runway' && l.text.startsWith(ident)).status;
+    await settle({ ...view, altitude: 0.005 });
+    expect(airportWeather).toHaveBeenCalledTimes(1);
+    expect(endStatus('27')).toBe('ok');
+    // An hour on, the camera never having moved, the weather is asked for again, and the wind has turned.
+    direction = 90;
+    await vi.advanceTimersByTimeAsync(WEATHER_MAX_AGE_MS - 1000);
+    expect(airportWeather).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(airportWeather).toHaveBeenCalledTimes(2);
+    expect(endStatus('09')).toBe('ok');
+    expect(endStatus('27')).toBe('nogo');
+  });
+
+  it('does not ask again within the hour when the camera moves', async () => {
+    airportWeather.mockImplementation(async (list, { onData }) => {
+      const answer = new Map(list.map((a) => [a.ident, null]));
+      onData(answer);
+      return answer;
+    });
+    const { settle } = await setup([FIELD]);
+    await settle({ ...view, altitude: 0.005 });
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    await settle({ ...view, altitude: 0.005, lat: 51.0001 });
+    expect(airportWeather).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not draw again when nothing it draws from has changed', async () => {
+    airportWeather.mockResolvedValue(new Map());
+    const { map, settle, setRunwayLabels } = await setup([FIELD]);
+    await settle({ ...view, altitude: 0.005 });
+    const calls = setRunwayLabels.mock.calls.length;
+    drawStrips.mockClear();
+    map.refresh();
+    map.refresh();
+    expect(setRunwayLabels.mock.calls.length).toBe(calls);
+    expect(drawStrips).not.toHaveBeenCalled();
+    // A change in what it draws from (the airport opened) draws it again.
+    map.select(FIELD);
+    expect(setRunwayLabels.mock.calls.length).toBe(calls + 1);
   });
 });
 
@@ -391,5 +441,47 @@ describe('what the map shows around the open airport for the tab shown (its map 
     map.setProfile(MAP_PROFILES.traffic);
     expect(strips().map((s) => s.status)).toEqual(['ok']);
     expect(runwayTexts()).toEqual(['09 tailwind', '27 ✓']);
+  });
+});
+
+describe('the airports’ weather cache', () => {
+  it('counts weather an hour old as missing, but still gives it', () => {
+    let now = 0;
+    const cache = weatherCache({ now: () => now });
+    cache.set('EHAM', { a: 1 });
+    expect(cache.fresh('EHAM')).toBe(true);
+    expect(cache.staleAt('EHAM')).toBe(WEATHER_MAX_AGE_MS);
+    now = WEATHER_MAX_AGE_MS;
+    expect(cache.fresh('EHAM')).toBe(false);
+    expect(cache.get('EHAM')).toEqual({ a: 1 });
+    expect(cache.fresh('EGLL')).toBe(false);
+    expect(cache.staleAt('EGLL')).toBeUndefined();
+  });
+
+  it('keeps an answer of no weather as an answer', () => {
+    const cache = weatherCache();
+    cache.set('EHAM', null);
+    expect(cache.fresh('EHAM')).toBe(true);
+    expect(cache.get('EHAM')).toBeNull();
+  });
+
+  it('keeps at most so many airports, forgetting the longest unrefreshed first', () => {
+    let now = 0;
+    const cache = weatherCache({ max: 3, now: () => now++ });
+    for (const ident of ['A', 'B', 'C']) cache.set(ident, ident);
+    // A is refreshed, so B is now the oldest.
+    cache.set('A', 'A2');
+    cache.set('D', 'D');
+    expect(cache.size).toBe(3);
+    expect(cache.get('B')).toBeUndefined();
+    expect(['A', 'C', 'D'].map((ident) => cache.get(ident))).toEqual(['A2', 'C', 'D']);
+  });
+
+  it('changes its version with every arrival', () => {
+    const cache = weatherCache();
+    const before = cache.version;
+    cache.set('A', 1);
+    cache.set('A', 1);
+    expect(cache.version).toBe(before + 2);
   });
 });

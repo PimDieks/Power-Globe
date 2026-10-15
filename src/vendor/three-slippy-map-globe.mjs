@@ -1,10 +1,12 @@
 // This is dist/three-slippy-map-globe.mjs of three-slippy-map-globe 1.0.6
-// (https://github.com/vasturiano/three-slippy-map-globe), with one addition marked "Power Globe":
+// (https://github.com/vasturiano/three-slippy-map-globe), with additions marked "Power Globe":
 // evictTile(tile), which lets the site free tiles out of view (see boundTiles in src/map.js). The
 // engine keeps every tile it loads for as long as the view stays at that level or closer, and it
-// keeps its records of the tiles to itself. vite.config.js points every import of
-// three-slippy-map-globe here, three-globe's too. package.json pins the same version, so that the
-// two are changed together.
+// keeps its records of the tiles to itself. As published it also never let go of those records, and
+// kept a tile whose image failed to load as "loading" for ever (with its mesh), never asking for it
+// again: see _pruneRecords and the error handler in _fetchNeededTiles, and countTileRecords.
+// vite.config.js points every import of three-slippy-map-globe here, three-globe's too.
+// package.json pins the same version, so that the two are changed together.
 //
 // MIT License
 //
@@ -326,6 +328,13 @@ var _innerBackLayer = /*#__PURE__*/new WeakMap();
 var _ThreeSlippyMapGlobe_brand = /*#__PURE__*/new WeakSet();
 // Power Globe: evictTile finds the record of each tile mesh here.
 var _tileRecords = /*#__PURE__*/new WeakMap();
+// Power Globe: a tile whose image failed to load is asked for again after this pause, doubled for
+// each further failure up to the most, not on every frame.
+var TILE_RETRY_MS = 5000;
+var TILE_RETRY_MAX_MS = 5 * 60 * 1000;
+// Power Globe: the records of a level made on demand (above MAX_LEVEL_TO_BUILD_LOOKUP_OCTREE) are
+// pruned once there are this many, or twice as many as were kept the last time, whichever is more.
+var TILE_RECORDS_TO_PRUNE = 1000;
 var ThreeSlippyMapGlobe = /*#__PURE__*/function (_Group) {
   function ThreeSlippyMapGlobe(radius) {
     var _this;
@@ -438,6 +447,15 @@ var ThreeSlippyMapGlobe = /*#__PURE__*/function (_Group) {
           });
         }
       }
+
+      // Power Globe: a level left keeps only the records of the tiles it still has or is loading:
+      // the level zoomed in from, or every level zoomed out of (_pruneRecords leaves the levels
+      // with a lookup octree as they are).
+      for (var pl = prevLevel < level ? prevLevel : level + 1; pl <= prevLevel; pl++) {
+        _assertClassBrand(_ThreeSlippyMapGlobe_brand, this, _pruneRecords).call(this, pl, function () {
+          return false;
+        });
+      }
       _assertClassBrand(_ThreeSlippyMapGlobe_brand, this, _fetchNeededTiles).call(this);
     }
 
@@ -505,10 +523,41 @@ var ThreeSlippyMapGlobe = /*#__PURE__*/function (_Group) {
       this.remove(tile);
       _deallocate(tile);
       delete d.obj;
+      // Worked out again if the tile is looked at again.
+      delete d.hullPnts;
       return true;
+    }
+  }, {
+    key: "countTileRecords",
+    value:
+    // Power Globe: the number of tiles the engine keeps a record of, loaded or not, at all levels:
+    // for tests, and for a look at its memory from the console.
+    function countTileRecords() {
+      return Object.values(_classPrivateFieldGet2(_tilesMeta, this)).reduce(function (n, l) {
+        return n + l.length;
+      }, 0);
     }
   }]);
 }(Group);
+// Power Globe: lets go of the records of `level` (if made on demand) of tiles that have no mesh, are
+// not loading, are not waiting to be asked for again after failing and are not `wanted(d)`, so
+// that following an aircraft does not leave a record (and its five hull points) behind for every
+// tile it passed. A failed tile's record is kept while it waits, so that its pause is kept too.
+function _pruneRecords(level, wanted) {
+  var meta = _classPrivateFieldGet2(_tilesMeta, this);
+  var levelMeta = meta[level];
+  if (!levelMeta || levelMeta.octree) return;
+  var now = Date.now();
+  var kept = levelMeta.filter(function (d) {
+    return d.obj || d.loading || d.retryAt > now || wanted(d);
+  });
+  kept.record = {};
+  kept.forEach(function (d) {
+    return kept.record["".concat(d.x, "_").concat(d.y)] = d;
+  });
+  kept.prunedTo = kept.length;
+  meta[level] = kept;
+}
 function _buildMetaLevel(level) {
   var _this4 = this;
   if (level > MAX_LEVEL_TO_BUILD_LOOKUP_OCTREE) {
@@ -587,6 +636,14 @@ function _fetchNeededTiles() {
         }
         tiles = selTiles;
       }
+
+      // Power Globe: the records outside this search window are let go once there are many.
+      var levelTiles = _classPrivateFieldGet2(_tilesMeta, this)[this.level];
+      if (levelTiles.length > Math.max(TILE_RECORDS_TO_PRUNE, 2 * (levelTiles.prunedTo || 0))) {
+        _assertClassBrand(_ThreeSlippyMapGlobe_brand, this, _pruneRecords).call(this, this.level, function (d) {
+          return d.x >= x0 && d.x <= x1 && d.y >= y0 && d.y <= y1;
+        });
+      }
     }
   }
 
@@ -602,8 +659,10 @@ function _fetchNeededTiles() {
   });
   */
 
+  var now = Date.now();
   tiles.filter(function (d) {
-    return !d.obj;
+    // Power Globe: nor a tile that failed to load a moment ago (see below).
+    return !d.obj && !(d.retryAt > now);
   }).filter(_classPrivateFieldGet2(_isInView, this) || function () {
     return true;
   }).forEach(function (d) {
@@ -645,6 +704,22 @@ function _fetchNeededTiles() {
           _this5.add(tile);
         }
         d.loading = false;
+        delete d.failures;
+      }, undefined, function () {
+        // Power Globe: a tile whose image cannot be had gives up its mesh, which was never shown,
+        // and is asked for again when it is next in view after a pause. Before, it stayed "loading"
+        // for ever, with its mesh, out of reach of evictTile. (The chart layer's loader, see
+        // src/tileretry.js, retries a tile itself and never calls this.) A tile that is never there
+        // (a 404) is still asked for again, by design, but no more than every TILE_RETRY_MAX_MS.
+        var tile = d.obj;
+        if (tile) {
+          _this5.remove(tile);
+          _deallocate(tile);
+          delete d.obj;
+        }
+        d.loading = false;
+        d.failures = (d.failures || 0) + 1;
+        d.retryAt = Date.now() + Math.min(TILE_RETRY_MAX_MS, TILE_RETRY_MS * Math.pow(2, d.failures - 1));
       });
     }
   });

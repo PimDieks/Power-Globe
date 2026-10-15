@@ -1,6 +1,6 @@
 // The latest official observation at an airport (METAR), from the Aviation Weather Center's
 // public data API (NOAA, public domain).
-import { PROXY_URL } from './api.js';
+import { PROXY_URL, remember } from './api.js';
 
 const METAR_URL = (ident) => `https://aviationweather.gov/api/data/metar?ids=${encodeURIComponent(ident)}&format=json&hours=3`;
 const TIMEOUT_MS = 12_000;
@@ -63,13 +63,16 @@ export function toObservation(m) {
   };
 }
 
+// The observations of no more than this many airports are kept, those asked for longest ago going
+// first.
+export const METAR_CACHE_SIZE = 100;
 const cache = new Map();
 
 // The newest METAR for an airport, or null if none was issued in the last three hours. Throws
 // if the service cannot be reached.
 export async function latestObservation(ident) {
   const hit = cache.get(ident);
-  if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
+  if (hit && Date.now() - hit.at < CACHE_MS) return remember(cache, ident, hit, METAR_CACHE_SIZE).value;
   let text;
   // Through the Power Globe API when there is one, else straight from aviationweather.gov.
   for (const url of [PROXY_URL && `${PROXY_URL}/metar?ids=${encodeURIComponent(ident)}`, METAR_URL(ident)].filter(Boolean)) {
@@ -85,6 +88,6 @@ export async function latestObservation(ident) {
   const list = text.trim() ? JSON.parse(text) : [];
   const newest = list.sort((a, b) => (b.obsTime ?? 0) - (a.obsTime ?? 0))[0];
   const value = toObservation(newest);
-  cache.set(ident, { at: Date.now(), value });
+  remember(cache, ident, { at: Date.now(), value }, METAR_CACHE_SIZE);
   return value;
 }

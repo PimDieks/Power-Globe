@@ -299,13 +299,13 @@ describe('the moving clouds of the Clouds view', () => {
     });
 
     it('keeps the loop going when the first frame comes with an earlier time than its start', async () => {
-      vi.stubGlobal('requestAnimationFrame', (cb) => setTimeout(() => cb(performance.now() - 50), 16));
-      vi.stubGlobal('cancelAnimationFrame', (id) => clearTimeout(id));
       const basemap = setupBasemap(globe, 'backdrop.jpg', { initial: 'clouds' });
       await vi.advanceTimersByTimeAsync(2000);
       basemap.startCloudsLoop();
       await vi.advanceTimersByTimeAsync(2000);
       expect(basemap.cloudsLoop().status).toBe('playing');
+      // The page's frames, which here come with a time a little before the one they are drawn at.
+      setInterval(() => basemap.frameCloudsLoop(performance.now() - 50), 16);
       const shown = new Set();
       for (let i = 0; i < 40; i++) {
         await vi.advanceTimersByTimeAsync(100);
@@ -315,12 +315,18 @@ describe('the moving clouds of the Clouds view', () => {
     });
 
     it('keeps the loop going after a frame that went wrong', async () => {
-      vi.stubGlobal('requestAnimationFrame', (cb) => setTimeout(() => cb(performance.now()), 16));
-      vi.stubGlobal('cancelAnimationFrame', (id) => clearTimeout(id));
       const basemap = setupBasemap(globe, 'backdrop.jpg', { initial: 'clouds' });
       await vi.advanceTimersByTimeAsync(2000);
       basemap.startCloudsLoop();
       await vi.advanceTimersByTimeAsync(2000);
+      // The page's frames: one that fails does not stop the next (see tick in main.js).
+      setInterval(() => {
+        try {
+          basemap.frameCloudsLoop(performance.now());
+        } catch {
+          // The failed frame.
+        }
+      }, 16);
       // One frame fails while it lets the graphics card forget an image.
       const dispose = vi.spyOn(THREE.Texture.prototype, 'dispose').mockImplementationOnce(() => {
         throw new Error('lost context');
