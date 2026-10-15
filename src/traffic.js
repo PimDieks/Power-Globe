@@ -15,6 +15,7 @@ import { PROXY_URL, explain } from './api.js';
 import { loadAirports } from './airports.js';
 import { setupFlightLines } from './flightlines.js';
 import { loadRoute, loadTrack } from './flightroute.js';
+import { INPUT_ACTIVE_MS, unattended } from './pacing.js';
 
 const OPENSKY_URL = 'https://opensky-network.org/api/states/all?extended=1';
 export const ADSB_PROVIDERS = [
@@ -48,6 +49,21 @@ const GLOBAL_RETRY_MS = 5 * 60_000;
 const GLOBAL_LIMIT_PAUSE_MS = 30 * 60_000;
 const AREA_MS = 15_000;
 const MILITARY_MS = 60_000;
+// When nobody has touched the page for a long while (see unattended in pacing.js), the area and the
+// military flights are asked for less often; OpenSky keeps its own pace.
+export const AREA_UNATTENDED_MS = 60_000;
+export const MILITARY_UNATTENDED_MS = 120_000;
+// A view that someone moves on (with input in the last INPUT_ACTIVE_MS) is asked for once it has
+// stood still for MOVE_SETTLE_MS, or has kept moving for MOVE_MS, and at most every MOVE_MS. A view
+// that moves by itself (the globe turning, the pilot view's aircraft) waits for the next AREA_MS.
+export const MOVE_MS = 5000;
+export const MOVE_SETTLE_MS = 800;
+// The view has moved on from the area asked for when its middle is more than half the area's radius
+// away, or the radius it needs has grown by more than this (zooming out). It stands still while it
+// moves (and zooms) by less than STILL_PER_S of the radius a second, so a slow drag still counts as
+// moving and the tail of the camera's damping soon does not.
+const ZOOM_OUT_RATIO = 1.25;
+const STILL_PER_S = 0.02;
 // After every ADS-B feed failed, wait this long before asking again.
 const FEED_RETRY_MS = 60_000;
 // Aircraft not heard from for this long are dropped.
@@ -295,7 +311,10 @@ async function askLive(group) {
   }
 }
 
-export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, announce }) {
+// `lastInput()`: when the page last had input, in the clock of frame()'s `now` (performance.now()).
+// Without it, the page counts as just touched: every move of the view counts as someone's, and the
+// feeds never slow down.
+export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, announce, lastInput = null }) {
   const R = globe.getGlobeRadius();
   const RAD = Math.PI / 180;
   const store = new AircraftStore();
@@ -321,6 +340,12 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
   let lastArea = null;
   // Whether the last request for the area failed. Its retry waits FEED_RETRY_MS whatever the view does.
   let areaFailed = false;
+  // When the area was last asked for, since when someone has moved the view on from it (0 for not),
+  // and when the view last moved at all (wall clock), with where it was in the last frame and when.
+  let areaAskedAt = -Infinity;
+  let movedSince = 0;
+  let viewChangedAt = 0;
+  const lastPov = { lat: 0, lng: 0, altitude: 1, at: null };
   const inFlight = new Set();
   // An area kept up to date for the Ops tab (see watchArea), and who wants to hear of its answers.
   const watch = { area: null, next: 0 };
@@ -448,6 +473,8 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
     const center = { lat: +pov.lat.toFixed(2), lng: +pov.lng.toFixed(2) };
     const nm = areaRadiusNm(pov.altitude);
     return once('area', async () => {
+      areaAskedAt = Date.now();
+      movedSince = 0;
       try {
         const { data, name } = await fromProviders((p) => p.area(center.lat, center.lng, nm), `/flights/area?lat=${center.lat}&lon=${center.lng}&nm=${nm}`);
         addAircraft(fromAdsb(data), name);
@@ -747,18 +774,38 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
     lines.setViewport(window.innerWidth, window.innerHeight);
   }
 
+  // Whether to ask for the area around the view now (`wall`: Date.now(); `sinceInput`: ms since
+  // the page's last input; `away`: nobody has been there for long). On its schedule, every AREA_MS
+  // (AREA_UNATTENDED_MS when nobody is there); sooner when someone has moved the view on (see
+  // MOVE_MS), but not after a failure: the area then stays the one before it, so it would look moved
+  // on every frame and ask again and again.
+  function areaDue(pov, wall, sinceInput, away) {
+    const nm = areaRadiusNm(pov.altitude);
+    const p = lastPov;
+    // How far the view went since the last frame, in nautical miles: across, and in or out (as a
+    // share of the radius, by the change of height).
+    const step = p.at === null ? Infinity : greatCircleNm(p, pov) + nm * Math.abs(Math.log(pov.altitude / p.altitude));
+    if (step > (STILL_PER_S * nm * Math.max(1, wall - (p.at ?? wall))) / 1000) viewChangedAt = wall;
+    p.lat = pov.lat;
+    p.lng = pov.lng;
+    p.altitude = pov.altitude;
+    p.at = wall;
+    const movedOn = lastArea && !areaFailed && (greatCircleNm(lastArea, pov) > lastArea.nm / 2 || nm > lastArea.nm * ZOOM_OUT_RATIO);
+    if (!movedOn) movedSince = 0;
+    else if (!movedSince && sinceInput < INPUT_ACTIVE_MS) movedSince = wall;
+    if (wall >= nextArea + (away ? AREA_UNATTENDED_MS - AREA_MS : 0)) return true;
+    return Boolean(movedSince) && wall - areaAskedAt >= MOVE_MS && (wall - viewChangedAt >= MOVE_SETTLE_MS || wall - movedSince >= MOVE_MS);
+  }
+
   // Called every frame with the camera's point of view.
   function frame(now, pov) {
     if (!document.hidden) {
       const wall = Date.now();
+      const inputAt = lastInput ? lastInput() : now;
+      const away = unattended(now, inputAt);
       if (settings.flights && wall >= nextGlobal) loadGlobal();
-      if (settings.military && wall >= nextMilitary) loadMilitary();
-      if (settings.flights || settings.military) {
-        // A view that has moved on is asked for at once, except after a failure: the area then stays
-        // the one before it, so it would look moved on every frame and ask again and again.
-        const moved = lastArea && !areaFailed && greatCircleNm(lastArea, pov) > lastArea.nm / 2;
-        if (wall >= nextArea || moved) loadArea(pov);
-      }
+      if (settings.military && wall >= nextMilitary + (away ? MILITARY_UNATTENDED_MS - MILITARY_MS : 0)) loadMilitary();
+      if ((settings.flights || settings.military) && areaDue(pov, wall, now - inputAt, away)) loadArea(pov);
       if (watch.area && wall >= watch.next && !viewCoversWatch(wall)) loadWatch();
     }
     resize(pov.altitude);

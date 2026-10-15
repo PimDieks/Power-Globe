@@ -2,7 +2,8 @@
 // speed (a segment between each two neighbouring measurement sites, coloured by the slower end),
 // lines for the jams and closures, and markers for accidents and obstructions. A few meshes made
 // when shown and let go of on hide, so nothing is held while the tab is closed. What to draw comes
-// from mapShapes in opsaccess.js.
+// from mapShapes in opsaccess.js. Redrawing keeps one material per style, so three does not compile
+// the shaders again each time (a visible hitch), and the same shapes are not redrawn at all.
 //
 // Like the aircraft, these are drawn after the map layers and without depth testing (the map's
 // tiles are pulled towards the camera, which would hide anything just above them), and are hidden
@@ -51,6 +52,9 @@ const DOT_FRAGMENT = /* glsl */ `
   }
 `;
 
+// The shapes as a string, the same for the same shapes: comparing two is far cheaper than drawing.
+export const signature = ({ segments, lines, markers }) => JSON.stringify([segments, lines, markers]);
+
 // "#rrggbb" as 0 to 1 values, as they are to appear on the screen.
 const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
 
@@ -58,6 +62,13 @@ export function setupAccessOverlay(globe) {
   const R = globe.getGlobeRadius();
   const scene = globe.scene();
   let live = null;
+  // What `live` shows (see signature), and the materials by style, kept until hide.
+  let drawn = null;
+  let materials = new Map();
+  const material = (key, make) => {
+    if (!materials.has(key)) materials.set(key, make());
+    return materials.get(key);
+  };
 
   const toScene = (lat, lng) => {
     const cos = Math.cos(lat * RAD);
@@ -65,11 +76,13 @@ export function setupAccessOverlay(globe) {
   };
 
   // Line widths are in screen pixels, which the material needs the size of the screen for; a line
-  // behind the globe (judged by `middle`, one of its points) is given no width.
-  const widthAware = (mesh, material, width, middle) => {
+  // behind the globe (judged by `middle`, one of its points) is given no width. The lines of a style
+  // share their material, so its values are sent to the GPU again for each line.
+  const widthAware = (mesh, lineMaterial, width, middle) => {
     mesh.onBeforeRender = (renderer, _scene, camera) => {
-      renderer.getSize(material.resolution);
-      material.linewidth = behindGlobe(camera.position, ...middle, R) ? 0 : width;
+      renderer.getSize(lineMaterial.resolution);
+      lineMaterial.linewidth = behindGlobe(camera.position, ...middle, R) ? 0 : width;
+      lineMaterial.uniformsNeedUpdate = true;
     };
     mesh.frustumCulled = false;
     mesh.raycast = () => {};
@@ -86,15 +99,27 @@ export function setupAccessOverlay(globe) {
     });
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute('aColor', new THREE.BufferAttribute(colors, 3));
-    const material = new THREE.ShaderMaterial({
-      uniforms: { uSize: { value: MARKER_PX * (globe.renderer?.().getPixelRatio?.() ?? 1) }, uHideRadiusSq: hideUniform(globe) },
-      vertexShader: DOT_VERTEX,
-      fragmentShader: DOT_FRAGMENT,
-      transparent: true,
-      depthTest: false,
-      depthWrite: false,
-    });
-    const cloud = new THREE.Points(geometry, material);
+    const dots = material(
+      'markers',
+      () =>
+        new THREE.ShaderMaterial({
+          uniforms: { uSize: { value: MARKER_PX }, uHideRadiusSq: hideUniform(globe) },
+          vertexShader: DOT_VERTEX,
+          fragmentShader: DOT_FRAGMENT,
+          transparent: true,
+          depthTest: false,
+          depthWrite: false,
+        }),
+    );
+    const cloud = new THREE.Points(geometry, dots);
+    // The size is in the renderer's pixels, so it follows the pixel ratio, which can change while the
+    // same markers stay on the map.
+    cloud.onBeforeRender = (renderer) => {
+      const size = MARKER_PX * (renderer.getPixelRatio?.() ?? 1);
+      if (dots.uniforms.uSize.value === size) return;
+      dots.uniforms.uSize.value = size;
+      dots.uniformsNeedUpdate = true;
+    };
     cloud.renderOrder = 8;
     cloud.frustumCulled = false;
     cloud.raycast = () => {};
@@ -114,11 +139,11 @@ export function setupAccessOverlay(globe) {
     const geometry = new LineSegmentsGeometry();
     geometry.setPositions(positions);
     geometry.setColors(colors);
-    const material = new LineMaterial({ vertexColors: true, linewidth: ROAD_PX, transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, toneMapped: false });
-    const mesh = new LineSegments2(geometry, material);
+    const roadMaterial = material('roads', () => new LineMaterial({ vertexColors: true, linewidth: ROAD_PX, transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, toneMapped: false }));
+    const mesh = new LineSegments2(geometry, roadMaterial);
     mesh.renderOrder = 5;
     // The airport is within 25 km of all of them, so any one tells whether they are behind the globe.
-    return widthAware(mesh, material, ROAD_PX, positions.slice(0, 3));
+    return widthAware(mesh, roadMaterial, ROAD_PX, positions.slice(0, 3));
   }
 
   function line(shape) {
@@ -126,30 +151,43 @@ export function setupAccessOverlay(globe) {
     const flat = shape.points.flatMap(([lat, lng]) => toScene(lat, lng));
     const geometry = new LineGeometry();
     geometry.setPositions(flat);
-    const material = new LineMaterial({ color: style.color, linewidth: style.width, dashed: style.dashed, ...DASH, transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, toneMapped: false });
-    const mesh = new Line2(geometry, material);
+    const lineMaterial = material(shape.kind, () => new LineMaterial({ color: style.color, linewidth: style.width, dashed: style.dashed, ...DASH, transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, toneMapped: false }));
+    const mesh = new Line2(geometry, lineMaterial);
     if (style.dashed) mesh.computeLineDistances();
     mesh.renderOrder = 6;
     const at = 3 * Math.floor(shape.points.length / 2);
-    return widthAware(mesh, material, style.width, flat.slice(at, at + 3));
+    return widthAware(mesh, lineMaterial, style.width, flat.slice(at, at + 3));
   }
 
-  function teardown() {
+  // The meshes off the map and their geometry freed; the materials stay for the next shapes.
+  function clear() {
     if (!live) return;
     for (const object of live) {
       scene.remove(object);
       object.geometry.dispose();
-      object.material.dispose();
     }
     live = null;
+    drawn = null;
+  }
+
+  // Everything let go of, the materials too.
+  function teardown() {
+    clear();
+    for (const m of materials.values()) m.dispose();
+    materials = new Map();
   }
 
   return {
-    // `shapes` is { segments, lines, markers } (see mapShapes in opsaccess.js). Drawn from scratch
-    // each time: a thousand segments, once a minute.
-    show({ segments, lines, markers }) {
-      teardown();
+    // `shapes` is { segments, lines, markers } (see mapShapes in opsaccess.js): a thousand segments,
+    // once a minute, and the same again whenever the trains or buses come in. Shapes like those on
+    // the map already are left as they are; others are drawn anew, in the materials there are.
+    show(shapes) {
+      const key = signature(shapes);
+      if (live && key === drawn) return;
+      clear();
+      const { segments, lines, markers } = shapes;
       live = [...(segments.length ? [roads(segments)] : []), ...lines.map(line), ...(markers.length ? [markersCloud(markers)] : [])];
+      drawn = key;
       for (const object of live) scene.add(object);
     },
     hide: teardown,

@@ -265,6 +265,17 @@ describe('createPilotMap', () => {
     expect(container.children).toHaveLength(0);
   });
 
+  it('draws at the capped pixel ratio of the globe, not the full one of a Retina screen', async () => {
+    vi.stubGlobal('devicePixelRatio', 2);
+    const map = await createPilotMap({ container, terrain: true });
+    expect(maps[0].options.pixelRatio).toBe(1.5);
+    map.destroy();
+    vi.stubGlobal('devicePixelRatio', 1);
+    const second = await createPilotMap({ container, terrain: true });
+    expect(maps[1].options.pixelRatio).toBe(1);
+    second.destroy();
+  });
+
   it('turns the terrain on at the start when asked to', async () => {
     await createPilotMap({ container, terrain: true });
     await createPilotMap({ container, terrain: false });
