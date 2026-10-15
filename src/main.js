@@ -298,6 +298,8 @@ const traffic = setupTraffic({
   },
   onFlightEnds: (ends) => mapFeatures.setFlightEnds(ends),
   announce: (message) => announce(message),
+  // Moves of the view without input (auto-rotate) wait for the next poll, and an unattended page polls less.
+  lastInput: () => budget.lastInput,
 });
 
 // The outside view from the selected aircraft. The globe stops drawing while it is open; the
