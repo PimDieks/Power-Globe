@@ -6,6 +6,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 // MapLibre starts its worker from the file next to its own, which a bundle does not keep there.
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import { withTimeout } from './api.js';
+import { pixelRatio } from './pacing.js';
 import { cameraTarget, hazeBand, imageryTier } from './pilotview.js';
 
 maplibregl.setWorkerUrl(workerUrl);
@@ -133,6 +134,9 @@ export async function createPilotMap({ container, terrain, onLoaded, onTrouble }
       pitch: 80,
       zoom: 10,
       centerClampedToGround: false,
+      // The globe's cap on the pixel ratio (see pacing.js): at a Retina screen's full ratio, the
+      // view with terrain is nearly 6 million pixels a frame.
+      pixelRatio: pixelRatio(),
       canvasContextAttributes: { antialias: true },
       fadeDuration: 0,
       style: {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { setupTraffic, snapArea } from '../src/traffic.js';
+import { AREA_UNATTENDED_MS, MILITARY_UNATTENDED_MS, MOVE_MS, MOVE_SETTLE_MS, setupTraffic, snapArea } from '../src/traffic.js';
+import { UNATTENDED_MS } from '../src/pacing.js';
 import { clearFlightCaches } from '../src/flightroute.js';
 import { AIRCRAFT_CLASSES } from '../src/aircraftclass.js';
 
@@ -72,11 +73,11 @@ describe('traffic on the globe', () => {
     }
   }
 
-  // Sets up the traffic module with the layers saved in `stored`.
-  function start() {
+  // Sets up the traffic module with the layers saved in `stored`, and `options` (lastInput).
+  function start(options = {}) {
     els = elsFor();
     deselected = 0;
-    traffic = setupTraffic({ globe: { getGlobeRadius: () => 100 }, els, onSelect() {}, onDeselect: () => deselected++ });
+    traffic = setupTraffic({ globe: { getGlobeRadius: () => 100 }, els, onSelect() {}, onDeselect: () => deselected++, ...options });
   }
   // Switches a layer toggle, as a visitor does.
   function toggle(name, checked) {
@@ -261,11 +262,13 @@ describe('traffic on the globe', () => {
   });
 
   describe('flights around the view', () => {
-    it('asks again at once when the view has moved on, after an answer', async () => {
+    it('asks again soon when the view has moved on, after an answer, but not within MOVE_MS of the last', async () => {
       await run(300);
       expect(areaRequests).toBe(1);
       // About 100 nautical miles away, far more than half of the radius of a view this high.
-      await run(500, { ...view, lat: 53.7 });
+      await run(1000, { ...view, lat: 53.7 });
+      expect(areaRequests).toBe(1);
+      await run(MOVE_MS - 1000, { ...view, lat: 53.7 });
       expect(areaRequests).toBe(2);
     });
 
@@ -284,7 +287,7 @@ describe('traffic on the globe', () => {
       expect(areaRequests).toBe(3);
     });
 
-    it('asks at once again after the feed has come back', async () => {
+    it('asks again for a view moved on after the feed has come back', async () => {
       await run(300);
       respond = () => new Error('Power Globe API: answered 502');
       await run(15_000);
@@ -292,8 +295,123 @@ describe('traffic on the globe', () => {
       respond = () => feed([klm()]);
       await run(60_000);
       expect(areaRequests).toBe(3);
-      await run(500, { ...view, lat: 56 });
+      // Not within MOVE_MS of the answer that said it is back.
+      await run(MOVE_MS - 1000, { ...view, lat: 56 });
+      expect(areaRequests).toBe(3);
+      await run(1500, { ...view, lat: 56 });
       expect(areaRequests).toBe(4);
+    });
+  });
+
+  describe('how often the area around the view is asked for, by who moves it', () => {
+    // A clock like performance.now(), far from Date.now(), as frames are given in the page: a mix-up
+    // of the two would put the last input decades away.
+    const clock = () => Date.now() - 1e12;
+    // When the page last had input, in that clock.
+    let inputAt;
+    const militaryRequests = () => fetch.mock.calls.filter(([url]) => /flights\/military/.test(url)).length;
+    // Runs frames for `ms`, `step` ms apart, with the camera at `pov(t)` (t: ms into the run), and
+    // input on every frame while `touching`.
+    async function runAt(ms, pov = () => view, { touching = false, step = 100 } = {}) {
+      for (let t = 0; t < ms; t += step) {
+        if (touching) inputAt = clock();
+        traffic.frame(clock(), pov(t));
+        await vi.advanceTimersByTimeAsync(step);
+      }
+    }
+    // The whole globe in view, turning by itself at about 1.3 degrees a second.
+    const turning = (from) => (t) => ({ lat: 20, lng: from + (t / 1000) * 1.3, altitude: 2.5 });
+
+    beforeEach(() => {
+      inputAt = clock();
+      start({ lastInput: () => inputAt });
+    });
+
+    it('asks only every AREA_MS while the globe turns by itself, however far it turns', async () => {
+      // Nobody has touched the page for a minute: the turning is not theirs.
+      inputAt = clock() - 60_000;
+      await runAt(60_000, turning(0));
+      // At 0, 15, 30 and 45 s; the view moved on more than half the area's radius many times over.
+      expect(areaRequests).toBe(4);
+    });
+
+    it('asks every MOVE_MS at most while someone keeps moving the view', async () => {
+      await runAt(300);
+      expect(areaRequests).toBe(1);
+      // A long drag across the globe, with input all the while.
+      await runAt(20_000, (t) => ({ ...view, lng: 4 + t / 500 }), { touching: true });
+      // At 5, 10, 15 and 20 s at most: never sooner than MOVE_MS after the last.
+      expect(areaRequests).toBeGreaterThanOrEqual(4);
+      expect(areaRequests).toBeLessThanOrEqual(5);
+    });
+
+    it('asks once the view someone moved stands still, not on every step of the way', async () => {
+      await runAt(300);
+      await runAt(6000);
+      expect(areaRequests).toBe(1);
+      // A pan a hundred miles north in a second, then nothing.
+      await runAt(1000, (t) => ({ ...view, lat: 52 + (1.7 * t) / 1000 }), { touching: true });
+      expect(areaRequests).toBe(1);
+      await runAt(MOVE_SETTLE_MS + 200, () => ({ ...view, lat: 53.7 }));
+      expect(areaRequests).toBe(2);
+      // Nothing more until the area's own schedule.
+      await runAt(10_000, () => ({ ...view, lat: 53.7 }));
+      expect(areaRequests).toBe(2);
+    });
+
+    it('counts a slow drag as moving at any frame rate, and asks only once it stops', async () => {
+      // Close in: the area's radius is about 35 NM, so half of it is about 0.3 degrees.
+      const low = { ...view, altitude: 0.01 };
+      await runAt(300, () => low);
+      // Dragged north at 0.05 degrees a second (3 NM/s, a few times the stillness limit of a view
+      // this low), drawn 120 times a second, so each frame moves it very little. It has moved on from
+      // the area after about 6 s, past MOVE_MS since the first request, and is still being dragged.
+      await runAt(8000, (t) => ({ ...low, lat: 52 + t / 20_000 }), { touching: true, step: 8 });
+      expect(areaRequests).toBe(1);
+      // Let go: asked once it has stood still.
+      await runAt(MOVE_SETTLE_MS + 200, () => ({ ...low, lat: 52.4 }), { step: 8 });
+      expect(areaRequests).toBe(2);
+    });
+
+    it('asks soon when someone zooms out on the same spot, so the wider view is filled in', async () => {
+      await runAt(300);
+      await runAt(6000);
+      expect(areaRequests).toBe(1);
+      // From a radius of about 145 NM to 250 NM, without moving the middle.
+      await runAt(500, (t) => ({ ...view, altitude: 0.05 + t / 10_000 }), { touching: true });
+      await runAt(MOVE_SETTLE_MS + 200, () => ({ ...view, altitude: 0.1 }));
+      expect(areaRequests).toBe(2);
+      // Zooming back in needs nothing new: the area asked for covers it.
+      await runAt(500, (t) => ({ ...view, altitude: 0.1 - t / 10_000 }), { touching: true });
+      await runAt(MOVE_SETTLE_MS + 200, () => ({ ...view, altitude: 0.05 }));
+      expect(areaRequests).toBe(2);
+    });
+
+    it('asks for the area every minute and the military flights every two once nobody has touched the page for long, and at once again when someone does', async () => {
+      stored = { flights: true, military: true };
+      inputAt = clock() - UNATTENDED_MS - 1000;
+      start({ lastInput: () => inputAt });
+      const span = 5 * 60_000;
+      await runAt(span, turning(0));
+      // One of each at the start, then one every AREA_UNATTENDED_MS and MILITARY_UNATTENDED_MS.
+      expect(areaRequests).toBe(Math.ceil(span / AREA_UNATTENDED_MS));
+      expect(militaryRequests()).toBe(Math.ceil(span / MILITARY_UNATTENDED_MS));
+      expect(areaRequests).toBeLessThan(span / 15_000 / 2);
+      // Someone comes back: the area is asked for at once, and then every AREA_MS again.
+      const before = areaRequests;
+      inputAt = clock();
+      await runAt(300, turning(0));
+      expect(areaRequests).toBe(before + 1);
+      await runAt(30_000, turning(0));
+      expect(areaRequests).toBe(before + 3);
+    });
+
+    it('asks every AREA_MS and the military flights every minute while someone is about', async () => {
+      stored = { flights: true, military: true };
+      start({ lastInput: () => inputAt });
+      await runAt(2 * 60_000, () => view, { touching: true });
+      expect(areaRequests).toBe(8);
+      expect(militaryRequests()).toBe(2);
     });
   });
 
