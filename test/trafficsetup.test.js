@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTraffic, snapArea } from '../src/traffic.js';
 import { clearFlightCaches } from '../src/flightroute.js';
+import { AIRCRAFT_CLASSES } from '../src/aircraftclass.js';
 
 // The lines drawn for the selected aircraft, solid first, then dashed.
 const drawn = vi.hoisted(() => ({ lines: [], clouds: [] }));
@@ -8,7 +9,7 @@ const drawn = vi.hoisted(() => ({ lines: [], clouds: [] }));
 // The layers draw with three.js on a globe; these keep the numbers and nothing else.
 vi.mock('../src/trafficlayer.js', async (importOriginal) => {
   const cloud = () => {
-    const attrs = { position: new Float32Array(30_000), aColor: new Float32Array(30_000), aScale: new Float32Array(10_000), aHeading: new Float32Array(10_000), aBody: new Float32Array(10_000), aNext: new Float32Array(30_000) };
+    const attrs = { position: new Float32Array(30_000), aColor: new Float32Array(30_000), aScale: new Float32Array(10_000), aHeading: new Float32Array(10_000), aClass: new Float32Array(10_000), aNext: new Float32Array(30_000) };
     const made = {
       capacity: 10_000,
       count: 0,
@@ -428,20 +429,27 @@ describe('traffic on the globe', () => {
       for (let i = 1; i < direct.length; i++) expect(direct[i] - direct[i - 1]).toBeGreaterThanOrEqual(60_000);
     });
 
-    it('draws wide-bodies with the broad glyph and 1.4 times as big, narrow-bodies and unknown types as before, all smaller on the ground', async () => {
+    it('draws each class of aircraft with its own icon and size, unknown types as a narrow-body, all smaller on the ground', async () => {
       respond = () =>
         feed([
           klm({ t: 'B77W' }),
           klm({ hex: 'aa0002', t: 'A21N', category: 'A3' }),
           klm({ hex: 'aa0003' }),
           klm({ hex: 'aa0004', t: 'A359', alt_baro: 'ground' }),
+          klm({ hex: 'aa0005', t: 'B744' }),
+          klm({ hex: 'aa0006', t: 'C172' }),
+          klm({ hex: 'aa0007', category: 'A7' }),
+          klm({ hex: 'aa0008', t: 'CRJ9' }),
         ]);
       await run(300);
       const planes = drawn.clouds[0];
+      const hexes = ['484506', 'aa0002', 'aa0003', 'aa0004', 'aa0005', 'aa0006', 'aa0007', 'aa0008'];
       const at = (hex) => traffic.aircraft().findIndex((a) => a.id === hex);
-      const scale = (hex) => Math.round(planes.attrs.aScale[at(hex)] * 100) / 100;
-      expect([scale('484506'), scale('aa0002'), scale('aa0003'), scale('aa0004')]).toEqual([1.4, 1, 1, 0.98]);
-      expect(['484506', 'aa0002', 'aa0003', 'aa0004'].map((hex) => planes.attrs.aBody[at(hex)])).toEqual([1, 0, 0, 1]);
+      expect(hexes.map((hex) => Math.round(planes.attrs.aScale[at(hex)] * 100) / 100)).toEqual([1.35, 1, 1, 0.94, 1.5, 0.7, 0.8, 0.9]);
+      const layer = (cls) => AIRCRAFT_CLASSES.indexOf(cls);
+      expect(hexes.map((hex) => planes.attrs.aClass[at(hex)])).toEqual(
+        ['wide', 'narrow', 'narrow', 'wide', 'quad', 'single', 'heli', 'regional'].map(layer),
+      );
     });
 
     it('tints the inbound aircraft and the holding ones, rings only the holding ones, and takes it all off', async () => {

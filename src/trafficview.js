@@ -1,6 +1,6 @@
 // What the details panel shows for a selected aircraft or satellite, as HTML.
 import { escapeHtml } from './airportview.js';
-import { BODY_LABELS, bodyType } from './bodytype.js';
+import { bodyLabel } from './aircraftclass.js';
 import { ORBIT_LABELS } from './orbits.js';
 
 const EMERGENCY_SQUAWKS = { 7500: 'Hijack', 7600: 'Radio failure', 7700: 'Emergency' };
@@ -42,7 +42,7 @@ export function aircraftDetailsHtml(ac, { position, now, locale, flight }) {
   row('Squawk', ac.squawk ? `${ac.squawk}${EMERGENCY_SQUAWKS[ac.squawk] ? ` (${EMERGENCY_SQUAWKS[ac.squawk]})` : ''}` : null);
   row('Registration', ac.registration);
   row('Aircraft type', ac.description || ac.type);
-  row('Body', BODY_LABELS[bodyType(ac)]);
+  row('Body', bodyLabel(ac));
   row('Kind', ac.category);
   row('Operator', ac.operator);
   row('Country', ac.country);
