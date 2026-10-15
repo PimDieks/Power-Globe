@@ -666,7 +666,7 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
       scenePoint(p.lat, p.lng, drawnAltitude(ac), attrs.position, i);
     }
     cursor = from + n;
-    // Only what changed goes to the graphics card: the colours, headings and sizes with new data,
+    // Only what changed goes to the graphics card: the colours, headings, sizes and icons with new data,
     // the positions of the aircraft moved (the slice may wrap round to the start).
     if (rebuilt) planes.commit(shown.length);
     else planes.commit(shown.length, { changed: ['position'], ranges: aircraftRanges(from, n, shown.length) });
