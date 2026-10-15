@@ -296,9 +296,9 @@ describe('live traffic', () => {
 });
 
 describe('Earth views', () => {
-  it('offers five maps of the Earth, each with tiles and a credit', async () => {
+  it('offers six maps of the Earth, each with tiles and a credit', async () => {
     const { BASEMAPS } = await import('../src/map.js');
-    expect(Object.keys(BASEMAPS)).toEqual(['satellite', 'streets', 'topo', 'clouds', 'aviation']);
+    expect(Object.keys(BASEMAPS)).toEqual(['satellite', 'streets', 'topo', 'clouds', 'aviation', 'dark']);
     for (const map of Object.values(BASEMAPS)) {
       expect(map.url(1, 2, 3)).toMatch(/^https:\/\/.+\/3\/2\/1(\.png|\.jpg)?$/);
       expect(map.credit).toBeTruthy();
@@ -312,6 +312,22 @@ describe('Earth views', () => {
     expect(BASEMAPS.clouds.url(4, 2, 3)).toContain(`/VIIRS_NOAA20_CorrectedReflectance_TrueColor/default/${cloudsDay()}/`);
     expect(BASEMAPS.clouds.url(4, 2, 12)).toBe(BASEMAPS.satellite.url(4, 2, 12));
     expect(BASEMAPS.clouds.credit).toContain(cloudsDay());
+  });
+
+  it('draws the Dark map from the satellite imagery, recoloured in its night palette', async () => {
+    const { BASEMAPS, PALETTES } = await import('../src/map.js');
+    expect(BASEMAPS.dark.label).toBe('Dark');
+    expect(BASEMAPS.dark.url(4, 2, 12)).toBe(BASEMAPS.satellite.url(4, 2, 12));
+    expect(BASEMAPS.dark.credit).toBe(BASEMAPS.satellite.credit);
+    expect(BASEMAPS.dark.palette).toBe('night');
+    const { stops } = PALETTES.night;
+    expect(stops).toHaveLength(3);
+    // Darkest first, and dark throughout.
+    const lightness = stops.map((hex) => [1, 3, 5].reduce((sum, i) => sum + parseInt(hex.slice(i, i + 2), 16), 0));
+    expect(lightness).toEqual([...lightness].sort((a, b) => a - b));
+    expect(Math.max(...lightness)).toBeLessThan(3 * 128);
+    // The other maps keep their own colours.
+    for (const [key, map] of Object.entries(BASEMAPS)) if (key !== 'dark') expect(map.palette).toBeUndefined();
   });
 
   it('draws the aviation chart through the Power Globe API, so its key stays there', async () => {

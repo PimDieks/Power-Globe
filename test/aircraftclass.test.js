@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AIRCRAFT_CLASSES, CLASS_SCALES, aircraftClass, bodyLabel, iconLayer, iconScale } from '../src/aircraftclass.js';
+import { AIRCRAFT_CLASSES, CLASS_SCALES, aircraftClass, bodyLabel, groundFarness, groundScale, iconLayer, iconScale } from '../src/aircraftclass.js';
 import { ICONS, drawAircraftIcon } from '../src/aircrafticons.js';
 import { aircraftDetailsHtml } from '../src/trafficview.js';
 
@@ -114,5 +114,22 @@ describe('the details panel', () => {
     expect(ask({ type: 'A21N', category: 'Large aircraft' })).toContain('<dt>Body</dt><dd>Narrow-body</dd>');
     expect(ask({ type: 'GLF5' })).not.toContain('<dt>Body</dt>');
     expect(ask({ callsign: 'ABC1' })).not.toContain('<dt>Body</dt>');
+  });
+});
+
+describe('the ground shrink', () => {
+  it('is none close to the surface, full far out, and eases in between without a jump', () => {
+    expect(groundScale(0.004)).toBe(1);
+    expect(groundScale(0.012)).toBe(1);
+    expect(groundScale(0.04)).toBeCloseTo(0.7, 6);
+    expect(groundScale(2)).toBeCloseTo(0.7, 6);
+    let last = 1;
+    for (let a = 0.012; a <= 0.04; a += 0.001) {
+      const k = groundScale(a);
+      expect(k).toBeLessThanOrEqual(last + 1e-9);
+      expect(last - k).toBeLessThan(0.05);
+      last = k;
+    }
+    expect(groundFarness(0.026)).toBeCloseTo(0.5, 6);
   });
 });

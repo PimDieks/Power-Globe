@@ -133,6 +133,24 @@ const iconClass = (ac) => aircraftClass(ac) ?? BY_CATEGORY[ac?.category] ?? null
 export const iconLayer = (ac) => Math.max(0, AIRCRAFT_CLASSES.indexOf(iconClass(ac)));
 export const iconScale = (ac) => CLASS_SCALES[iconClass(ac)] ?? 1;
 
+// Aircraft on the ground are drawn smaller than in the air, but only while the camera is far out,
+// where a full-size sprite on every apron would crowd the globe. Camera heights are in globe
+// radii (the pointOfView altitude): at or below GROUND_FULL_ALTITUDE (about 76 km) they are drawn at
+// their full class scale, at or above GROUND_FAR_ALTITUDE (about 255 km) at GROUND_FAR_SCALE of it,
+// and in between the size eases from one to the other.
+export const GROUND_FAR_SCALE = 0.7;
+export const GROUND_FULL_ALTITUDE = 0.012;
+export const GROUND_FAR_ALTITUDE = 0.04;
+
+// How far the camera is from airport level for ground aircraft: 0 close in, 1 far out.
+export function groundFarness(altitude) {
+  const t = Math.min(1, Math.max(0, (altitude - GROUND_FULL_ALTITUDE) / (GROUND_FAR_ALTITUDE - GROUND_FULL_ALTITUDE)));
+  return t * t * (3 - 2 * t);
+}
+
+// The factor a ground aircraft's sprite is drawn at, at a camera height.
+export const groundScale = (altitude) => 1 - (1 - GROUND_FAR_SCALE) * groundFarness(altitude);
+
 // 'Wide-body' or 'Narrow-body' for airliners, undefined for everything else.
 const BODY_LABELS = { wide: 'Wide-body', quad: 'Wide-body', narrow: 'Narrow-body' };
 export const bodyLabel = (ac) => BODY_LABELS[aircraftClass(ac)];

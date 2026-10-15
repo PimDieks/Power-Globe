@@ -370,3 +370,52 @@ describe('the moving clouds of the Clouds view', () => {
     });
   });
 });
+
+describe('map tiles in a style of their own', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1, addEventListener() {} });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const setup = (initial) => {
+    const camera = new THREE.PerspectiveCamera(50, 1.4, 0.05, 125000);
+    camera.position.set(0, 0, 300);
+    // The engine's own updatePov, before settleLevels wraps it.
+    const updatePov = vi.fn();
+    const engine = { thresholds: [8, 4, 2], tileUrl: null, level: 2, children: [], add: vi.fn(), updatePov };
+    const globe = {
+      globeTileEngineUrl: () => globe,
+      globeTileEngineMaxLevel: () => globe,
+      globeTileEngineClearCache: vi.fn(),
+      getGlobeRadius: () => 100,
+      scene: () => ({ add() {}, traverse: (visit) => visit(engine) }),
+      lights: () => [],
+      camera: () => camera,
+    };
+    const basemap = setupBasemap(globe, 'backdrop.jpg', { initial });
+    basemap.setAltitude(2.5);
+    const tile = new THREE.Mesh(new THREE.SphereGeometry(100), new THREE.MeshLambertMaterial({ map: new THREE.Texture() }));
+    engine.add(tile);
+    return { globe, updatePov, camera, tile };
+  };
+
+  it('recolours the Dark map, loading the tiles in view again once it can', () => {
+    const { globe, updatePov, camera, tile } = setup('dark');
+    // Tiles loaded before the engine was found go, and the view loads again at once.
+    expect(globe.globeTileEngineClearCache).toHaveBeenCalledTimes(1);
+    expect(updatePov).toHaveBeenCalledWith(camera);
+    expect(tile.material.customProgramCacheKey()).toBe('palette-night');
+    expect(tile.material.dithering).toBe(true);
+    const shader = { fragmentShader: 'void main() {\n#include <map_fragment>\n}' };
+    tile.material.onBeforeCompile(shader);
+    expect(shader.fragmentShader).toContain('diffuseColor.rgb = pow(col, vec3(2.2));');
+  });
+
+  it('leaves the satellite tiles as they come', () => {
+    const { globe, updatePov, tile } = setup('satellite');
+    expect(globe.globeTileEngineClearCache).not.toHaveBeenCalled();
+    expect(updatePov).not.toHaveBeenCalled();
+    expect(tile.material.customProgramCacheKey()).not.toContain('palette');
+    expect(tile.material.dithering).toBe(false);
+  });
+});
