@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AIRCRAFT_CLASSES, CLASS_SCALES, aircraftClass, bodyLabel, iconLayer, iconScale } from '../src/aircraftclass.js';
+import { ICONS, drawAircraftIcon } from '../src/aircrafticons.js';
 import { aircraftDetailsHtml } from '../src/trafficview.js';
 
 describe('aircraftClass', () => {
@@ -45,8 +46,8 @@ describe('aircraftClass', () => {
     expect(aircraftClass(null)).toBeNull();
     expect(aircraftClass({ type: '', category: 'Large aircraft' })).toBeNull();
     expect(aircraftClass({ military: true })).toBeNull();
-    // An unlisted type is unknown whatever its category says.
-    expect(aircraftClass({ type: 'B52', category: 'Heavy aircraft' })).toBeNull();
+    // An unlisted type has no class of its own whatever its category says (the icon still uses the category).
+    expect(aircraftClass({ type: 'EN28', category: 'Helicopter' })).toBeNull();
     expect(aircraftClass({ type: 'ZZZZ', category: 'Light aircraft', military: true })).toBeNull();
   });
 
@@ -59,6 +60,41 @@ describe('aircraftClass', () => {
     expect(iconScale({ type: 'R44' })).toBe(0.8);
     expect(iconScale({ type: 'A388' })).toBe(1.5);
     expect(iconScale({ type: 'B789' })).toBe(1.35);
+  });
+
+  it('draws an unlisted type by its category, and leaves the Body label to listed airliners', () => {
+    const heli = AIRCRAFT_CLASSES.indexOf('heli');
+    const single = AIRCRAFT_CLASSES.indexOf('single');
+    expect(iconLayer({ type: 'EN28', category: 'Helicopter' })).toBe(heli);
+    expect(iconScale({ type: 'EN28', category: 'Helicopter' })).toBe(0.8);
+    expect(bodyLabel({ type: 'EN28', category: 'Helicopter' })).toBeUndefined();
+    expect(iconLayer({ type: 'ZZZZ', category: 'Light aircraft' })).toBe(single);
+    expect(iconScale({ type: 'ZZZZ', category: 'Light aircraft' })).toBe(0.7);
+    expect(bodyLabel({ type: 'ZZZZ', category: 'Heavy aircraft' })).toBeUndefined();
+    // No category that says anything: still a full-size narrow-body.
+    expect(iconLayer({ type: 'ZZZZ', category: 'Large aircraft' })).toBe(0);
+    expect(iconScale({ type: 'ZZZZ', category: 'Large aircraft' })).toBe(1);
+  });
+
+  it('lists each type in one class only, including the later additions', () => {
+    const added = { heli: ['H145', 'B06T'], airlifter: ['C27J', 'V22', 'B52'], regional: ['B722', 'DC9'], twin: ['E2'] };
+    for (const [cls, types] of Object.entries(added)) for (const type of types) expect(aircraftClass({ type }), type).toBe(cls);
+  });
+
+  it('has an icon for every class, and each icon draws', () => {
+    const calls = [];
+    const ctx = new Proxy({}, { get: (t, k) => t[k] ?? ((...a) => calls.push([k, ...a])), set: (t, k, v) => ((t[k] = v), true) });
+    vi.stubGlobal('document', { createElement: () => ({ width: 0, height: 0, getContext: () => ctx }) });
+    try {
+      for (const cls of AIRCRAFT_CLASSES) {
+        expect(ICONS[cls], cls).toBeDefined();
+        expect(() => drawAircraftIcon(cls), cls).not.toThrow();
+      }
+      expect(calls.length).toBeGreaterThan(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(Object.keys(ICONS).sort()).toEqual([...AIRCRAFT_CLASSES].sort());
   });
 
   it('calls only airliners wide-body or narrow-body', () => {

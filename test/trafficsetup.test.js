@@ -445,7 +445,8 @@ describe('traffic on the globe', () => {
       const planes = drawn.clouds[0];
       const hexes = ['484506', 'aa0002', 'aa0003', 'aa0004', 'aa0005', 'aa0006', 'aa0007', 'aa0008'];
       const at = (hex) => traffic.aircraft().findIndex((a) => a.id === hex);
-      expect(hexes.map((hex) => Math.round(planes.attrs.aScale[at(hex)] * 100) / 100)).toEqual([1.35, 1, 1, 0.94, 1.5, 0.7, 0.8, 0.9]);
+      const scales = hexes.map((hex) => planes.attrs.aScale[at(hex)]);
+      [1.35, 1, 1, 0.945, 1.5, 0.7, 0.8, 0.9].forEach((want, i) => expect(scales[i]).toBeCloseTo(want, 3));
       const layer = (cls) => AIRCRAFT_CLASSES.indexOf(cls);
       expect(hexes.map((hex) => planes.attrs.aClass[at(hex)])).toEqual(
         ['wide', 'narrow', 'narrow', 'wide', 'quad', 'single', 'heli', 'regional'].map(layer),

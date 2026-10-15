@@ -29,7 +29,7 @@ const NARROW = set(`
 // built the same way.
 const REGIONAL = set(`
   CRJ1 CRJ2 CRJ7 CRJ9 CRJX E135 E145 E35L E45X AJ27
-  F28 F70 F100 DC91 DC93 DC94 DC95 MD81 MD82 MD83 MD87 MD88 MD90 B712 B717 YK40 YK42 T154
+  F28 F70 F100 B722 DC9 DC91 DC93 DC94 DC95 MD81 MD82 MD83 MD87 MD88 MD90 B712 B717 YK40 YK42 T154
 `);
 
 // Business jets.
@@ -58,13 +58,13 @@ const SINGLE = set(`
 // Light twins.
 const TWIN = set(`
   BE55 BE58 BE60 BE76 BE95 BE9L BE9T BE20 BE30 B350 PA23 PA27 PA30 PA31 PA34 PA44 P68 DA42 DA62
-  C310 C303 C340 C402 C404 C414 C421 C425 C441 BN2P DHC6 AC90 AC95 P180 MU2 SW4
+  C310 C303 C340 C402 C404 C414 C421 C425 C441 BN2P DHC6 AC90 AC95 P180 MU2 SW4 E2
 `);
 
 // Helicopters.
 const HELI = set(`
   R22 R44 R66 EC20 EC30 EC35 EC45 EC55 EC75 EC25 AS50 AS55 AS65 AS32 AS3B
-  A109 A119 A139 A169 A189 B06 B407 B412 B429 B505 B212 H500 H60 S76 S92 S61 NH90 EH10
+  A109 A119 A139 A169 A189 B06 B06T H145 B407 B412 B429 B505 B212 H500 H60 S76 S92 S61 NH90 EH10
   H47 H64 MI8 MI24 BK17 B47G EXPL UH1 LYNX TIGR PUMA
 `);
 
@@ -76,7 +76,7 @@ const FIGHTER = set(`
 
 // Military transports: high wing, four engines.
 const AIRLIFTER = set(`
-  C130 C30J A400 C17 C5 C5M C160 AN12 IL76 C141 KC39
+  C130 C30J C27J A400 C17 C5 C5M C160 AN12 IL76 C141 KC39 V22 B52
 `);
 
 const BY_TYPE = [
@@ -126,9 +126,12 @@ export function aircraftClass(ac) {
   return BY_CATEGORY[ac?.category] ?? null;
 }
 
+// The class `ac` is drawn as: its own, or for an unlisted type what its category says.
+const iconClass = (ac) => aircraftClass(ac) ?? BY_CATEGORY[ac?.category] ?? null;
+
 // Which icon layer and size `ac` is drawn with.
-export const iconLayer = (ac) => Math.max(0, AIRCRAFT_CLASSES.indexOf(aircraftClass(ac)));
-export const iconScale = (ac) => CLASS_SCALES[aircraftClass(ac)] ?? 1;
+export const iconLayer = (ac) => Math.max(0, AIRCRAFT_CLASSES.indexOf(iconClass(ac)));
+export const iconScale = (ac) => CLASS_SCALES[iconClass(ac)] ?? 1;
 
 // 'Wide-body' or 'Narrow-body' for airliners, undefined for everything else.
 const BODY_LABELS = { wide: 'Wide-body', quad: 'Wide-body', narrow: 'Narrow-body' };
