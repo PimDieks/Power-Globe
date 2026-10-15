@@ -9,7 +9,7 @@ const drawn = vi.hoisted(() => ({ lines: [], clouds: [] }));
 // The layers draw with three.js on a globe; these keep the numbers and nothing else.
 vi.mock('../src/trafficlayer.js', async (importOriginal) => {
   const cloud = () => {
-    const attrs = { position: new Float32Array(30_000), aColor: new Float32Array(30_000), aScale: new Float32Array(10_000), aHeading: new Float32Array(10_000), aClass: new Float32Array(10_000), aNext: new Float32Array(30_000) };
+    const attrs = { position: new Float32Array(30_000), aColor: new Float32Array(30_000), aScale: new Float32Array(10_000), aHeading: new Float32Array(10_000), aClass: new Float32Array(10_000), aGround: new Float32Array(10_000), aNext: new Float32Array(30_000) };
     const made = {
       capacity: 10_000,
       count: 0,
@@ -20,6 +20,9 @@ vi.mock('../src/trafficlayer.js', async (importOriginal) => {
         this.count = n;
       },
       setViewport() {},
+      setGroundScale(k) {
+        this.groundScale = k;
+      },
       place() {},
     };
     made.attrs = attrs;
@@ -429,7 +432,29 @@ describe('traffic on the globe', () => {
       for (let i = 1; i < direct.length; i++) expect(direct[i] - direct[i - 1]).toBeGreaterThanOrEqual(60_000);
     });
 
-    it('draws each class of aircraft with its own icon and size, unknown types as a narrow-body, all smaller on the ground', async () => {
+    it('colours aircraft on the ground sand, and sends the ground shrink to the shader by camera height', async () => {
+      respond = () => feed([klm({ alt_baro: 'ground' }), klm({ hex: 'aa0002' }), klm({ hex: 'aa0003', alt_baro: 'ground', squawk: '7700' })]);
+      await run(300);
+      const planes = drawn.clouds[0];
+      const at = (hex) => traffic.aircraft().findIndex((a) => a.id === hex);
+      const colour = (hex) => [0, 1, 2].map((c) => planes.attrs.aColor[3 * at(hex) + c]);
+      expect(colour('484506')).toEqual([0.96, 0.85, 0.64].map(Math.fround));
+      expect(colour('aa0002')).toEqual([0.97, 0.95, 0.9].map(Math.fround));
+      // An emergency squawk still wins over the ground colour.
+      expect(colour('aa0003')).toEqual([1, 0.42, 0.38].map(Math.fround));
+      // Far out the ground shrink applies in full, at airport level not at all, in between it eases.
+      await run(100, { ...view, altitude: 1 });
+      expect(planes.groundScale).toBeCloseTo(0.7, 5);
+      await run(100, { ...view, altitude: 0.004 });
+      expect(planes.groundScale).toBe(1);
+      await run(100, { ...view, altitude: 0.026 });
+      expect(planes.groundScale).toBeGreaterThan(0.7);
+      expect(planes.groundScale).toBeLessThan(1);
+      // Moving the camera does not touch the per-aircraft attributes.
+      expect(planes.attrs.aScale[at('484506')]).toBeCloseTo(1, 3);
+    });
+
+    it('draws each class of aircraft with its own icon and size, unknown types as a narrow-body, those on the ground flagged for the shrink in the shader', async () => {
       respond = () =>
         feed([
           klm({ t: 'B77W' }),
@@ -446,7 +471,8 @@ describe('traffic on the globe', () => {
       const hexes = ['484506', 'aa0002', 'aa0003', 'aa0004', 'aa0005', 'aa0006', 'aa0007', 'aa0008'];
       const at = (hex) => traffic.aircraft().findIndex((a) => a.id === hex);
       const scales = hexes.map((hex) => planes.attrs.aScale[at(hex)]);
-      [1.35, 1, 1, 0.945, 1.5, 0.7, 0.8, 0.9].forEach((want, i) => expect(scales[i]).toBeCloseTo(want, 3));
+      [1.35, 1, 1, 1.35, 1.5, 0.7, 0.8, 0.9].forEach((want, i) => expect(scales[i]).toBeCloseTo(want, 3));
+      expect(hexes.map((hex) => planes.attrs.aGround[at(hex)])).toEqual([0, 0, 0, 1, 0, 0, 0, 0]);
       const layer = (cls) => AIRCRAFT_CLASSES.indexOf(cls);
       expect(hexes.map((hex) => planes.attrs.aClass[at(hex)])).toEqual(
         ['wide', 'narrow', 'narrow', 'wide', 'quad', 'single', 'heli', 'regional'].map(layer),

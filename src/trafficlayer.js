@@ -67,11 +67,14 @@ const AIRCRAFT_VERTEX = /* glsl */ `
   attribute float aHeading;
   attribute float aScale;
   attribute float aClass;
+  attribute float aGround;
   uniform float uSize;
   uniform vec2 uViewport;
+  uniform float uGroundScale;
   varying vec3 vColor;
   varying float vAngle;
   varying float vClass;
+  varying float vGround;
   void main() {
     vec4 clip = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     // The aircraft's track as a direction on screen: north and east at its position on the
@@ -86,8 +89,10 @@ const AIRCRAFT_VERTEX = /* glsl */ `
     vAngle = atan(d.y, d.x);
     vColor = aColor;
     vClass = aClass;
+    vGround = aGround;
     gl_Position = behindGlobe(position) ? vec4(2.0, 2.0, 2.0, 1.0) : clip;
-    gl_PointSize = uSize * aScale;
+    // Aircraft on the ground shrink only when the camera is far out (uGroundScale, see groundScale).
+    gl_PointSize = uSize * aScale * mix(1.0, uGroundScale, aGround);
   }
 `;
 
@@ -96,6 +101,7 @@ const AIRCRAFT_FRAGMENT = /* glsl */ `
   varying vec3 vColor;
   varying float vAngle;
   varying float vClass;
+  varying float vGround;
   void main() {
     // Turn the nose-up glyph to the track's direction on screen.
     vec2 s = vec2(gl_PointCoord.x - 0.5, 0.5 - gl_PointCoord.y);
@@ -106,7 +112,9 @@ const AIRCRAFT_FRAGMENT = /* glsl */ `
     // The icon for this aircraft's class (see iconTexture).
     vec4 g = texture(uIcons, vec3(uv, floor(vClass + 0.5)));
     if (g.a < 0.04) discard;
-    gl_FragColor = vec4(g.rgb * vColor, g.a);
+    // On the ground the dark edge and shadow are made firmer, so the sprite holds on a grey apron.
+    float alpha = vGround > 0.5 ? min(1.0, g.a * 1.5) : g.a;
+    gl_FragColor = vec4(g.rgb * vColor, alpha);
   }
 `;
 
@@ -218,6 +226,7 @@ export function aircraftLayer(globe) {
     uniforms: {
       uSize: { value: 10 },
       uViewport: { value: new THREE.Vector2(1, 1) },
+      uGroundScale: { value: 1 },
       uIcons: { value: iconTexture() },
       uHideRadiusSq: hideUniform(globe),
     },
@@ -227,8 +236,9 @@ export function aircraftLayer(globe) {
     depthTest: false,
     depthWrite: false,
   });
-  const cloud = new PointCloud(globe, material, { aColor: 3, aHeading: 1, aScale: 1, aClass: 1 }, 10);
+  const cloud = new PointCloud(globe, material, { aColor: 3, aHeading: 1, aScale: 1, aClass: 1, aGround: 1 }, 10);
   cloud.setViewport = (w, h) => material.uniforms.uViewport.value.set(w, h);
+  cloud.setGroundScale = (k) => (material.uniforms.uGroundScale.value = k);
   return cloud;
 }
 
