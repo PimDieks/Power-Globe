@@ -39,48 +39,93 @@ export const BEHIND_GLOBE = /* glsl */ `
 `;
 export const hideUniform = (globe) => ({ value: (globe.getGlobeRadius() * HIDE_RADIUS) ** 2 });
 
-// Plane silhouettes, nose up, white with a dark outline so they read over any map or weather.
-// Two 64 x 64 glyphs in one 132 x 64 atlas with a 4 px gap between them: a narrow-body on the
-// left, a wide-body on the right with a fuselage twice as thick, longer swept wings and a wider
-// tailplane.
-const NARROW_OUTLINE = [
-  [0, -28], [3.5, -22], [3.5, -8], [27, 5], [27, 10], [3.5, 4], [3.5, 16], [11, 22], [11, 26], [0, 23],
-  [-11, 26], [-11, 22], [-3.5, 16], [-3.5, 4], [-27, 10], [-27, 5], [-3.5, -8], [-3.5, -22],
-];
-// The right side from nose to tail; the outline goes round the tail and back up the mirrored left.
-const WIDE_SIDE = [[3.5, -27.5], [6, -23], [7, -15], [7, -11], [28.5, 4], [28.5, 11], [7, 6], [7, 14], [16, 21], [16, 26]];
-const WIDE_OUTLINE = [[0, -29], ...WIDE_SIDE, [0, 24], ...WIDE_SIDE.map(([x, y]) => [-x, y]).reverse()];
+// Plane silhouettes seen from above, nose up, white so the colour tint shows, with a thin dark
+// edge and a soft shadow so they read over any map or weather. Each part is its right half in
+// a 128 x 128 cell around the centre, drawn again mirrored; the halves overlap the centre line
+// so no seam shows. The narrow-body has A320 / 737 proportions (span about the length, 25 degree
+// sweep), the wide-body 777 / A350 ones: a wider fuselage, longer and more swept wings and
+// bigger engines.
+const NARROW_BODY = {
+  fuselage: [
+    ['M', -1, -51], ['L', 0, -51], ['C', 4, -51, 6.5, -46, 6.5, -37], ['L', 6.5, 20],
+    ['C', 6.5, 32, 3.2, 45, 1.4, 50], ['Q', 0.7, 51.5, -1, 51.5], ['Z'],
+  ],
+  wing: [
+    ['M', 4, -7], ['L', 6.5, -7], ['Q', 9, -6.6, 11, -5.5], ['L', 46, 12], ['Q', 49, 13.6, 48.5, 15.8],
+    ['L', 47.8, 17], ['L', 20, 10.5], ['L', 6.5, 10], ['L', 4, 10], ['Z'],
+  ],
+  nacelle: [['M', 13.7, -8], ['Q', 13.7, -12.5, 16.5, -12.5], ['Q', 19.3, -12.5, 19.3, -8], ['L', 19.1, 1], ['L', 13.9, 1], ['Z']],
+  stabiliser: [['M', 2, 33], ['L', 4.6, 33], ['L', 17.5, 42], ['Q', 19, 43, 18.7, 44.8], ['L', 18.3, 46], ['L', 2, 45], ['Z']],
+};
+const WIDE_BODY = {
+  fuselage: [
+    ['M', -1, -53], ['L', 0, -53], ['C', 5.5, -53, 8.5, -47, 8.5, -37], ['L', 8.5, 18],
+    ['C', 8.5, 32, 4.2, 46, 1.7, 51.5], ['Q', 0.8, 53, -1, 53], ['Z'],
+  ],
+  wing: [
+    ['M', 6, -13], ['L', 8.5, -13], ['Q', 11.5, -12.4, 13.5, -10.8], ['L', 48, 13], ['Q', 52, 16, 50.6, 19],
+    ['L', 49.8, 20], ['L', 24, 9.5], ['L', 8.5, 8.5], ['L', 6, 8.5], ['Z'],
+  ],
+  nacelle: [['M', 17, -11], ['Q', 17, -17.5, 21, -17.5], ['Q', 25, -17.5, 25, -11], ['L', 24.7, 0], ['L', 17.3, 0], ['Z']],
+  stabiliser: [['M', 3, 29], ['L', 5.5, 29], ['L', 21, 41], ['Q', 23, 42.5, 22.5, 44.6], ['L', 22, 46], ['L', 3, 45.5], ['Z']],
+};
+const GLYPH_CELL = 128;
+// The shapes are drawn a little larger than their coordinates; the wing tips, edge included,
+// stay inside the cell's inscribed circle so turning the glyph never clips them.
+const GLYPH_SCALE = 1.08;
+const GLYPH_EDGE = 4.5;
 
-function drawGlyph(ctx, cx, outline) {
-  ctx.save();
-  // Keep each glyph, outline included, inside its own 64 x 64 cell.
+function tracePath(ctx, commands, sx) {
   ctx.beginPath();
-  ctx.rect(cx - 32, 0, 64, 64);
-  ctx.clip();
-  ctx.translate(cx, 32);
-  ctx.beginPath();
-  outline.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-  ctx.closePath();
-  ctx.lineJoin = 'round';
-  ctx.lineWidth = 5;
-  ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
-  ctx.stroke();
-  ctx.fillStyle = '#fff';
-  ctx.fill();
-  ctx.restore();
+  for (const [op, ...v] of commands) {
+    const p = v.map((n, i) => (i % 2 ? n : n * sx));
+    if (op === 'M') ctx.moveTo(...p);
+    else if (op === 'L') ctx.lineTo(...p);
+    else if (op === 'Q') ctx.quadraticCurveTo(...p);
+    else if (op === 'C') ctx.bezierCurveTo(...p);
+    else ctx.closePath();
+  }
 }
 
-function planeTexture() {
+function silhouette(shape, style) {
   const canvas = document.createElement('canvas');
-  canvas.width = 132;
-  canvas.height = 64;
+  canvas.width = canvas.height = GLYPH_CELL;
   const ctx = canvas.getContext('2d');
-  drawGlyph(ctx, 32, NARROW_OUTLINE);
-  drawGlyph(ctx, 100, WIDE_OUTLINE);
+  ctx.translate(GLYPH_CELL / 2, GLYPH_CELL / 2);
+  ctx.scale(GLYPH_SCALE, GLYPH_SCALE);
+  ctx.fillStyle = style;
+  // Each part and its mirror filled on its own, so the overlaps make one clean outline.
+  for (const part of Object.values(shape)) {
+    for (const sx of [1, -1]) {
+      tracePath(ctx, part, sx);
+      ctx.fill();
+    }
+  }
+  return canvas;
+}
+
+function planeTexture(shape) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = GLYPH_CELL;
+  const ctx = canvas.getContext('2d');
+  const dark = silhouette(shape, 'rgb(8, 12, 22)');
+  // A soft shadow under everything, then the thin edge: the dark silhouette nudged round a
+  // small circle, then the white plane on top.
+  ctx.save();
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.75)';
+  ctx.shadowBlur = 8;
+  ctx.drawImage(dark, 0, 0);
+  ctx.restore();
+  for (let i = 0; i < 16; i++) {
+    const a = (i / 16) * Math.PI * 2;
+    ctx.drawImage(dark, Math.cos(a) * GLYPH_EDGE, Math.sin(a) * GLYPH_EDGE);
+  }
+  ctx.drawImage(silhouette(shape, '#fff'), 0, 0);
+  // A texture per glyph rather than an atlas, so mipmaps never blend one into the other.
   const texture = new THREE.CanvasTexture(canvas);
-  // No mipmaps, which would blend the two glyphs at small sizes.
-  texture.generateMipmaps = false;
-  texture.minFilter = THREE.LinearFilter;
+  texture.generateMipmaps = true;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
   // Row 0 of the canvas at v = 0, like gl_PointCoord.
   texture.flipY = false;
   texture.colorSpace = THREE.NoColorSpace;
@@ -118,7 +163,8 @@ const AIRCRAFT_VERTEX = /* glsl */ `
 `;
 
 const AIRCRAFT_FRAGMENT = /* glsl */ `
-  uniform sampler2D uGlyph;
+  uniform sampler2D uNarrowGlyph;
+  uniform sampler2D uWideGlyph;
   varying vec3 vColor;
   varying float vAngle;
   varying float vBody;
@@ -129,10 +175,9 @@ const AIRCRAFT_FRAGMENT = /* glsl */ `
     vec2 t = vec2(s.x * cos(a) - s.y * sin(a), s.x * sin(a) + s.y * cos(a));
     vec2 uv = vec2(t.x + 0.5, 0.5 - t.y);
     if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) discard;
-    // The atlas holds the narrow-body glyph on the left and the wide-body one on the right, a gap
-    // between them (see planeTexture). Sampling stays on the glyph's own texels.
-    float x = clamp(uv.x, 0.5 / 64.0, 1.0 - 0.5 / 64.0);
-    vec4 g = texture2D(uGlyph, vec2((x * 64.0 + vBody * 68.0) / 132.0, uv.y));
+    // Both glyphs sampled (outside any branch, so mipmap selection stays well defined) and the
+    // one for this body kept; vBody is 0 or 1 for the whole point.
+    vec4 g = mix(texture2D(uNarrowGlyph, uv), texture2D(uWideGlyph, uv), vBody);
     if (g.a < 0.04) discard;
     gl_FragColor = vec4(g.rgb * vColor, g.a);
   }
@@ -246,7 +291,8 @@ export function aircraftLayer(globe) {
     uniforms: {
       uSize: { value: 10 },
       uViewport: { value: new THREE.Vector2(1, 1) },
-      uGlyph: { value: planeTexture() },
+      uNarrowGlyph: { value: planeTexture(NARROW_BODY) },
+      uWideGlyph: { value: planeTexture(WIDE_BODY) },
       uHideRadiusSq: hideUniform(globe),
     },
     vertexShader: AIRCRAFT_VERTEX,
