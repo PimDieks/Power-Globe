@@ -1,6 +1,8 @@
 // Drawing live traffic on the globe: thousands of aircraft and satellites as GPU point sprites,
 // so they stay cheap to move every frame.
 import * as THREE from 'three';
+import { AIRCRAFT_CLASSES } from './aircraftclass.js';
+import { ICON_SIZE, drawAircraftIcon } from './aircrafticons.js';
 
 // Aircraft are drawn at their true height, so one on the ground is at the surface, below the
 // layers that sit just above it (the chart, weather, paths, runways). They and the selection
@@ -39,29 +41,23 @@ export const BEHIND_GLOBE = /* glsl */ `
 `;
 export const hideUniform = (globe) => ({ value: (globe.getGlobeRadius() * HIDE_RADIUS) ** 2 });
 
-// Plane silhouettes, nose up, white with a dark outline so they read over any map or weather.
-function planeTexture() {
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = 64;
-  const ctx = canvas.getContext('2d');
-  ctx.translate(32, 32);
-  const outline = [
-    [0, -28], [3.5, -22], [3.5, -8], [27, 5], [27, 10], [3.5, 4], [3.5, 16], [11, 22], [11, 26], [0, 23],
-    [-11, 26], [-11, 22], [-3.5, 16], [-3.5, 4], [-27, 10], [-27, 5], [-3.5, -8], [-3.5, -22],
-  ];
-  ctx.beginPath();
-  outline.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-  ctx.closePath();
-  ctx.lineJoin = 'round';
-  ctx.lineWidth = 5;
-  ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
-  ctx.stroke();
-  ctx.fillStyle = '#fff';
-  ctx.fill();
-  const texture = new THREE.CanvasTexture(canvas);
+// The aircraft icons, one layer per class in the order of AIRCRAFT_CLASSES. Layers of an array
+// texture keep their own mipmaps, so small icons stay smooth and never pick up a neighbour.
+function iconTexture() {
+  const n = AIRCRAFT_CLASSES.length;
+  const layer = ICON_SIZE * ICON_SIZE * 4;
+  const data = new Uint8Array(layer * n);
+  AIRCRAFT_CLASSES.forEach((cls, i) => {
+    const canvas = drawAircraftIcon(cls);
+    data.set(canvas.getContext('2d').getImageData(0, 0, ICON_SIZE, ICON_SIZE).data, i * layer);
+  });
   // Row 0 of the canvas at v = 0, like gl_PointCoord.
-  texture.flipY = false;
+  const texture = new THREE.DataArrayTexture(data, ICON_SIZE, ICON_SIZE, n);
+  texture.generateMipmaps = true;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
   texture.colorSpace = THREE.NoColorSpace;
+  texture.needsUpdate = true;
   return texture;
 }
 
@@ -70,10 +66,12 @@ const AIRCRAFT_VERTEX = /* glsl */ `
   attribute vec3 aColor;
   attribute float aHeading;
   attribute float aScale;
+  attribute float aClass;
   uniform float uSize;
   uniform vec2 uViewport;
   varying vec3 vColor;
   varying float vAngle;
+  varying float vClass;
   void main() {
     vec4 clip = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     // The aircraft's track as a direction on screen: north and east at its position on the
@@ -87,15 +85,17 @@ const AIRCRAFT_VERTEX = /* glsl */ `
     vec2 d = (ahead.xy / ahead.w - clip.xy / clip.w) * uViewport;
     vAngle = atan(d.y, d.x);
     vColor = aColor;
+    vClass = aClass;
     gl_Position = behindGlobe(position) ? vec4(2.0, 2.0, 2.0, 1.0) : clip;
     gl_PointSize = uSize * aScale;
   }
 `;
 
 const AIRCRAFT_FRAGMENT = /* glsl */ `
-  uniform sampler2D uGlyph;
+  uniform highp sampler2DArray uIcons;
   varying vec3 vColor;
   varying float vAngle;
+  varying float vClass;
   void main() {
     // Turn the nose-up glyph to the track's direction on screen.
     vec2 s = vec2(gl_PointCoord.x - 0.5, 0.5 - gl_PointCoord.y);
@@ -103,7 +103,8 @@ const AIRCRAFT_FRAGMENT = /* glsl */ `
     vec2 t = vec2(s.x * cos(a) - s.y * sin(a), s.x * sin(a) + s.y * cos(a));
     vec2 uv = vec2(t.x + 0.5, 0.5 - t.y);
     if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) discard;
-    vec4 g = texture2D(uGlyph, uv);
+    // The icon for this aircraft's class (see iconTexture).
+    vec4 g = texture(uIcons, vec3(uv, floor(vClass + 0.5)));
     if (g.a < 0.04) discard;
     gl_FragColor = vec4(g.rgb * vColor, g.a);
   }
@@ -217,7 +218,7 @@ export function aircraftLayer(globe) {
     uniforms: {
       uSize: { value: 10 },
       uViewport: { value: new THREE.Vector2(1, 1) },
-      uGlyph: { value: planeTexture() },
+      uIcons: { value: iconTexture() },
       uHideRadiusSq: hideUniform(globe),
     },
     vertexShader: AIRCRAFT_VERTEX,
@@ -226,7 +227,7 @@ export function aircraftLayer(globe) {
     depthTest: false,
     depthWrite: false,
   });
-  const cloud = new PointCloud(globe, material, { aColor: 3, aHeading: 1, aScale: 1 }, 10);
+  const cloud = new PointCloud(globe, material, { aColor: 3, aHeading: 1, aScale: 1, aClass: 1 }, 10);
   cloud.setViewport = (w, h) => material.uniforms.uViewport.value.set(w, h);
   return cloud;
 }

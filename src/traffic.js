@@ -7,6 +7,7 @@
 // follow CelesTrak's orbital elements, computed in a worker.
 import { AircraftStore, drawnAltitude, estimatePosition, fromAdsb, fromOpenSky, hiddenByLayers } from './aircraft.js';
 import { aircraftLayer, behindGlobe, flightLine, markerLayer, orbitLine, satelliteLayer, selectionRing } from './trafficlayer.js';
+import { iconLayer, iconScale } from './aircraftclass.js';
 import { destination } from './runwaymap.js';
 import { EARTH_RADIUS_KM, orbitClass, orbitPath, parseTle, periodMinutes, satellitePosition, toGeodetic, toSatrec, tleEpoch } from './orbits.js';
 import { aircraftDetailsHtml, aircraftName, satelliteDetailsHtml } from './trafficview.js';
@@ -609,6 +610,10 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
     out[3 * i + 2] = r * cosLat * Math.cos(lng * RAD);
   }
 
+  // How big an aircraft's sprite is, against the plane size: by its class (airliners bigger, light
+  // aircraft smaller), and everything smaller on the ground.
+  const planeScale = (ac) => iconScale(ac) * (ac.onGround ? 0.7 : 1);
+
   function drawAircraft(now) {
     const show = settings.flights || settings.military;
     if (!show) return;
@@ -636,7 +641,8 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
         attrs.aColor[3 * i] = color[0];
         attrs.aColor[3 * i + 1] = color[1];
         attrs.aColor[3 * i + 2] = color[2];
-        attrs.aScale[i] = ac.onGround ? 0.7 : 1;
+        attrs.aScale[i] = planeScale(ac);
+        attrs.aClass[i] = iconLayer(ac);
         attrs.aHeading[i] = (ac.track ?? 0) * RAD;
       });
     }
@@ -713,7 +719,8 @@ export function setupTraffic({ globe, els, onSelect, onDeselect, onFlightEnds, a
     const planePx = Math.max(6, Math.min(20, 20 * (0.12 / Math.max(altitude, 0.01)) ** 0.35));
     planes.size = planePx * dpr;
     // The plane drawn in the sprite reaches about 0.44 of its width from the middle.
-    lines.setSprite(planePx * 0.44);
+    const selectedPlane = selected?.kind === 'aircraft' ? store.byId.get(selected.id) : null;
+    lines.setSprite(planePx * 0.44 * (selectedPlane ? planeScale(selectedPlane) : 1));
     sats.size = Math.max(2.5, Math.min(5, 4 * (1.2 / Math.max(altitude, 0.05)) ** 0.25)) * dpr;
     ring.size = 34 * dpr;
     marks.size = 26 * dpr;
