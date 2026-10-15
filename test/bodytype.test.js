@@ -11,11 +11,10 @@ describe('bodyType', () => {
     expect(bodyType({ type: ' A333 ' })).toBe('wide');
   });
 
-  it('calls a known airliner type that is not on the list a narrow-body', () => {
-    for (const type of ['A21N', 'B738', 'A320', 'B752', 'E190']) {
-      expect(bodyType({ type, category: 'Large aircraft' }), type).toBe('narrow');
+  it('calls the single-aisle jet airliners narrow-bodies', () => {
+    for (const type of ['A21N', 'A20N', 'B738', 'A320', 'B38M', 'B752', 'E190', 'CRJ9', 'BCS3', 'MD82']) {
+      expect(bodyType({ type }), type).toBe('narrow');
     }
-    expect(bodyType({ type: 'B38M' })).toBe('narrow');
   });
 
   it('falls back on the heavy category when the type is missing', () => {
@@ -30,13 +29,18 @@ describe('bodyType', () => {
     expect(bodyType(null)).toBeNull();
   });
 
-  it('does not call helicopters, light aircraft, military types or unlisted heavies narrow-bodies', () => {
+  it('says nothing of light aircraft, turboprops, business jets, helicopters, military types or unlisted heavies', () => {
+    expect(bodyType({ type: 'C172', category: '' })).toBeNull();
+    expect(bodyType({ type: 'C172' })).toBeNull();
     expect(bodyType({ type: 'R44', category: 'Helicopter' })).toBeNull();
-    expect(bodyType({ type: 'C172', category: 'Light aircraft' })).toBeNull();
+    expect(bodyType({ type: 'AT76', category: 'Large aircraft' })).toBeNull();
+    expect(bodyType({ type: 'DH8D', category: 'Large aircraft' })).toBeNull();
+    expect(bodyType({ type: 'GLF5', category: 'Large aircraft' })).toBeNull();
     expect(bodyType({ type: 'B52', category: 'Heavy aircraft' })).toBeNull();
     expect(bodyType({ type: 'C130', category: 'Large aircraft', military: true })).toBeNull();
     // A wide-body stays one when it is military.
     expect(bodyType({ type: 'C17', military: true })).toBe('wide');
+    expect(bodyType({ type: 'VC25' })).toBe('wide');
   });
 });
 
