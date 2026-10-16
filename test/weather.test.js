@@ -284,6 +284,12 @@ describe('timesAhead', () => {
   it('wraps round to the start as the timeline does', () => {
     expect(timesAhead(times, 2, 3)).toEqual([parseTime(times[3]), parseTime(times[0]), parseTime(times[1])]);
   });
+
+  it('ends at the last step for a play that does not loop', () => {
+    expect(timesAhead(times, 2, 3, { loops: false })).toEqual([parseTime(times[3])]);
+    expect(timesAhead(times, 3, 3, { loops: false })).toEqual([]);
+    expect(timesAhead(times, 0, 2, { loops: false })).toEqual([parseTime(times[1]), parseTime(times[2])]);
+  });
 });
 
 describe('cloudTimes', () => {
@@ -303,6 +309,13 @@ describe('cloudTimes', () => {
   it('does not repeat the image on show, and wraps to the start of the timeline', () => {
     expect(cloudTimes(times, 3, { playing: true, lookahead: 2 })).toEqual({ time: ms(3), ahead: [] });
     expect(cloudTimes(times, 10, { playing: true, lookahead: 3 })).toEqual({ time: ms(9), ahead: [ms(0)] });
+  });
+
+  it('loads nothing from the start of the timeline for a play that ends at its end', () => {
+    // The play the page starts by itself goes back to the present at the end, not to the start.
+    expect(cloudTimes(times, 10, { playing: true, loops: false, lookahead: 3 })).toEqual({ time: ms(9), ahead: [] });
+    expect(cloudTimes(times, 5, { playing: true, loops: false, lookahead: 6 })).toEqual({ time: ms(3), ahead: [ms(6), ms(9)] });
+    expect(cloudTimes(times, 11, { playing: true, loops: false, lookahead: 6 })).toEqual({ time: ms(9), ahead: [] });
   });
 });
 
