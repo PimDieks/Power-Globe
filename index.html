@@ -90,6 +90,8 @@
     </aside>
 
     <aside class="panel side-panel hidden" id="details" aria-labelledby="details-title">
+      <!-- Narrow phones: pulls the panel up to the top bar and back (see phonelayout.js). -->
+      <button class="sheet-handle" type="button" aria-controls="details" aria-expanded="false" aria-label="Panel size"></button>
       <button id="details-back" class="back-button" type="button" hidden>
         <span aria-hidden="true">‹</span> Wind check
       </button>
@@ -110,6 +112,7 @@
     </aside>
 
     <aside class="panel side-panel keep-awake hidden" id="windcheck" aria-labelledby="windcheck-title">
+      <button class="sheet-handle" type="button" aria-controls="windcheck" aria-expanded="false" aria-label="Panel size"></button>
       <div class="details-head">
         <h2 id="windcheck-title" tabindex="-1">Wind check</h2>
         <button id="windcheck-close" class="icon-button" type="button">

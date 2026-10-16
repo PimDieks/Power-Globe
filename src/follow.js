@@ -108,6 +108,19 @@ export function visibleShift({ top, bottom, height, minFree = 80 }) {
 // of the screen: south of it. Keeps clear of the poles.
 export const shiftedLat = (lat, shift, altitude) => Math.max(-85, Math.min(85, lat - shift * LAT_SPAN_PER_ALTITUDE * altitude));
 
+// The same sideways, for a landscape phone where a column of panels covers the right-hand side:
+// how far the middle of the part left free (from `left` to `right`, in pixels) lies left of the
+// middle of the screen, as a share of the screen's HEIGHT, so that it scales like visibleShift.
+export const sideShift = ({ left, right, width, height }) => (width / 2 - (left + right) / 2) / height;
+
+// The longitude to aim the camera at to see `lng` that much (see sideShift) left of the middle of
+// the screen: east of it. A degree of longitude is shorter away from the equator.
+export function shiftedLng(lng, lat, shift, altitude) {
+  if (!shift) return lng;
+  const cos = Math.max(0.2, Math.cos((lat * Math.PI) / 180));
+  return wrapLng(lng + (shift * LAT_SPAN_PER_ALTITUDE * altitude) / cos);
+}
+
 // The camera `elapsed` ms into a glide from `from` to `to`, both { lat, lng, altitude }: slow at
 // both ends, the short way round the globe, and changing height in proportion, which reads as an
 // even zoom.
@@ -138,6 +151,7 @@ export function startFollow(report, pov, now, { reduced = false } = {}) {
     reduced,
     point: null,
     shift: null,
+    shiftX: null,
     shiftAt: now,
     centredAt: -Infinity,
     glide: { from: { lat: pov.lat, lng: pov.lng, altitude: pov.altitude }, altitude, start: now, duration: reduced ? 0 : GLIDE_MS },
@@ -146,22 +160,28 @@ export function startFollow(report, pov, now, { reduced = false } = {}) {
 
 // Where the camera should be for this frame, { lat, lng, altitude }, or null to leave it where it
 // is. `pov` is the camera now, `shift` the share of the screen's height the aircraft should sit
-// above the middle (see visibleShift). Changes `follow`, which startFollow made.
-export function followStep(follow, { report, pov, now, shift = 0 }) {
+// above the middle (see visibleShift), `shiftX` left of it (see sideShift). Changes `follow`,
+// which startFollow made.
+export function followStep(follow, { report, pov, now, shift = 0, shiftX = 0 }) {
   const f = follow;
   if (f.reduced && !f.glide && now - f.centredAt < RECENTRE_MS) return null;
   f.centredAt = now;
   // Each centring with reduced motion is a jump, so there is nothing to smooth.
   f.point = followPoint(f.reduced ? null : f.point, report, now);
   f.shift = f.shift == null || f.reduced ? shift : approach(f.shift, shift, now - f.shiftAt, SHIFT_SMOOTH_S);
+  f.shiftX = f.shiftX == null || f.reduced ? shiftX : approach(f.shiftX, shiftX, now - f.shiftAt, SHIFT_SMOOTH_S);
   f.shiftAt = now;
   if (f.glide) {
     const { from, altitude, start, duration } = f.glide;
-    const to = { lat: shiftedLat(f.point.lat, f.shift, altitude), lng: f.point.lng, altitude: cameraAltitude(altitude, report) };
+    const to = {
+      lat: shiftedLat(f.point.lat, f.shift, altitude),
+      lng: shiftedLng(f.point.lng, f.point.lat, f.shiftX, altitude),
+      altitude: cameraAltitude(altitude, report),
+    };
     const pose = glidePose(from, to, now - start, duration);
     if (pose.done) f.glide = null;
     return { lat: pose.lat, lng: pose.lng, altitude: pose.altitude };
   }
   const altitude = cameraAltitude(pov.altitude, report);
-  return { lat: shiftedLat(f.point.lat, f.shift, altitude), lng: f.point.lng, altitude };
+  return { lat: shiftedLat(f.point.lat, f.shift, altitude), lng: shiftedLng(f.point.lng, f.point.lat, f.shiftX, altitude), altitude };
 }

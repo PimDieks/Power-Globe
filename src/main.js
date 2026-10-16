@@ -36,13 +36,14 @@ import { setupAccessOverlay } from './accessmap.js';
 import { STATUS, assessAirport } from './runways.js';
 import { TRAFFIC_LEGEND, setupTraffic } from './traffic.js';
 import { AIRPORT_ALTITUDE, airportFlightAltitude, setupAirportMap } from './airportmap.js';
-import { DragTracker, dragged, followStep, startFollow, stopReason, shiftedLat, visibleShift } from './follow.js';
+import { DragTracker, dragged, followStep, startFollow, stopReason, sideShift, visibleShift } from './follow.js';
 import { setupPilotView, trafficPov } from './pilotview.js';
 import { CARD_REFRESH_MS, cardText, focusTarget, followLayout, freeArea, spokenDue, spokenText } from './followcard.js';
 import { latestObservation } from './metar.js';
 import { latestTaf } from './taf.js';
 import { explain } from './api.js';
 import { FrameBudget, FrameLoop, FrameMeter, busyNow, pixelRatio, playStep, unattended } from './pacing.js';
+import { onPhone, phoneLandscape, phoneLayout, setupPhoneLayout } from './phonelayout.js';
 
 // Timeline playback speed: three hours of forecast a second, whatever the forecast's step.
 const PLAY_HOURS_PER_SECOND = 3;
@@ -75,9 +76,7 @@ const NO_OVERLAY = { key: 'none', label: 'None' };
 
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const largeScreen = window.innerWidth * window.devicePixelRatio >= 1400;
-const narrowScreen = window.innerWidth < 640;
-// On phones the controls and the details panel share the screen, so only one is open at a time.
-const phoneLayout = window.matchMedia('(max-width: 640px)');
+const narrowScreen = phoneLayout.matches;
 
 const els = {
   globe: document.getElementById('globe'),
@@ -202,7 +201,7 @@ const state = {
 };
 
 // On phones the controls start folded so the globe gets the screen.
-if (narrowScreen) setControlsOpen(false);
+if (onPhone()) setControlsOpen(false);
 
 const fmt = (value, unit) => (value == null ? '–' : `${Math.round(value * 10) / 10} ${unit}`);
 
@@ -1056,6 +1055,7 @@ function setControlsOpen(open) {
   els.controlsBody.hidden = !open;
   els.controlsToggle.setAttribute('aria-expanded', String(open));
   els.controls.classList.toggle('collapsed', !open);
+  // On a landscape phone the menu and the panel column sit side by side, so both can be open.
   if (open && phoneLayout.matches) {
     closeDetails();
     windCheck.close();
@@ -1064,12 +1064,12 @@ function setControlsOpen(open) {
 }
 
 // The details panel and the wind check share one place on screen, so opening one closes the
-// other. On phones they also share it with the controls.
+// other. On phones the menu folds too, leaving the globe the room the panel does not take.
 function openSidePanel({ keepTraffic = false } = {}) {
   state.autoRotate = false;
   controls.autoRotate = false;
   if (!keepTraffic) traffic.deselect();
-  if (phoneLayout.matches) setControlsOpen(false);
+  if (onPhone()) setControlsOpen(false);
 }
 
 // A tapped aircraft or satellite: live details, refreshed every second, with a ring around it.
@@ -1093,6 +1093,9 @@ function showTraffic(item, title) {
   els.detailsTitle.textContent = title;
   renderDetails();
   announce(`${item.kind === 'aircraft' ? 'Flight' : 'Satellite'} ${title} selected.`);
+  // On a phone an aircraft under the panels is brought into view (see phonelayout.js).
+  const reveal = item.kind === 'aircraft' && !state.follow && phone.reveal(traffic.selectedAircraft(), { reduced: reducedMotion });
+  if (reveal) flyTo(reveal.pose, reveal.ms);
 }
 
 // Taps that select an aircraft or satellite should not also open the weather where they landed.
@@ -1154,25 +1157,40 @@ function stopFollowing(message) {
 // How far above the middle of the screen to hold the aircraft: on phones the panel covers the
 // lower part, and the aircraft belongs in the part of the map left above it. Measured twice a
 // second at most.
-let followShift = 0;
+// { shift, shiftX }: shiftX is sideways, on a landscape phone where the full panel is a column on
+// the right (see sideShift).
+let followShift = { shift: 0, shiftX: 0 };
 let followShiftAt = 0;
+let followShiftShape = '';
 // An invisible bar as tall as the notch, to measure it.
 const safeTopProbe = document.createElement('div');
 safeTopProbe.setAttribute('aria-hidden', 'true');
 safeTopProbe.style.cssText = 'position:fixed;top:0;left:0;width:0;height:env(safe-area-inset-top, 0px);visibility:hidden;pointer-events:none';
 document.body.append(safeTopProbe);
 function followShiftNow(now) {
-  if (!phoneLayout.matches) return 0;
+  // Turning the phone moves the panels: measure at once, and jump there rather than glide.
+  const shape = `${onPhone()}:${phoneLandscape.matches}`;
+  if (shape !== followShiftShape) {
+    followShiftShape = shape;
+    followShiftAt = 0;
+    if (state.follow) state.follow.shift = state.follow.shiftX = null;
+  }
+  if (!onPhone()) return { shift: 0, shiftX: 0 };
   if (now - followShiftAt > 500) {
     followShiftAt = now;
-    const { top, bottom } = freeArea({
+    const { top, bottom, right } = freeArea({
       layout: followLayoutNow,
       controlsBottom: els.controls.offsetTop + els.controls.offsetHeight,
       detailsTop: els.details.offsetTop,
       cardTop: els.followCard.offsetTop,
       safeTop: safeTopProbe.offsetHeight,
+      columnLeft: phoneLandscape.matches ? els.details.offsetLeft : null,
+      height: window.innerHeight,
     });
-    followShift = visibleShift({ top, bottom, height: window.innerHeight, minFree: 20 });
+    followShift = {
+      shift: visibleShift({ top, bottom, height: window.innerHeight, minFree: 20 }),
+      shiftX: right == null ? 0 : sideShift({ left: 0, right, width: window.innerWidth, height: window.innerHeight }),
+    };
   }
   return followShift;
 }
@@ -1187,7 +1205,7 @@ function updateFollow() {
     stopFollowing(reason === 'lost' ? `${els.detailsTitle.textContent} is no longer received. Stopped following.` : undefined);
     return;
   }
-  const pose = followStep(follow, { report, pov: globe.pointOfView(), now, shift: followShiftNow(now) });
+  const pose = followStep(follow, { report, pov: globe.pointOfView(), now, ...followShiftNow(now) });
   if (pose) globe.pointOfView(pose);
 }
 
@@ -1224,11 +1242,11 @@ els.detailsFollow.addEventListener('click', () => {
 let followLayoutNow = 'normal';
 let cardAt = -Infinity;
 let cardSpoken = null;
-let narrowNow = phoneLayout.matches;
+let narrowNow = onPhone();
 // Set by the Follow button, so that the card's Stop button gets focus for that follow only.
 let followStarted = false;
 function syncFollowUi() {
-  const narrow = phoneLayout.matches;
+  const narrow = onPhone();
   const resized = narrow !== narrowNow;
   narrowNow = narrow;
   const layout = followLayout({ following: !!state.follow, narrow, expanded: state.followExpanded });
@@ -1252,7 +1270,7 @@ function switchFollowLayout(layout, { resized }) {
   if (!compact) setCreditsOpen(false);
   els.followCard.hidden = layout !== 'card';
   els.detailsMinimise.hidden = layout !== 'panel';
-  els.creditsToggle.hidden = !compact;
+  phone.syncCredits();
   // The measurements were left alone while the panels were away.
   if (!compact) updateLayout();
   const target = focusTarget({ previous, layout, inside, started: followStarted, resized });
@@ -1519,27 +1537,16 @@ function backToWindCheck() {
 // the panel.
 function goToAirport(airport, { stayClose = false, ...options } = {}) {
   const altitude = stayClose ? airportFlightAltitude(globe.pointOfView().altitude) : AIRPORT_ALTITUDE;
-  let lat = airport.lat;
-  if (phoneLayout.matches) {
+  let { lat, lng } = airport;
+  if (onPhone()) {
     // Following ends with the airport, and the controls the card hid must be there to measure.
     stopFollowing();
     syncFollowUi();
     // The controls fold when the panel opens: measure them folded.
     setControlsOpen(false);
-    const top = els.controls.offsetTop + els.controls.offsetHeight;
-    const shift = visibleShift({ top, bottom: window.innerHeight * 0.45, height: window.innerHeight });
-    lat = shiftedLat(lat, shift, altitude);
+    ({ lat, lng } = phone.aim(airport, altitude));
   }
-  // Stop turning first: the camera controls keep the turn's momentum, which would otherwise carry
-  // the view on past the airport after the flight.
-  state.autoRotate = false;
-  controls.autoRotate = false;
-  stopCameraDrift();
-  const duration = reducedMotion ? 0 : 2200;
-  globe.pointOfView({ lat, lng: airport.lng, altitude }, duration);
-  cameraFlightUntil = performance.now() + duration + 100;
-  wakeFrames();
-  setTimeout(stopCameraDrift, duration + 50);
+  flyTo({ lat, lng, altitude }, reducedMotion ? 0 : 2200);
   if (stayClose && panelStays(state.detail, airport)) return;
   // Trying an open airport again keeps the way back to the wind check.
   const again = stayClose && state.detail?.airport?.ident === airport.ident;
@@ -1551,6 +1558,18 @@ function stopCameraDrift() {
   controls.enableDamping = false;
   controls.update();
   controls.enableDamping = true;
+}
+
+// Glide the camera to `pov` over `ms`. Stop turning first: the camera controls keep the turn's
+// momentum, which would otherwise carry the view on past the place after the flight.
+function flyTo(pov, ms) {
+  state.autoRotate = false;
+  controls.autoRotate = false;
+  stopCameraDrift();
+  globe.pointOfView(pov, ms);
+  cameraFlightUntil = performance.now() + ms + 100;
+  wakeFrames();
+  setTimeout(stopCameraDrift, ms + 50);
 }
 
 // The timeline's time, or the current hour before the forecast has loaded.
@@ -1806,6 +1825,8 @@ window.addEventListener('keydown', (event) => {
     els.creditsToggle.focus();
     return;
   }
+  // A sheet pulled up goes back down before it closes.
+  if (phone.collapseSheet()) return;
   const action = escapeAction(state, { following: Boolean(state.follow) });
   if (action === 'stop-following') stopFollowing('Stopped following.');
   else if (action === 'back-to-airport') backToAirport();
@@ -1844,6 +1865,17 @@ function updateLayout() {
   root.setProperty('--controls-bottom', `${els.controls.offsetTop + els.controls.offsetHeight}px`);
   root.setProperty('--timeline-top', `${window.innerHeight - els.timeline.offsetTop}px`);
 }
+const phone = setupPhoneLayout({
+  globe,
+  globeEl: els.globe,
+  controls: els.controls,
+  timeline: els.timeline,
+  sheets: [els.details, els.windCheck.panel],
+  titles: [els.detailsTitle],
+  creditsToggle: els.creditsToggle,
+  collapseControls: () => els.controlsBody.hidden || setControlsOpen(false),
+  closeCredits: () => setCreditsOpen(false),
+});
 const layoutObserver = new ResizeObserver(updateLayout);
 layoutObserver.observe(els.timeline);
 layoutObserver.observe(els.credits);

@@ -103,6 +103,12 @@ describe('freeArea', () => {
   it('is between the controls and the panel otherwise', () => {
     expect(freeArea({ layout: 'normal', ...measured })).toEqual({ top: 120, bottom: 400 });
   });
+
+  it('is the whole height left of the column on a landscape phone', () => {
+    expect(freeArea({ layout: 'panel', safeTop: 0, columnLeft: 474, height: 390, ...measured })).toEqual({ top: 0, bottom: 390, right: 474 });
+    // The card is at the bottom there too.
+    expect(freeArea({ layout: 'card', columnLeft: 474, height: 390, ...measured })).toEqual({ top: 0, bottom: 700 });
+  });
 });
 
 describe('focusTarget', () => {

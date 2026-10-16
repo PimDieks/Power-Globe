@@ -13,6 +13,8 @@ import {
   followStep,
   glidePose,
   shiftedLat,
+  shiftedLng,
+  sideShift,
   startFollow,
   stopReason,
   visibleShift,
@@ -149,6 +151,19 @@ describe('phone shift', () => {
     expect(shiftedLat(52, 0.16, 0.04)).toBeLessThan(shiftedLat(52, 0.16, 0.02));
     expect(shiftedLat(-84, 0.5, 1)).toBe(-85);
   });
+
+  it('measures the sideways shift in screen heights, positive to the left', () => {
+    // 844 by 390, a column from 474 px: the free part's middle is 185 px left of the screen's.
+    expect(sideShift({ left: 0, right: 474, width: 844, height: 390 })).toBeCloseTo(185 / 390, 8);
+    expect(sideShift({ left: 0, right: 844, width: 844, height: 390 })).toBeCloseTo(0, 8);
+  });
+
+  it('aims the camera east of the aircraft, by more nearer the poles', () => {
+    expect(shiftedLng(4, 52, 0, 0.02)).toBe(4);
+    expect(shiftedLng(4, 0, 0.5, 0.02)).toBeCloseTo(4 + 0.5 * 53 * 0.02, 8);
+    expect(shiftedLng(4, 60, 0.5, 0.02)).toBeCloseTo(4 + (0.5 * 53 * 0.02) / 0.5, 8);
+    expect(shiftedLng(179.9, 0, 0.5, 0.02)).toBeLessThan(-179);
+  });
 });
 
 describe('glidePose', () => {
@@ -237,6 +252,16 @@ describe('followStep', () => {
     const pose = followStep(f, { report: ac, pov: close, now: GLIDE_MS + 2, shift: 0.16 });
     expect(pose.lat).toBeCloseTo(52 - 0.16 * 53 * 0.01, 4);
     expect(pose.lng).toBeCloseTo(4, 6);
+  });
+
+  it('puts the aircraft left of the column on a landscape phone', () => {
+    const ac = report({ onGround: true });
+    const close = { lat: 52, lng: 4, altitude: 0.01 };
+    const f = startFollow(ac, close, 0);
+    followStep(f, { report: ac, pov: close, now: GLIDE_MS + 1, shiftX: 0.4 });
+    const pose = followStep(f, { report: ac, pov: close, now: GLIDE_MS + 2, shiftX: 0.4 });
+    expect(pose.lat).toBeCloseTo(52, 6);
+    expect(pose.lng).toBeCloseTo(4 + (0.4 * 53 * 0.01) / Math.cos((52 * Math.PI) / 180), 4);
   });
 
   it('centres at once and then only every few seconds with reduced motion', () => {
