@@ -47,9 +47,11 @@ export const spokenDue = (last, text, now) => !last || (text !== last.text && no
 
 // The part of the screen left free for the aircraft, as { top, bottom } in pixels from the top:
 // above the card or the panel and below the notch (`safeTop`), or below the controls when they
-// are still shown.
-export function freeArea({ layout, controlsBottom, detailsTop, cardTop, safeTop = 0 }) {
+// are still shown. On a landscape phone the full panel is a column on the right (its left edge
+// `columnLeft`): then the free part is the whole height left of it, { top, bottom, right }.
+export function freeArea({ layout, controlsBottom, detailsTop, cardTop, safeTop = 0, columnLeft = null, height = 0 }) {
   if (layout === 'card') return { top: safeTop, bottom: cardTop };
+  if (layout === 'panel' && columnLeft != null) return { top: safeTop, bottom: height, right: columnLeft };
   if (layout === 'panel') return { top: safeTop, bottom: detailsTop };
   return { top: controlsBottom, bottom: detailsTop };
 }
