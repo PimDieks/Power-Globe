@@ -381,9 +381,10 @@ export function startIndex(times, now = Date.now()) {
 }
 
 // The times (ms) of the `count` steps after step `step`, wrapping round to the start as the timeline
-// does when it plays.
-export function timesAhead(times, step, count) {
-  return Array.from({ length: count }, (_, k) => parseTime(times[(step + k + 1) % times.length]));
+// does when it plays round and round (`loops`), else ending at its last step.
+export function timesAhead(times, step, count, { loops = true } = {}) {
+  const ahead = loops ? count : Math.max(0, Math.min(count, times.length - 1 - step));
+  return Array.from({ length: ahead }, (_, k) => parseTime(times[(step + k + 1) % times.length]));
 }
 
 // While the timeline plays, the moving clouds change every three hours rather than every hour: an
@@ -392,15 +393,17 @@ export function timesAhead(times, step, count) {
 export const CLOUD_PLAY_HOURS = 3;
 
 // The time (ms) the moving clouds show at `step`, and while `playing` the times of the next
-// `lookahead` steps to load images for in advance (without repeats). Times before `hourlyBefore`
-// (ms, the present), where every hour has its own image, follow every step while playing too.
-export function cloudTimes(times, step, { playing = false, lookahead = 0, hourlyBefore = -Infinity } = {}) {
+// `lookahead` steps to load images for in advance (without repeats), past the end of the timeline
+// to its start only if the play `loops` (the play the page starts by itself does not). Times before
+// `hourlyBefore` (ms, the present), where every hour has its own image, follow every step while
+// playing too.
+export function cloudTimes(times, step, { playing = false, loops = true, lookahead = 0, hourlyBefore = -Infinity } = {}) {
   const time = parseTime(times[step]);
   if (!playing) return { time, ahead: [] };
   const span = CLOUD_PLAY_HOURS * 3_600_000;
   const floor = (t) => (t < hourlyBefore ? t : Math.floor(t / span) * span);
   const shown = floor(time);
-  const ahead = [...new Set(timesAhead(times, step, lookahead).map(floor))].filter((t) => t !== shown);
+  const ahead = [...new Set(timesAhead(times, step, lookahead, { loops }).map(floor))].filter((t) => t !== shown);
   return { time: shown, ahead };
 }
 

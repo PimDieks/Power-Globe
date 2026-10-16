@@ -12,20 +12,38 @@ const BAND_ALPHA = [0.16, 0.32, 0.55, 0.85];
 // Trails fade on an 8-bit canvas, so they never quite reach zero: with FADE, alpha gets stuck
 // below about 14/255. The layer's shader treats anything that faint as fully transparent.
 const RESIDUE = 0.06;
-// The particles move, and the canvas goes to the graphics card (8 MB at 2048 × 1024), at most this
-// often a second: more would not show, as each upload is all a frame can see of them. A step a
-// little early counts, as frame times jitter.
+// The canvas the trails are painted on: on a large screen 1448 × 724, 4 MB to send to the graphics
+// card for each step, half of 2048 × 1024 and hard to tell from it on the globe (1024 × 512 looked
+// smeared); on a small one, where the globe covers fewer pixels, 1024 × 512 (2 MB). Zoomed in, the
+// screen-sized layer (see screenflow.js) takes over.
+export const WIDTH = 1448;
+export const SMALL_WIDTH = 1024;
+// The particles move, and the canvas goes to the graphics card, at most this often a second: more
+// would not show, as each upload is all a frame can see of them. A step a little early counts, as
+// frame times jitter.
 export const STEPS_PER_SECOND = 30;
-const MIN_STEP_S = 1 / STEPS_PER_SECOND - 0.004;
+// While nobody is using the page (the loop, idle and still modes in pacing.js) at most this often:
+// every frame the globe is drawn when idle, 20 a second (about 80 MB a second at 1448 × 724), so
+// the wind moves on every frame, and every other one while the clouds loop plays (30 a second).
+export const RESTING_STEPS_PER_SECOND = 20;
+const EARLY_S = 0.004;
 // The longest step: a frame of the page's slowest rate (5 a second, see pacing.js), so particles
 // keep their speed then.
 export const MAX_STEP_S = 0.25;
+// A step is moved and drawn in parts of at most this long, each its own short segment, so that the
+// trails curve with the wind however often they are stepped; at most MAX_SUBSTEPS of them.
+export const SUBSTEP_S = 1 / 30;
+export const MAX_SUBSTEPS = Math.ceil(MAX_STEP_S / SUBSTEP_S);
 
-// Motion waiting to be stepped: `pending` seconds plus a frame of `dt`. Returns { pending, step }:
-// the seconds to step now (0 while fewer than a step's worth are waiting) and what is left waiting.
-export function takeStep(pending, dt) {
+// The parts a step of `dt` seconds is moved in (see SUBSTEP_S).
+export const substeps = (dt) => Math.min(MAX_SUBSTEPS, Math.max(1, Math.ceil(dt / SUBSTEP_S - 0.01)));
+
+// Motion waiting to be stepped: `pending` seconds plus a frame of `dt`, at most `perSecond` steps a
+// second. Returns { pending, step }: the seconds to step now (0 while fewer than a step's worth are
+// waiting) and what is left waiting.
+export function takeStep(pending, dt, perSecond = STEPS_PER_SECOND) {
   const total = pending + dt;
-  if (total < MIN_STEP_S) return { pending: total, step: 0 };
+  if (total < 1 / perSecond - EARLY_S) return { pending: total, step: 0 };
   return { pending: 0, step: Math.min(MAX_STEP_S, total) };
 }
 
@@ -47,19 +65,24 @@ export function windGrids(speedSteps, directionSteps) {
   });
 }
 
-// Move a point `seconds` along wind (u, v in km/h). Longitude steps widen towards the
-// poles so motion looks even across the sphere.
-export function advect(lat, lng, u, v, seconds, rate = RATE) {
+// Move a point `seconds` along wind (u, v in km/h), writing [lat, lng] into `out`. Longitude steps
+// widen towards the poles so motion looks even across the sphere.
+export function advectInto(out, lat, lng, u, v, seconds, rate = RATE) {
   const k = seconds * rate;
   const cos = Math.max(0.15, Math.cos(lat * DEG));
   const nextLng = lng + (u * k) / cos;
-  return [lat + v * k, ((((nextLng + 180) % 360) + 360) % 360) - 180];
+  out[0] = lat + v * k;
+  out[1] = ((((nextLng + 180) % 360) + 360) % 360) - 180;
+  return out;
 }
+
+// The same, as a new [lat, lng].
+export const advect = (lat, lng, u, v, seconds, rate = RATE) => advectInto([0, 0], lat, lng, u, v, seconds, rate);
 
 // Glowing particles drifting with the wind, painted with fading trails onto a canvas that
 // wraps the sphere (or, zoomed in, just the area in view) above the colour field.
 export class WindFlow {
-  constructor(globe, { bounds = WORLD, count = 6000, width = 2048, height = width / 2, lineWidth = 1.3, altitude = 0.0016 } = {}) {
+  constructor(globe, { bounds = WORLD, count = 6000, width = WIDTH, height = width / 2, lineWidth = 1, altitude = 0.0016 } = {}) {
     this.globe = globe;
     this.altitude = altitude;
     this.width = width;
@@ -69,6 +92,7 @@ export class WindFlow {
     this.canvas.height = height;
     this.ctx = this.canvas.getContext('2d');
     this.ctx.lineCap = 'round';
+    this.ctx.lineJoin = 'round';
     this.ctx.lineWidth = lineWidth;
 
     this.lat = new Float32Array(count);
@@ -76,6 +100,12 @@ export class WindFlow {
     this.age = new Float32Array(count);
     this.life = new Float32Array(count);
     this.wind = new Float32Array(2);
+    this.next = new Float64Array(2);
+    // Each particle's path in the step being drawn: up to MAX_SUBSTEPS + 1 points (x, y), how many,
+    // and its speed band.
+    this.points = new Float32Array(count * (MAX_SUBSTEPS + 1) * 2);
+    this.drawn = new Uint8Array(count);
+    this.band = new Uint8Array(count);
     // Seconds of motion not stepped yet (see STEPS_PER_SECOND).
     this.pending = 0;
 
@@ -152,58 +182,95 @@ export class WindFlow {
     return lat < south || lat > north ? NaN : ((north - lat) / (north - south)) * this.height;
   }
 
-  // The seconds to step after a frame of `dt`, or 0 if no step is due: at most STEPS_PER_SECOND
-  // steps are taken, shorter frames adding up until one is due.
-  take(dt) {
-    const { pending, step } = takeStep(this.pending, dt);
+  // The seconds to step after a frame of `dt`, or 0 if no step is due: at most `perSecond` steps
+  // are taken, shorter frames adding up until one is due.
+  take(dt, perSecond = STEPS_PER_SECOND) {
+    const { pending, step } = takeStep(this.pending, dt, perSecond);
     this.pending = pending;
     return step;
   }
 
-  // Advance every particle `dt` seconds (see take). `sampleWind(lat, lng, out)` writes the wind's u
-  // and v (km/h) into `out` and returns false where there is no data.
+  // Advance every particle `dt` seconds (see take), in substeps (see SUBSTEP_S), and draw the path
+  // each took. `sampleWind(lat, lng, out)` writes the wind's u and v (km/h) into `out` and returns
+  // false where there is no data.
   step(dt, sampleWind) {
-    const { ctx, width, height, wind } = this;
+    const { ctx, width, height, wind, next, points, drawn, band } = this;
+    // Trails fade with time, however long the step.
     ctx.globalCompositeOperation = 'destination-out';
-    ctx.fillStyle = `rgba(0, 0, 0, ${1 - Math.pow(1 - FADE, dt * 60)})`;
+    ctx.globalAlpha = 1 - Math.pow(1 - FADE, dt * 60);
+    ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, width, height);
     ctx.globalCompositeOperation = 'source-over';
 
-    const paths = BAND_ALPHA.map(() => new Path2D());
+    const n = substeps(dt);
+    const sub = dt / n;
+    const stride = (MAX_SUBSTEPS + 1) * 2;
     for (let i = 0; i < this.lat.length; i++) {
-      this.age[i] += dt;
-      const lat = this.lat[i];
-      const lng = this.lng[i];
-      if (this.age[i] > this.life[i] || !sampleWind(lat, lng, wind) || Number.isNaN(wind[0]) || Number.isNaN(wind[1])) {
-        this.spawn(i);
-        continue;
+      let lat = this.lat[i];
+      let lng = this.lng[i];
+      const o = i * stride;
+      let m = 0;
+      let x0 = this.x(lng);
+      let y0 = this.y(lat);
+      if (!Number.isNaN(x0) && !Number.isNaN(y0)) {
+        points[o] = x0;
+        points[o + 1] = y0;
+        m = 1;
       }
-      const u = wind[0];
-      const v = wind[1];
-      const [nextLat, nextLng] = advect(lat, lng, u, v, dt, this.rate);
-      const x0 = this.x(lng);
-      const x1 = this.x(nextLng);
-      const y0 = this.y(lat);
-      const y1 = this.y(nextLat);
-      if (Math.abs(nextLat) > 85 || Number.isNaN(x1) || Number.isNaN(y1)) {
-        this.spawn(i);
-        continue;
+      let spawned = false;
+      for (let k = 0; k < n; k++) {
+        this.age[i] += sub;
+        if (this.age[i] > this.life[i] || !sampleWind(lat, lng, wind) || Number.isNaN(wind[0]) || Number.isNaN(wind[1])) {
+          spawned = true;
+          break;
+        }
+        if (k === 0) {
+          const speed = Math.hypot(wind[0], wind[1]);
+          let b = 0;
+          while (b < SPEED_BANDS.length && speed >= SPEED_BANDS[b]) b++;
+          band[i] = b;
+        }
+        advectInto(next, lat, lng, wind[0], wind[1], sub, this.rate);
+        const x1 = this.x(next[1]);
+        const y1 = this.y(next[0]);
+        if (Math.abs(next[0]) > 85 || Number.isNaN(x1) || Number.isNaN(y1)) {
+          spawned = true;
+          break;
+        }
+        lat = next[0];
+        lng = next[1];
+        // The path ends where it would streak across the whole map at the date line.
+        if (m > 0 && Math.abs(x1 - x0) >= width / 2) m = -m;
+        if (m > 0) {
+          points[o + m * 2] = x1;
+          points[o + m * 2 + 1] = y1;
+          m++;
+        }
+        x0 = x1;
+        y0 = y1;
       }
-      // Skip the segment that would streak across the whole map at the date line.
-      if (Math.abs(x1 - x0) < width / 2) {
-        const speed = Math.hypot(u, v);
-        let band = 0;
-        while (band < SPEED_BANDS.length && speed >= SPEED_BANDS[band]) band++;
-        paths[band].moveTo(x0, y0);
-        paths[band].lineTo(x1, y1);
+      drawn[i] = Math.abs(m);
+      if (spawned) this.spawn(i);
+      else {
+        this.lat[i] = lat;
+        this.lng[i] = lng;
       }
-      this.lat[i] = nextLat;
-      this.lng[i] = nextLng;
     }
-    paths.forEach((path, band) => {
-      ctx.strokeStyle = `rgba(255, 255, 255, ${BAND_ALPHA[band]})`;
-      ctx.stroke(path);
-    });
+
+    // One path per speed band, so a particle's segments join smoothly.
+    ctx.strokeStyle = '#fff';
+    for (let b = 0; b < BAND_ALPHA.length; b++) {
+      ctx.globalAlpha = BAND_ALPHA[b];
+      ctx.beginPath();
+      for (let i = 0; i < this.lat.length; i++) {
+        if (band[i] !== b || drawn[i] < 2) continue;
+        const o = i * stride;
+        ctx.moveTo(points[o], points[o + 1]);
+        for (let k = 1; k < drawn[i]; k++) ctx.lineTo(points[o + k * 2], points[o + k * 2 + 1]);
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
     this.texture.needsUpdate = true;
   }
 }
