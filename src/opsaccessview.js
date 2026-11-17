@@ -11,6 +11,7 @@ import {
   RED_BELOW,
   RED_MIN_FLOW,
   accessFact,
+  ageText,
   analyseAccess,
   isCovered,
   kindText,
@@ -77,10 +78,10 @@ function roadsHtml(data) {
   if (data.loading) return `${head}<p>Loading road data from NDW…</p>`;
   if (data.unavailable) return `${head}<p class="ops-empty">No road data right now. ${escapeHtml(data.unavailable)}.</p><p class="ops-note">${SOURCE_TEXT}.</p>`;
   if (data.error) return `${head}<p class="ops-empty">Road data did not load (${escapeHtml(data.error)}). It tries again by itself.</p><p class="ops-note">${SOURCE_TEXT}.</p>`;
-  const age = data.ageMin < 1 ? 'less than a minute' : plural(data.ageMin, 'minute');
+  const age = data.ageMin < 1 ? 'less than a minute' : data.ageMin < 60 ? plural(data.ageMin, 'minute') : ageText(data.ageMin);
   const warnings = [];
-  if (data.stale) warnings.push(`The API could not reach its road source and is showing its last answer, ${data.ageMin} min old.`);
-  if (!data.speedOk) warnings.push(Number.isFinite(data.data.measuredAt) ? (data.old ? `There is no recent speed data (the newest is ${data.ageMin} min old), so nothing can be said of how fast the roads flow.` : 'The speed data has nothing to say yet, so nothing can be said of how fast the roads flow.') : 'There is no speed data, so nothing can be said of how fast the roads flow.');
+  if (data.stale) warnings.push(`The API could not reach its road source and is showing its last answer, ${ageText(data.ageMin)} old.`);
+  if (!data.speedOk) warnings.push(Number.isFinite(data.data.measuredAt) ? (data.old ? `There is no recent speed data (the newest is ${ageText(data.ageMin)} old), so nothing can be said of how fast the roads flow.` : 'The speed data has nothing to say yet, so nothing can be said of how fast the roads flow.') : 'There is no speed data, so nothing can be said of how fast the roads flow.');
   if (data.problem) warnings.push(`The last update failed (${data.problem}); this is the last answer.`);
   return `${head}${warnings.map((w) => `<p class="access-old"><b>${escapeHtml(w)}</b></p>`).join('')}
     <h5>Jams and incidents within ${data.data.radiusKm} km</h5>

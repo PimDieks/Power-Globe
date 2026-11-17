@@ -11,6 +11,7 @@ import {
   RED_BELOW,
   RED_MIN_FLOW,
   accessFact,
+  ageText,
   analyseAccess,
   bandCounts,
   isCovered,
@@ -273,11 +274,20 @@ describe('the fact for the summary', () => {
 
   it('says the roads flow only where the speed data is fresh and has something to say; closures do not change that', () => {
     expect(fact(data())).toMatchObject({ text: 'Roads flowing', status: 'ok' });
-    expect(fact(data(), NOW + 20 * 60_000)).toEqual({ text: 'No speed data', status: 'unknown' });
+    expect(fact(data(), NOW + 20 * 60_000)).toEqual({ text: 'Road speeds 23 min old', status: 'unknown' });
     expect(fact(data({ measuredAt: null }))).toEqual({ text: 'No speed data', status: 'unknown' });
     expect(fact(data({ chains: [chain('A4', 'r', [[null, 0]])] }))).toEqual({ text: 'No speed data', status: 'unknown' });
     // An incident is still said without speed data.
     expect(fact(data({ measuredAt: null, situations: [item('accident')] })).text).toBe('Accident on A20, 7 km out');
+  });
+
+  it('says how old frozen speeds are, in hours or days once they are that old', () => {
+    expect(fact(data(), NOW + 5 * 3600_000)).toEqual({ text: 'Road speeds 5 h old', status: 'unknown' });
+    expect(fact(data(), NOW + 12 * 24 * 3600_000)).toEqual({ text: 'Road speeds 12 days old', status: 'unknown' });
+    expect([0, 59, 60, 47 * 60, 48 * 60, 17280].map(ageText)).toEqual(['0 min', '59 min', '1 h', '47 h', '2 days', '12 days']);
+    const body = accessBodyHtml(analyse(ok(data()), EHAM, NOW + 12 * 24 * 3600_000));
+    expect(body).toContain('There is no recent speed data (the newest is 12 days old)');
+    expect(body).toContain('Speed data from 12 days ago.');
   });
 
   it('gives the time the fact is of, so that the summary greys it when it gets old', () => {
