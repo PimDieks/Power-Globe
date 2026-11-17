@@ -30,6 +30,14 @@ export const N_MIN_SITES = 3;
 // Road data older than this (minutes) is not taken for the state of the roads now. NDW's own
 // readings are typically 4 to 6 minutes old when they reach the page.
 export const OLD_MIN = 15;
+
+// An age in minutes as people say it: "23 min", "5 h", "12 days". Road speeds that froze for days
+// are better said in days than as 17280 min.
+export function ageText(min) {
+  if (min < 60) return `${min} min`;
+  if (min < 48 * 60) return `${Math.round(min / 60)} h`;
+  return `${Math.round(min / (24 * 60))} days`;
+}
 // Neighbouring sites of one road further apart than this (km) are not joined, and unsided sites
 // join when this close.
 export const ADJACENT_KM = 2.5;
@@ -294,6 +302,8 @@ export function accessFact(data) {
     const o = nearest(data.obstructions);
     return { text: `Vehicle on ${o.road}, ${Math.round(o.distKm)} km out`, status: 'caution', asOf };
   }
+  // Old speeds are said to be old, with how old, so a frozen feed is not taken for an empty one.
+  if (data.old && Number.isFinite(data.data.measuredAt)) return { text: `Road speeds ${ageText(data.ageMin)} old`, status: 'unknown' };
   if (!data.speedOk) return { text: 'No speed data', status: 'unknown' };
   return { text: 'Roads flowing', status: 'ok', asOf: data.data.measuredAt };
 }
