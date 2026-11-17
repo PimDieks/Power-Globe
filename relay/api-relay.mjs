@@ -19,8 +19,9 @@
 // FLIGHT_RELAY_KEY; PORT (default 8788); HOST (default 127.0.0.1, for a tunnel on this
 // machine); NDW=1 to switch on the road traffic job (see below), NDW_SITES, where its list of
 // measurement sites is (a file or an address; default the one published with the site), and
-// NDW_SITES_CACHE, where it keeps a copy of that list for when the download fails (default in the
-// service's state directory, else the temporary directory). Needs
+// NDW_SITES_CACHE, where it keeps a copy of that list for when the download fails, and the list it
+// builds itself when NDW changes its sites (default in the service's state directory, else the
+// temporary directory). Needs
 // Node.js 18 or newer and nothing else. See "Flight relay for the API" in the README.
 //
 // Road traffic: with NDW=1 the relay also reads the open data of NDW (the Dutch road traffic
@@ -30,6 +31,7 @@
 // within 25 km of each airport, and gives that small answer at /ndw/<ICAO>. Source: NDW.
 
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -80,6 +82,10 @@ export const MIN_LANE_FLOW = 120;
 // Fewer of the sites of the list than this share reporting in the speed file means the file or the
 // list is not what it should be, and nothing is published from it.
 const NDW_MIN_MATCH = 0.5;
+// More of the sites of the list than this share with a new version in the speed file means NDW
+// changed its sites, and the job builds a new list (at most once in NDW_REBUILD_GAP_MS).
+const NDW_REBUILD_SHARE = 0.1;
+export const NDW_REBUILD_GAP_MS = 6 * 3600_000;
 // Obstructions older than this are not news; a public event matters this near in time; maintenance
 // that ends within this long is "planned" (a count only).
 const OBSTRUCTION_MAX_AGE_MS = 3 * 3600_000;
@@ -236,7 +242,140 @@ export function prepareSites(file) {
     lon,
     sites: sites.filter((s) => distanceKm(lat, lon, s.lat, s.lon) <= radiusKm),
   }));
-  return { sites, byId: new Map(sites.map((s) => [s.id, s])), airports, radiusKm };
+  return { sites, byId: new Map(sites.map((s) => [s.id, s])), airports, radiusKm, built: typeof file.built === 'string' ? file.built : '' };
+}
+
+// ---- Building the site list from NDW's national list ----
+// scripts/build-ndw-sites.mjs builds public/data/ndw-sites.json with these, and the road traffic job
+// uses them to build a new list by itself when NDW gives many sites a new version (see createNdwJob).
+
+export const NDW_SITE_LIST = 'snelheden_en_intensiteiten_configuratie_meetlocaties.xml.gz';
+// The national list is about 147 MB of XML and the speed file 70 MB: a build gets this long.
+const NDW_BUILD_TIMEOUT_MS = 10 * 60_000;
+
+// A file or an address as a stream of its text, unzipped when the name ends in .gz.
+async function openSource(source, fetchFn = fetch, timeoutMs = NDW_BUILD_TIMEOUT_MS) {
+  let stream;
+  if (/^https?:\/\//.test(source)) {
+    const res = await fetchFn(source, {
+      headers: { 'user-agent': 'power-globe-api-relay (https://github.com/PimDieks/Power-Globe)' },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) throw new Error(`${source} answered ${res.status}`);
+    stream = Readable.fromWeb(res.body);
+  } else stream = createReadStream(source);
+  return /\.gz$/.test(source) ? pipeline(stream, createGunzip(), () => {}) : stream;
+}
+
+// What a site's id and name say of its road. NDW names no road in the list; the national roads of
+// Rijkswaterstaat have it in the id (`0041hrl0322ra`: road 004, A4; main carriageway "hr" or
+// connecting road "vw"; side l or r, which way the hectometre numbers run, as seen from the road;
+// position 0322 = 32.2 km; lane group), the provinces' sites in the name ("N463 km 2.736 Li").
+// The number is an A road if it is one of the motorways of the Netherlands (MOTORWAYS) and an N road
+// otherwise, so that N46 is not taken for an A road.
+export const MOTORWAYS = new Set([1, 2, 4, 5, 6, 7, 8, 9, 10, 12, 13, 15, 16, 18, 20, 22, 27, 28, 29, 30, 31, 32, 35, 37, 38, 44, 50, 58, 59, 65, 67, 73, 74, 76, 77, 78, 79]);
+
+export function siteRoadOf(id, name) {
+  let m = /^RWS01_MONIBAS_(\d{3})\d(hr|vw)([a-z])(\d{4})/.exec(id) ?? /^(\d{3})(hr|vw)([a-z])(\d{4,6})/.exec(name ?? '');
+  if (m) {
+    const number = Number(m[1]);
+    const side = m[2] === 'hr' ? (m[3] === 'l' ? 'l' : m[3] === 'r' ? 'r' : null) : null;
+    return { road: `${MOTORWAYS.has(number) ? 'A' : 'N'}${number}`, side, position: Number(m[4]), connecting: m[2] === 'vw' };
+  }
+  m = /^(N\d{2,3})\s+km\s+([\d.]+)\s+(Li|Re)\b/.exec(name ?? '');
+  if (m) return { road: m[1], side: m[3] === 'Li' ? 'l' : 'r', position: Number(m[2]), connecting: false };
+  m = /^(N\d{2,3})\b/.exec(name ?? '');
+  if (m) return { road: m[1], side: null, position: null, connecting: false };
+  return null;
+}
+
+// An id as its prefix (up to the second underscore, if it has two) and the rest.
+export function splitId(id) {
+  const at = id.indexOf('_', id.indexOf('_') + 1);
+  return at < 0 ? ['', id] : [id.slice(0, at + 1), id.slice(at + 1)];
+}
+
+// Streams the national list and gives the sites within `radiusKm` of an airport, with their lanes.
+export async function readSites(source, airports, radiusKm = NDW_RADIUS_KM, fetchFn = fetch) {
+  const sites = [];
+  let total = 0;
+  await readElements(await openSource(source, fetchFn), 'roa:measurementSite', (xml) => {
+    total++;
+    const lat = Number(/<loc:latitude>([-\d.]+)</.exec(xml)?.[1]);
+    const lon = Number(/<loc:longitude>([-\d.]+)</.exec(xml)?.[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    if (!Object.values(airports).some(([a, o]) => distanceKm(a, o, lat, lon) <= radiusKm)) return;
+    const head = /<roa:measurementSite id="([^"]+)" version="([^"]*)"/.exec(xml);
+    if (!head) return;
+    const [, id, version] = head;
+    const name = /<roa:measurementSiteName>.*?<com:value(?: [^>]*)?>([^<]*)</s.exec(xml)?.[1] ?? null;
+    // The "any vehicle" flow and speed of each lane, in the order the lanes come.
+    const speeds = [];
+    const flows = [];
+    for (const m of xml.matchAll(/<roa:measurementSpecificCharacteristics index="(\d+)"><roa:measurementSpecificCharacteristics>(.*?)<\/roa:measurementSpecificCharacteristics><\/roa:measurementSpecificCharacteristics>/gs)) {
+      if (!m[2].includes('<com:vehicleType>anyVehicle<')) continue;
+      const kind = /<roa:specificMeasurementValueType>(\w+)</.exec(m[2])?.[1];
+      if (kind === 'trafficSpeed') speeds.push(Number(m[1]));
+      else if (kind === 'trafficFlow') flows.push(Number(m[1]));
+    }
+    // A lane needs both: speed only counts where there is flow.
+    if (!speeds.length || speeds.length !== flows.length) return;
+    sites.push({ id, version, name, lat, lon, lanes: speeds.map((s, i) => [s, flows[i]]) });
+  });
+  return { sites, total };
+}
+
+// The ids of the sites that report in the live speed file.
+export async function readLiveIds(source, fetchFn = fetch) {
+  const ids = new Set();
+  await readElements(await openSource(source, fetchFn), 'roa:siteMeasurements', (xml) => {
+    const id = /measurementSiteReference[^>]*\sid="([^"]+)"/.exec(xml.slice(0, 400))?.[1];
+    if (id) ids.add(id);
+  });
+  return ids;
+}
+
+// The site list for `airports` ({ icao: [lat, lon] }) in the form of public/data/ndw-sites.json:
+// the sites of the national list `list` within the radius that also report in the speed file
+// `speeds` (unless `live` is false), on a road with a name, leaving out slip roads.
+export async function buildSiteList({ airports, list = NDW_BASE + NDW_SITE_LIST, speeds = NDW_BASE + NDW_FILES.speeds, live = true, built = new Date().toISOString().slice(0, 10), fetchFn = fetch, log = console.log } = {}) {
+  const { sites: all, total } = await readSites(list, airports, NDW_RADIUS_KM, fetchFn);
+  log(`${total} sites in the list, ${all.length} with speed and flow within ${NDW_RADIUS_KM} km`);
+  let kept = all;
+  if (live) {
+    const ids = await readLiveIds(speeds, fetchFn);
+    kept = all.filter((s) => ids.has(s.id));
+    log(`${ids.size} sites in the live file, ${kept.length} of ours report`);
+  }
+  const named = kept.map((s) => ({ ...s, ...siteRoadOf(s.id, s.name) })).filter((s) => s.road);
+  const sites = named.filter((s) => !s.connecting);
+  log(`${named.length} of those have a road, ${sites.length} on a main carriageway or provincial road (slip roads and connecting roads are left out)`);
+
+  const patterns = [];
+  const patternIndex = new Map();
+  // Most ids begin alike (RWS01_MONIBAS_), so each is a prefix number and the rest.
+  const counts = new Map();
+  for (const s of sites) counts.set(splitId(s.id)[0], (counts.get(splitId(s.id)[0]) ?? 0) + 1);
+  const common = new Set([...counts].filter(([, n]) => n >= 20).map(([p]) => p));
+  const prefixes = [];
+  const rows = sites.map((s) => {
+    const key = JSON.stringify(s.lanes);
+    if (!patternIndex.has(key)) patternIndex.set(key, patterns.push(s.lanes) - 1);
+    const [prefix, rest] = common.has(splitId(s.id)[0]) ? splitId(s.id) : ['', s.id];
+    if (!prefixes.includes(prefix)) prefixes.push(prefix);
+    return [prefixes.indexOf(prefix), rest, Math.round(s.lat * 1e5) / 1e5, Math.round(s.lon * 1e5) / 1e5, s.road, s.side ?? '', s.position, s.version, patternIndex.get(key)];
+  });
+  return {
+    version: 2,
+    source: 'NDW, https://opendata.ndw.nu/ (measurement sites of snelheden_en_intensiteiten)',
+    built,
+    radiusKm: NDW_RADIUS_KM,
+    airports,
+    fields: ['prefix', 'rest of id', 'lat', 'lon', 'road', 'side (l or r, where the numbers run along the road)', 'position along the road', 'version of the site', 'lanes pattern'],
+    prefixes,
+    patterns,
+    sites: rows,
+  };
 }
 
 const DELAY_MIN = (seconds) => (Number.isFinite(seconds) ? Math.round(seconds / 60) : null);
@@ -490,6 +629,13 @@ async function readFeed(fetchFn, name, since, read, timeoutMs) {
 // an address (a copy of what is downloaded is kept at `cachePath`, for when the download fails);
 // `get(icao)` gives the newest answer as an object, or null. Nothing is published until both files
 // have been read once, so that an answer never says "roads flowing" for want of data.
+//
+// NDW gives a site a new version when its lanes may have changed, and a reading is only used when
+// its version is the one in the list. When more than NDW_REBUILD_SHARE of the sites have a new
+// version, the job builds a new list from NDW's national list in the background (`rebuild`, at most
+// once in `rebuildGapMs`), reads with it from the next minute and keeps it at `cachePath`. On a
+// restart that copy is used instead of `sitesSource` while it is the newer of the two, so a list
+// built here is not swapped back for the older published one.
 export function createNdwJob({
   sitesSource = NDW_SITES_URL,
   cachePath = null,
@@ -500,6 +646,8 @@ export function createNdwJob({
   log = console.log,
   intervalMs = NDW_INTERVAL_MS,
   timeoutMs = NDW_TIMEOUT_MS,
+  rebuild = (airports) => buildSiteList({ airports, built: new Date(now()).toISOString(), fetchFn, log: (m) => log(`NDW: building: ${m}`) }),
+  rebuildGapMs = NDW_REBUILD_GAP_MS,
 } = {}) {
   let prepared = null;
   let timer = null;
@@ -508,25 +656,72 @@ export function createNdwJob({
   const answers = new Map();
   // The failures in a row, if the last read failed: logged once when they start and once when they end.
   let outage = null;
+  // Sites with a new version in the speed file: as last logged, and as last read.
   let drift = 0;
+  let drifted = 0;
+  // A build of a new site list: the one under way, when the last began, and its result until the
+  // next refresh takes it up.
+  let rebuilding = null;
+  let lastRebuild = null;
+  let pending = null;
+
+  async function getSource() {
+    if (!/^https?:\/\//.test(sitesSource)) return read(sitesSource, 'utf8');
+    const r = await fetchFn(sitesSource, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!r.ok) throw new Error(`${sitesSource} answered ${r.status}`);
+    return r.text();
+  }
 
   async function loadSites() {
-    let raw;
-    if (/^https?:\/\//.test(sitesSource)) {
+    let source = null;
+    let failure = null;
+    try {
+      const raw = await getSource();
+      source = { raw, prepared: prepareSites(JSON.parse(raw)) };
+    } catch (err) {
+      if (!cachePath) throw err;
+      failure = err;
+    }
+    let kept = null;
+    if (cachePath) {
       try {
-        raw = await fetchFn(sitesSource, { signal: AbortSignal.timeout(timeoutMs) }).then((r) => {
-          if (!r.ok) throw new Error(`${sitesSource} answered ${r.status}`);
-          return r.text();
-        });
-        prepared = prepareSites(JSON.parse(raw));
-        if (cachePath) await write(cachePath, raw).catch((err) => log(`NDW: could not keep a copy of the site list (${err.message})`));
-      } catch (err) {
-        if (!cachePath) throw err;
-        prepared = prepareSites(JSON.parse(await read(cachePath, 'utf8').catch(() => Promise.reject(err))));
-        log(`NDW: ${err.message}; using the copy of the site list kept at ${cachePath}`);
+        const raw = await read(cachePath, 'utf8');
+        kept = { raw, prepared: prepareSites(JSON.parse(raw)) };
+      } catch {
+        kept = null;
       }
-    } else prepared = prepareSites(JSON.parse(await read(sitesSource, 'utf8')));
+    }
+    if (!source && !kept) throw failure;
+    if (source && (!kept || source.prepared.built >= kept.prepared.built)) {
+      prepared = source.prepared;
+      if (cachePath && /^https?:\/\//.test(sitesSource) && source.raw !== kept?.raw) await write(cachePath, source.raw).catch((err) => log(`NDW: could not keep a copy of the site list (${err.message})`));
+    } else {
+      prepared = kept.prepared;
+      log(
+        failure
+          ? `NDW: ${failure.message}; using the copy of the site list kept at ${cachePath}`
+          : `NDW: using the site list kept at ${cachePath} (built ${kept.prepared.built}), which is newer than ${sitesSource} (built ${source.prepared.built || 'at an unknown time'})`,
+      );
+    }
     log(`NDW: ${prepared.sites.length} measurement sites for ${prepared.airports.map((a) => a.icao).join(', ')}`);
+  }
+
+  function startRebuild() {
+    if (rebuilding || (lastRebuild != null && now() - lastRebuild < rebuildGapMs)) return;
+    lastRebuild = now();
+    const airports = Object.fromEntries(prepared.airports.map((a) => [a.icao, [a.lat, a.lon]]));
+    log(`NDW: ${drifted} of the ${prepared.sites.length} sites have a new version; building a new site list from NDW's national list`);
+    rebuilding = (async () => {
+      const file = await rebuild(airports);
+      const next = prepareSites(file);
+      pending = next;
+      log(`NDW: built a new site list of ${next.sites.length} sites; reading with it from the next minute`);
+      if (cachePath) await write(cachePath, JSON.stringify(file)).catch((err) => log(`NDW: could not keep a copy of the new site list (${err.message})`));
+    })()
+      .catch((err) => log(`NDW: could not build a new site list (${err.message}); trying again in ${Math.round(rebuildGapMs / 3600_000)} h if the versions still differ`))
+      .finally(() => {
+        rebuilding = null;
+      });
   }
 
   async function readSpeeds() {
@@ -563,6 +758,7 @@ export function createNdwJob({
     );
     if (got.unchanged) return false;
     const { readings, publishedAt, mismatched } = got.result;
+    drifted = mismatched;
     if (readings.size < prepared.sites.length * NDW_MIN_MATCH) {
       throw new Error(`the speed file has readings for only ${readings.size} of the ${prepared.sites.length} sites${mismatched ? ` (${mismatched} changed version)` : ''}`);
     }
@@ -628,9 +824,18 @@ export function createNdwJob({
     running = true;
     try {
       if (!prepared) await loadSites();
+      if (pending) {
+        prepared = pending;
+        pending = null;
+        // Read the speed file again even if it has not changed: the new list reads more of it.
+        state.speeds.since = null;
+        drift = 0;
+        drifted = 0;
+      }
       const results = await Promise.allSettled([readSpeeds(), readSituations()]);
       const failed = results.map((r, i) => (r.status === 'rejected' ? `${['speeds', 'situations'][i]}: ${r.reason?.message ?? r.reason}` : null)).filter(Boolean);
       if (results.some((r) => r.status === 'fulfilled' && r.value)) publish();
+      if (drifted > prepared.sites.length * NDW_REBUILD_SHARE) startRebuild();
       if (failed.length) noteFailure(failed.join('; '));
       else if (outage) {
         log(`NDW: reading again after ${outage.failures} failed ${outage.failures === 1 ? 'minute' : 'minutes'}`);
@@ -655,6 +860,8 @@ export function createNdwJob({
     },
     airports: () => prepared?.airports.map((a) => a.icao) ?? [],
     ready: () => prepared != null,
+    // The build of a new site list under way, if any (for tests).
+    whenRebuilt: () => rebuilding ?? Promise.resolve(),
     get: (icao) => answers.get(icao) ?? null,
   };
 }

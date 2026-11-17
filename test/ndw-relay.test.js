@@ -6,9 +6,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MIN_LANE_FLOW,
   NDW_FILES,
+  NDW_REBUILD_GAP_MS,
   NDW_TIMEOUT_MS,
   addHeadings,
   airportAnswer,
+  buildSiteList,
   compassOf,
   createNdwJob,
   createRelay,
@@ -301,6 +303,23 @@ describe('the sites near the airports (build-ndw-sites)', () => {
     expect(sites[0]).toMatchObject({ name: 'Michiel de Ruijtertunnel Richting West', version: '19', lanes: [[12, 6], [24, 18]] });
   });
 
+  it('builds the list in the form the relay reads: sites that report now, on a named road, no slip roads', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'ndw-'));
+    const ids = ['RWS01_MONIBAS_0041hrl0322ra', 'RWS01_MONIBAS_0041hrr0322ra', 'RWS01_MONIBAS_0041vwp0322ra', 'RWS01_MONIBAS_0041hrl0400ra'];
+    const list = join(dir, 'list.xml.gz');
+    await writeFile(list, gzipSync(`<x>${ids.map((id, i) => moved(52.31 + i / 100, 4.77, id)).join('')}${moved(51.0, 5.0, 'RWS01_MONIBAS_0021hrl0010ra')}</x>`));
+    const speeds = join(dir, 'speeds.xml');
+    // The last site on the list does not report now.
+    await writeFile(speeds, `<mc>${ids.slice(0, 3).map((id) => `<roa:siteMeasurements><roa:measurementSiteReference targetClass="roa:MeasurementSite" id="${id}" version="19"/></roa:siteMeasurements>`).join('')}</mc>`);
+    const file = await buildSiteList({ airports: { EHAM: [52.3086, 4.7639] }, list, speeds, built: '2026-11-17', log: () => {} });
+    expect(file).toMatchObject({ version: 2, built: '2026-11-17', radiusKm: 25, airports: { EHAM: [52.3086, 4.7639] }, patterns: [[[12, 6], [24, 18]]] });
+    expect(file.sites.map((r) => [file.prefixes[r[0]] + r[1], r[4], r[5], r[6], r[7]])).toEqual([
+      ['RWS01_MONIBAS_0041hrl0322ra', 'A4', 'l', 322, '19'],
+      ['RWS01_MONIBAS_0041hrr0322ra', 'A4', 'r', 322, '19'],
+    ]);
+    expect(prepareSites(file).airports[0].sites).toHaveLength(2);
+  });
+
   it('names a road from the id or the name, and the side the numbers run', () => {
     expect(roadOf('RWS01_MONIBAS_0041hrl0322ra', '0041hrl0322ra')).toEqual({ road: 'A4', side: 'l', position: 322, connecting: false });
     expect(roadOf('RWS01_MONIBAS_0100vwp0308ra', '0100vwp0308ra')).toMatchObject({ road: 'A10', connecting: true });
@@ -357,7 +376,10 @@ describe('the road job', () => {
       return new Response(plain.includes(name) ? docs[name] : gzipSync(docs[name]), { headers: { 'last-modified': lastModified } });
     });
   }
-  const make = (fetchFn, over = {}) => createNdwJob({ sitesSource: SITES, fetchFn, now: () => NOW, log: vi.fn(), ...over });
+  const make = (fetchFn, over = {}) => createNdwJob({ sitesSource: SITES, fetchFn, now: () => NOW, log: vi.fn(), rebuild: vi.fn(async () => Promise.reject(new Error('no builds here'))), ...over });
+  // The speed file once NDW has given the two Amsterdam sites a new version.
+  const newVersions = () => speedsDoc(MEASUREMENT_XML.replace('version="19"', 'version="20"') + second.replace('version="19"', 'version="20"'));
+  const withSites = (list) => vi.fn(async (url, init) => (url === SITES ? new Response(JSON.stringify(list)) : feeds()(url, init)));
 
   it('reads the files, keeps what is near each airport and answers for it', async () => {
     const log = vi.fn();
@@ -535,6 +557,64 @@ describe('the road job', () => {
     await job.refresh();
     expect(read).toHaveBeenCalledWith('/data/ndw-sites.json', 'utf8');
     expect(job.get('EHAM')).not.toBeNull();
+  });
+
+  it('builds a new site list when many sites have a new version, reads with it from the next minute and keeps it', async () => {
+    const log = vi.fn();
+    const write = vi.fn(async () => {});
+    const rebuilt = { ...siteList, built: '2026-10-14T19:40:00.000Z', sites: siteList.sites.map((r) => (r[1] === 'FAR_1' ? r : [...r.slice(0, 7), '20', r[8]])) };
+    const rebuild = vi.fn(async () => rebuilt);
+    const job = make(feeds({ bodies: { [NDW_FILES.speeds]: newVersions() } }), { log, write, rebuild, cachePath: '/state/ndw-sites.json' });
+    await job.refresh();
+    // None of the sites can be read with the old list, so nothing is published from it.
+    expect(job.get('EHAM')).toBeNull();
+    expect(rebuild).toHaveBeenCalledWith({ EHAM: [52.3086, 4.7639], EHRD: [51.9569, 4.4372] });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('2 of the 3 sites have a new version; building a new site list'));
+    await job.whenRebuilt();
+    expect(write).toHaveBeenLastCalledWith('/state/ndw-sites.json', JSON.stringify(rebuilt));
+    await job.refresh();
+    expect(job.get('EHAM').chains.map((c) => c.pts[0].slice(2))).toEqual([[49, 360], [49, 360]]);
+    expect(rebuild).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds at most once in six hours, says so when a build fails, and does not build when the versions match', async () => {
+    let t = NOW;
+    const log = vi.fn();
+    const rebuild = vi.fn(async () => Promise.reject(new Error('NDW is down')));
+    const job = make(feeds({ bodies: { [NDW_FILES.speeds]: newVersions() } }), { log, rebuild, now: () => t });
+    await job.refresh();
+    await job.whenRebuilt();
+    expect(log).toHaveBeenCalledWith('NDW: could not build a new site list (NDW is down); trying again in 6 h if the versions still differ');
+    t += NDW_REBUILD_GAP_MS - 60_000;
+    await job.refresh();
+    await job.whenRebuilt();
+    expect(rebuild).toHaveBeenCalledTimes(1);
+    t += 60_000;
+    await job.refresh();
+    await job.whenRebuilt();
+    expect(rebuild).toHaveBeenCalledTimes(2);
+
+    const calm = vi.fn();
+    const steady = make(feeds(), { rebuild: calm });
+    await steady.refresh();
+    expect(calm).not.toHaveBeenCalled();
+  });
+
+  it('starts from the list it built itself while that is newer than the published one, and from the published one after', async () => {
+    const kept = { ...siteList, built: '2026-11-16T10:00:00.000Z' };
+    const read = vi.fn(async () => JSON.stringify(kept));
+    const write = vi.fn(async () => {});
+    const log = vi.fn();
+    const older = make(withSites({ ...siteList, built: '2026-11-01' }), { cachePath: '/state/ndw-sites.json', read, write, log });
+    await older.refresh();
+    expect(log).toHaveBeenCalledWith('NDW: using the site list kept at /state/ndw-sites.json (built 2026-11-16T10:00:00.000Z), which is newer than https://sites.example/ndw-sites.json (built 2026-11-01)');
+    expect(write).not.toHaveBeenCalled();
+    expect(older.get('EHAM')).not.toBeNull();
+
+    const published = { ...siteList, built: '2026-11-20' };
+    const newer = make(withSites(published), { cachePath: '/state/ndw-sites.json', read, write });
+    await newer.refresh();
+    expect(write).toHaveBeenCalledWith('/state/ndw-sites.json', JSON.stringify(published));
   });
 });
 
